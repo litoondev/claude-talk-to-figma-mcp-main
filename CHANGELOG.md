@@ -1,0 +1,309 @@
+# Changelog
+
+📖 [**Commands**](COMMANDS.md) | 🚀 [**Installation**](INSTALLATION.md) | 🛠️ [**Contributing**](CONTRIBUTING.md) | 🆘 [**Troubleshooting**](TROUBLESHOOTING.md) | 📜 [**Changelog**](CHANGELOG.md)
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [1.2.0] - 2026-08-16
+
+### Added
+- **🔑 Automatic file-key resolution — no more pasting file URLs**: `fileKey` is now optional on every comment tool. When omitted, the server asks the connected Figma plugin which file is open and uses that. `get_my_comments` with no arguments at all defaults to the open file.
+  - New plugin command `get_file_key` (`src/claude_mcp_plugin/code.js`) returning `figma.fileKey`, the file name and the current page.
+  - New `get_current_file` tool to inspect that resolution directly.
+  - `reply_to_comments` resolves the open file **once per batch**, not per entry.
+  - Passing `fileKey` explicitly still bypasses the plugin entirely, so the tools remain usable with no channel connected.
+  - `figma.fileKey` requires the private plugin API. It is populated for locally imported and organisation plugins (this project sets `enablePrivatePluginApi: true`) but is `undefined` on public plugin builds; that case produces an explicit message instead of a silent failure.
+
+### Fixed
+- **🧩 Unsubstituted DXT placeholders**: if a host fails to expand `${user_config.figma_access_token}`, the literal template used to reach Figma and return a misleading `403 Invalid token`. `getFigmaToken()` now detects the placeholder and explains how to configure the token directly in `claude_desktop_config.json`.
+
+### Changed
+- **⚠️ `get_my_comments` no longer errors on an empty scope.** It previously required one of `teamId` / `projectIds` / `fileKeys`; it now falls back to the currently open file.
+
+## [1.1.0] - 2026-08-16
+
+### Added
+- **📦 Token prompt in the DXT package**: `manifest.json` now declares a `user_config` block, so Claude Desktop prompts for the Figma personal access token on install (stored as `sensitive`, never written into a config file by hand) and injects it as `FIGMA_ACCESS_TOKEN`. Comment sweep concurrency is exposed the same way. Both are optional — leaving them blank keeps every non-comment tool working exactly as before.
+- **💬 Comment tools (Figma REST API)**: Read and reply to Figma comments across a whole team, selected projects, or an explicit file list. Figma's Plugin API has no comment access, so this introduces a second, independent transport alongside the WebSocket relay: a REST client authenticated with a personal access token (`FIGMA_ACCESS_TOKEN`). These tools work without the socket running and without `join_channel`; all existing tools are unaffected and need no token.
+  - `get_figma_account` – validate the token and resolve the caller's user id.
+  - `list_figma_files` – expand a `teamId` / `projectIds` into file keys.
+  - `get_file_comments` – threaded comments for a single file, with author, anchor, resolved status and timestamps.
+  - `get_my_comments` – the full sweep: resolve scope → fetch per file with bounded concurrency → thread → filter to the token owner. Supports `authorScope` (`root` vs `any`), `includeResolved`, `onlyAwaitingReply`, `since`, `maxFiles` and `format` (`text` | `json`).
+  - `reply_to_comment` – post a reply into an existing thread (inherits the thread's pin).
+  - `reply_to_comments` – batch replies with per-item success/failure reporting and a `dryRun` preview.
+  - `delete_comment` – delete your own comment or reply.
+- **🌐 Figma REST client** (`utils/figma-rest.ts`): `X-Figma-Token` auth read lazily from the environment, retry with exponential backoff honouring `Retry-After` on `429`/`408`/`5xx`/network errors, no retries on `401`/`403`/`404`, per-request timeouts, and a `mapWithConcurrency` helper that keeps team-wide sweeps under Figma's rate limits.
+- **🧵 Comment threading helpers** (`utils/comment-helpers.ts`): pure, network-free logic for grouping Figma's flat comment list into threads, describing pin anchors, filtering, and rendering digests — orphaned replies (deleted root) are promoted rather than dropped.
+- **⚙️ REST configuration**: `FIGMA_API_BASE_URL`, `FIGMA_API_CONCURRENCY`, `FIGMA_API_MAX_RETRIES` and `FIGMA_API_TIMEOUT_MS` environment overrides.
+- **🧪 Tests**: 48 new tests — unit coverage for the REST client and threading logic, plus an integration suite that drives the real tool handlers against a stub Figma API (including partial-failure and dry-run paths).
+
+### Fixed
+- **🏗️ Declaration build**: `src/socket.ts` passed a bare `Server` type to `Bun.serve`'s `fetch` handler, but `Server` is generic in current `bun-types`. This failed the `tsup --dts` step with `TS2314`, breaking `npm run build` and `npm run build:dxt` (the JS bundles emitted fine, so the failure only surfaced at declaration generation). Now parameterised as `Server<any>`, matching the `ServerWebSocket<any>` usage elsewhere in the file.
+
+### Notes
+- Comment tools are deliberately absent from the `FigmaCommand` union in `types/index.ts`, since they never travel over the WebSocket relay.
+- Files a token cannot open are reported at the end of a sweep rather than aborting it — expected when sweeping an entire team.
+
+## [1.0.0] - 2026-04-18
+
+### Added
+- **🤖 Multi-Agent / Parallel Execution**: Added a server-side FIFO command queue to the WebSocket relay. This allows multiple AI agents (e.g. Claude Code sub-agents or Cursor parallel processes) to work on the same Figma file simultaneously without blocking the single-threaded Figma plugin or causing timeouts. Achieves up to ~1.87x speedup for complex generation tasks. (Thanks to [mmabas77](https://github.com/mmabas77) - [PR #77](https://github.com/arinspunk/claude-talk-to-figma-mcp/pull/77))
+- **🛡️ Node Info Depth Control**: Added `depth` parameter to `get_node_info` and `get_nodes_info` (default 1) to prevent token overflow in giant documents. Children beyond the depth limit return as minimal stubs with a `_childrenTruncated: true` flag, allowing for progressive disclosure. (Thanks to [mmabas77](https://github.com/mmabas77) - [PR #90](https://github.com/arinspunk/claude-talk-to-figma-mcp/pull/90))
+- **✨ Plugin Quality Improvements**: Enhanced stability and usability across core tools. (Thanks to [mmabas77](https://github.com/mmabas77) - [PR #87](https://github.com/arinspunk/claude-talk-to-figma-mcp/pull/87))
+  - Robust layout grids (properly handling STRETCH vs fixed-pixel modes).
+  - Enhanced `clone_node` with `parentId` support for direct container injection.
+  - Smart text wrapping and numeric font weight mapping (mapping 100-900 to Figma styles).
+  - Unified styling (fill/stroke) for all basic shape creation tools.
+  - Automatic column grids for top-level frames for better alignment.
+  - Safe color utilities to prevent accidental black-fills on malformed input data.
+- **🎯 Unicast Response Routing**: Responses from Figma are now exclusively routed to the exact agent that requested them via session tracking, eliminating broadcast noise across multiple connected clients.
+- **🧱 Component Detaching**: Added `detach_instance` tool to convert component instances back into regular frames. (Thanks to [hoxinzhen](https://github.com/hoxinzhen) - [PR #85](https://github.com/arinspunk/claude-talk-to-figma-mcp/pull/85))
+- **🎨 Local Style Creation**: New tools to create and manage reusable styles in Figma's local library. (Thanks to [Kejsaren](https://github.com/hello-amed) - [PR #83](https://github.com/arinspunk/claude-talk-to-figma-mcp/pull/83))
+  - `create_text_style` – Create typography styles (font, size, spacing, etc).
+  - `create_paint_style` – Create reusable SOLID color styles.
+  - `create_effect_style` – Create reusable shadow and blur styles.
+- **✨ Prototype Interaction Tools**: Added two new tools for managing Figma prototype logic. (Thanks to [ravszmig](https://github.com/ravszmig) - [PR #82](https://github.com/arinspunk/claude-talk-to-figma-mcp/pull/82))
+  - `set_reactions` – Programmatically configure triggers (CLICK, HOVER, etc.), actions (NAVIGATE, OVERLAY, BACK), and transitions. Includes smart logic to handle overlay position and background behavior.
+  - `get_reactions` – Inspect and debug existing interactions on any node.
+- **🛡️ Robust Type Coercion**: Implementation of Zod-based coercion helpers (`coerce.number()`, `coerceBoolean`, `coerceJson`) to guarantee that all tools correctly handle parameters sent as strings (common in MCP/WebSocket environments). (Thanks to [ehs208](https://github.com/ehs208) - [PR #79](https://github.com/arinspunk/claude-talk-to-figma-mcp/pull/79))
+- **🛠️ Integration & DX Fixes**:
+  - **Fixed `get_pages`**: Added automatic `figma.loadAllPagesAsync()` to prevent "unloaded page" runtime errors.
+  - **`parentId` in Components**: Added `parentId` support to `create_component_from_node` for deterministic container injection via the relay server.
+  - **Plugin Compatibility**: Fixed syntax errors in `code.js` to ensure support for diverse Figma plugin execution environments.
+
+
+### Changed
+- **⚠️ Breaking Changes for State Independence**: To guarantee race-condition-free parallel execution, implicit page caching has been completely ripped out:
+  - `set_current_page` is now completely **blocked** and deprecated by the server.
+  - State-altering creation tools (e.g. `create_frame`, `create_rectangle`, `create_text`) now strictly require the `parentId` argument explicitly to declare where elements should be instantiated.
+  - Updated tool descriptions to explicitly guide LLMs towards using the `parentId`.
+
+## [0.9.2] - 2026-02-28
+
+### Fixed
+- **🔧 Zod compatibility**: Updated `zod` dependency from `^3.24.0` to `^3.25.0` to align with `@modelcontextprotocol/sdk@latest` (v1.27.1+) which requires `zod: "^3.25 || ^4.0"`. This resolves the `Cannot read properties of undefined (reading '_zod')` error that caused `tools/list` to fail and prevented all 54 tools from loading in Claude Desktop and Cursor ([#80](https://github.com/arinspunk/claude-talk-to-figma-mcp/issues/80), [#81](https://github.com/arinspunk/claude-talk-to-figma-mcp/issues/81)).
+
+## [0.9.1] - 2026-02-28
+
+### Added
+- **🗒️ FigJam Support**: Six new tools for reading and writing FigJam boards (Thanks to [Rob Dearborn](https://github.com/rfdearborn))
+  - `get_figjam_elements` – read all stickies, connectors, shapes-with-text, sections, and stamps on the current page
+  - `create_sticky` – create a sticky note with text and colour (yellow, pink, green, blue, purple, red, orange, teal, gray, white)
+  - `set_sticky_text` – update the text on an existing sticky note
+  - `create_shape_with_text` – create a labelled FigJam shape (SQUARE, ELLIPSE, ROUNDED_RECTANGLE, DIAMOND, TRIANGLE_UP, TRIANGLE_DOWN, PARALLELOGRAM_RIGHT, PARALLELOGRAM_LEFT)
+  - `create_connector` – draw an arrow or line between two nodes (by ID) or between canvas positions, with configurable line style and arrowheads
+  - `create_section` – create a labelled colour region for grouping board content
+- **🖼️ Image Manipulation Tools**: Complete image handling support for Figma nodes (Thanks to [ehs208](https://github.com/ehs208) - [PR #61](https://github.com/arinspunk/claude-talk-to-figma-mcp/pull/61))
+  - `set_image_fill`: Apply images from URL or base64 data with scaleMode options (FILL, FIT, CROP, TILE).
+  - `get_image_from_node`: Extract image metadata (hash, scaleMode, rotation, filters).
+  - `replace_image_fill`: Replace existing images while preserving transforms and filters.
+  - `apply_image_transform`: Adjust image position, scale, rotation (90° increments), and scaleMode.
+  - `set_image_filters`: Apply 7 types of color/light adjustments (exposure, contrast, saturation, temperature, tint, highlights, shadows).
+- **📐 Coordinate Consistency**: Added `localPosition` support to `get_node_info` and `get_nodes_info` (batch) for full parity with local coordinate transforms (Thanks to [ehs208](https://github.com/ehs208) - [PR #57](https://github.com/arinspunk/claude-talk-to-figma-mcp/pull/57)).
+- **📝 Fixed-Width Text**: Added `width` parameter to `create_text` tool for better layout control and wrapping (Thanks to [leeyc09](https://github.com/leeyc09) - [PR #59](https://github.com/arinspunk/claude-talk-to-figma-mcp/pull/59)).
+
+### Fixed
+- **🔄 Image Features**: 
+  - Image rotation properly implemented (90-degree increments) inside node fills (#61).
+  - Image filters are now preserved when replacing images using `replace_image_fill` (#61).
+- **🎯 Coordinate System**: Fixed mismatch between `get_node_info` and `move_node` by clarifying and unifying local vs global coordinate usage across all tools (Thanks to [ehs208](https://github.com/ehs208) - [PR #57](https://github.com/arinspunk/claude-talk-to-figma-mcp/pull/57)).
+- **⚡ Performance & Stability**:
+  - Optimized `get_nodes_info` using a high-performance native batch implementation in the plugin.
+  - Fixed plugin race condition by awaiting `setCharacters` in text node creation (#59).
+  - Pinned `zod` dependency to `^3.24.0` to resolve installation failures in containerized/fresh environments (#59).
+- **🐳 Docker**: Fixed Dockerfile to run as a network bridge (WebSocket server) and added comprehensive setup documentation (Thanks to [ehs208](https://github.com/ehs208) - [PR #56](https://github.com/arinspunk/claude-talk-to-figma-mcp/pull/56)).
+
+### Notes
+- **Image Handling**: `apply_image_transform` rotates the image fill inside the node boundary; to rotate the entire node, use `rotate_node`. External URLs are subject to the `allowedDomains` list in `manifest.json`.
+- **API Parity**: Standardized `x`/`y` descriptions across all creation and modification tools to explicitly reference local coordinates.
+
+## [0.9.0] - 2026-02-20
+
+### Added
+- **🛠️ 20 New Tools**: Massive expansion of Figma capabilities including:
+  - **Transformation**: `rotate_node`, `reorder_node`, `convert_to_frame`.
+  - **Properties**: `set_node_properties` (visibility, lock, opacity).
+  - **Visuals**: `set_gradient`, `boolean_operation`, `set_svg`, `get_svg`, `set_image`.
+  - **Layout & Guides**: `set_grid`, `get_grid`, `set_guide`, `get_guide`.
+  - **Documentation**: `set_annotation`, `get_annotation`.
+  - **Variables**: `get_variables`, `set_variable`, `apply_variable_to_node`, `switch_variable_mode`.
+  - **Pages**: `duplicate_page`.
+  (Thanks to [mmabas77](https://github.com/mmabas77) - [PR #76](https://github.com/arinspunk/claude-talk-to-figma-mcp/pull/76))
+- **🌓 Dark Mode**: Added a dark and light mode toggle to the plugin UI for better integration with Figma's themes.
+- **📋 Enhanced Clipboard**: The plugin now copies the full connection instruction instead of just the channel name, making it easier to paste into Claude.
+
+### Fixed
+- **⚡ Error propagation**: Error responses from Figma now resolve immediately instead of waiting for the 60s timeout. The WebSocket message handler in `websocket.ts` now robustly checks for errors at both the root level (`myResponse.error`) and nested inside the result (`myResponse.result.error`).
+- **🎨 UI Refinement**: Adjusted plugin dimensions and mode selector opacity for a cleaner look. Structured the UI script into a class for better maintainability.
+
+## [0.8.2] - 2026-02-15
+
+### Added
+- **🔄 Component Variants**: New `set_instance_variant` tool to change variant properties without recreating the instance. Preserves instance overrides like text and colors. (Thanks to [ehs208](https://github.com/ehs208) - [PR #50](https://github.com/arinspunk/claude-talk-to-figma-mcp/pull/50))
+- **📁 Custom Installation Path**: The launcher now supports an optional second argument to specify a custom installation directory (e.g., `npx claude-talk-to-figma-mcp ./my-folder`).
+- **🇰🇷 Korean Localization**: Added UX/UI specialist prompt in Korean (`prompts/prompt-ux-ui-specialist-ko.md`). (Thanks to [ehs208](https://github.com/ehs208) - [PR #54](https://github.com/arinspunk/claude-talk-to-figma-mcp/pull/54))
+
+### Fixed
+- **📡 Channel Reliability**: Added verification via ping when joining a channel to prevent false success messages and ensure the Figma plugin is active. (Thanks to [ehs208](https://github.com/ehs208) - [PR #52](https://github.com/arinspunk/claude-talk-to-figma-mcp/pull/52))
+- **🔗 Channel Verification**: Fixed `join_channel` accepting invalid channel codes. Now verifies connection by sending a ping after join, providing fast feedback (12s timeout) instead of waiting for first command to timeout (60s). Added internal `ping` command for connection verification.
+
+## [0.8.1] - 2026-02-11
+
+### Added
+- **🎨 Selection Colors**: New `set_selection_colors` tool to recursively change colors of all vector nodes within the current selection. Ideal for coloring icon sets. (Thanks to [mmabas77](https://github.com/mmabas77) - [PR #49](https://github.com/arinspunk/claude-talk-to-figma-mcp/pull/49))
+- **📝 Enhanced Text Alignment**: Added full support for horizontal and vertical text alignment (Top/Middle/Bottom and Left/Center/Right/Justified). (Thanks to [mmabas77](https://github.com/mmabas77) - [PR #49](https://github.com/arinspunk/claude-talk-to-figma-mcp/pull/49))
+- **🌍 RTL Support**: Improved text alignment handling for Right-to-Left languages like Arabic. (Thanks to [mmabas77](https://github.com/mmabas77) - [PR #49](https://github.com/arinspunk/claude-talk-to-figma-mcp/pull/49))
+
+### Fixed
+- **🚀 Setup Command**: Fixed incorrect MCP server command in `configure-claude.js` and `README.md` that was causing connection failures. (Thanks to [ehs208](https://github.com/ehs208) - [PR #47](https://github.com/arinspunk/claude-talk-to-figma-mcp/pull/47))
+- **🛡️ Type Safety**: Added missing `set_selection_colors` to `FigmaCommand` union type to resolve TypeScript compilation errors.
+
+## [0.8.0] - 2026-02-01
+
+### Added
+- **🚀 Unified Launcher**: New `npx claude-talk-to-figma-mcp` command that handles repository setup, dependencies, and execution in a single step.
+- **🛠️ Smart Bootstrapping**: Automated Bun detection and installation prompts for an optimized experience.
+
+### Fixed
+- **🛡️ Type Safety**: Updated `FigmaCommand` union types to include all new tools, resolving TypeScript compilation errors during CI/CD.
+- **🏗️ CI/CD Permissions**: Fixed 403 errors in GitHub Actions by granting explicit write permissions for DXT package releases.
+
+## [0.7.0] - 2026-01-31
+
+### Added
+- **🎨 Text Styles**: New `set_text_style_id` tool to apply local text styles to nodes (Thanks to [Rob Dearborn](https://github.com/rfdearborn) - [PR #43](https://github.com/arinspunk/claude-talk-to-figma-mcp/pull/43))
+- **🏷️ Rename Node**: New `rename_node` tool for better document organization (Thanks to [Beomsu Koh](https://github.com/GoBeromsu) - [PR #36](https://github.com/arinspunk/claude-talk-to-figma-mcp/pull/36))
+- **📑 Page Management**: Comprehensive suite of tools for managing document pages: `create_page`, `delete_page`, `rename_page`, `get_pages`, and `set_current_page` (Thanks to [sk (kovalevsky)](https://github.com/kovalevsky) - [PR #32](https://github.com/arinspunk/claude-talk-to-figma-mcp/pull/32))
+
+### Fixed
+- **🚀 Performance**: Optimized component lookup using `findAllWithCriteria` to resolve initialization timeouts (Thanks to [Rob Dearborn](https://github.com/rfdearborn) - [PR #42](https://github.com/arinspunk/claude-talk-to-figma-mcp/pull/42))
+- **📸 SVG Export**: Corrected format parameter handling for SVG exports and increased timeouts for large exports (Thanks to [sk (kovalevsky)](https://github.com/kovalevsky) - [PR #32](https://github.com/arinspunk/claude-talk-to-figma-mcp/pull/32))
+- **🛡️ Validation**: Improved Zod validation for `join_channel` by making the channel parameter strictly mandatory (Thanks to [Timur](https://github.com/Mirsmog) - [PR #29](https://github.com/arinspunk/claude-talk-to-figma-mcp/pull/29))
+
+## [0.6.1] - 2025-08-02
+
+### Fixed
+- **`set_stroke_color` Tool**: Corrected a validation rule that incorrectly rejected a `strokeWeight` of `0`. This change allows for the creation of invisible strokes, aligning the tool's behavior with Figma's capabilities. (Thanks to [Taylor Smits](https://github.com/smitstay) - [PR #16](https://github.com/arinspunk/claude-talk-to-figma-mcp/pull/16))
+
+## [0.6.0] - 2025-07-15
+
+### Added
+- **🚀 DXT Package Support**: Complete implementation of Anthropic's Desktop Extensions format for Claude Desktop
+- **📦 Automated CI/CD Pipeline**: GitHub Actions workflow for automatic DXT package generation and release distribution
+- **🔧 DXT Build Scripts**: New npm scripts for DXT packaging (`pack`, `build:dxt`, `sync-version`)
+- **📋 .dxtignore Configuration**: Optimized package exclusions for minimal DXT file size (11.6MB compressed)
+- **🎯 Dual Distribution Strategy**: NPM registry for developers + DXT packages for end users
+
+### Changed
+- **⚡ Installation Experience**: Reduced setup time from 15-30 minutes to 2-5 minutes via one-click DXT installation
+- **📖 Documentation**: Enhanced README with comprehensive DXT installation instructions and troubleshooting
+- **🏗️ Build Process**: Improved version synchronization between package.json and manifest.json
+- **🔄 Release Workflow**: Automated DXT package attachment to GitHub releases
+
+### Technical Details
+- Added `@anthropic-ai/dxt@^0.2.0` development dependency for DXT packaging
+- Implemented robust error handling and validation in CI/CD pipeline
+- Enhanced build artifacts with 90-day retention for testing and rollback capabilities
+- Established quality gates ensuring DXT packages only build after successful test suites
+
+### Credits
+- **DXT Implementation**: [Taylor Smits](https://github.com/smitstay) - [PR #17](https://github.com/arinspunk/claude-talk-to-figma-mcp/pull/17)
+
+## [0.5.3] - 2025-06-20
+
+### Added
+- Added Windows-specific build command (`build:win`: `tsup`) for improved cross-platform compatibility
+- Enhanced build process to support development on Windows systems without chmod dependency
+
+### Fixed
+- Resolved Windows build compatibility issues where `chmod` command would fail on Windows systems
+- Improved developer experience for Windows users by providing dedicated build script
+
+### Changed
+- Separated Unix/Linux build process (with executable permissions) from Windows build process
+- Updated installation documentation to reflect platform-specific build commands
+
+## [0.5.2] - 2025-06-19
+
+### Fixed
+- Fixed critical opacity handling bug in `set_stroke_color` where `a: 0` (transparent) was incorrectly converted to `a: 1` (opaque)
+- Fixed stroke weight handling where `strokeWeight: 0` (no border) was incorrectly converted to `strokeWeight: 1`
+- Resolved problematic `||` operator usage that affected falsy values in color and stroke operations
+
+### Added
+- Extended `applyDefault()` utility function to handle stroke weight defaults safely
+- Added `FIGMA_DEFAULTS.stroke.weight` constant for centralized stroke configuration
+- Comprehensive test suite for `set_stroke_color` covering edge cases and integration scenarios
+- Enhanced validation for RGB components in stroke operations
+
+### Changed
+- Improved architectural consistency by applying the same safe defaults pattern from `set_fill_color` to `set_stroke_color`
+- Enhanced separation of concerns between MCP layer (business logic) and Figma plugin (pure translator)
+- Renamed `weight` parameter to `strokeWeight` for better clarity and consistency
+- Updated Figma plugin to expect complete data from MCP layer instead of handling defaults internally
+
+### Technical Details
+- Replaced `strokeWeight: strokeWeight || 1` with `applyDefault(strokeWeight, FIGMA_DEFAULTS.stroke.weight)`
+- Enhanced type safety with proper `Color` and `ColorWithDefaults` interface usage
+- Improved error messages and validation for better debugging experience
+
+## [0.5.1] - 2025-06-15
+
+### Fixed
+- Fixed opacity handling in `set_fill_color` to properly respect alpha values
+- Added `applyColorDefaults` function to ensure appropriate default values for colors
+
+### Added
+- Added automated tests for color functions and node manipulation
+
+### Changed
+- Improved TypeScript typing for colors and related properties
+- General code cleanup and better utility organization
+
+## [0.5.0] - 2025-05-28
+
+### Changed
+- Implemented modular tool structure for better maintainability
+- Enhanced handling of complex operations with timeouts and chunking
+- Improved error handling and recovery for all tools
+- Improved TypeScript typing and standardized error handling
+
+### Fixed
+- Fixed channel connection issues with improved state management
+- Resolved timeout problems in `flatten_node`, `create_component_instance`, and `set_effect_style_id`
+- Enhanced remote component access with better error handling
+
+### Added
+- Comprehensive documentation of tool categories and capabilities
+
+## [0.4.0] - 2025-04-15
+
+### Added
+- New tools for creating advanced shapes:
+  - `create_ellipse`: Creation of ellipses and circles
+  - `create_polygon`: Creation of polygons with customizable sides
+  - `create_star`: Creation of stars with customizable points and inner radius
+  - `create_vector`: Creation of complex vector shapes
+  - `create_line`: Creation of straight lines
+- Advanced text and font manipulation capabilities
+- New commands for controlling typography: font styles, spacing, text case, and more
+- Support for accessing team library components
+- Improved error handling and timeout management
+- Enhanced text scanning capabilities
+
+### Changed
+- Improvements in documentation and usage examples
+
+## [0.3.0] - 2025-03-10
+
+### Added
+- Added `set_auto_layout` command to configure auto layout properties for frames and groups
+- Support for settings for layout direction, padding, item spacing, alignment and more
+
+## [0.2.0] - 2025-02-01
+
+### Added
+- Initial public release with Claude Desktop support
