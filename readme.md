@@ -24,6 +24,7 @@ Automate repetitive design tasks and maintain brand consistency without manual e
 - **Automated accessibility audits** - Detect and fix contrast issues in seconds
 - **Bulk style updates** - Change colors, typography, or spacing across the entire document with a single command
 - **Visual hierarchy analysis** - Get instant feedback on your design structure
+- **Comment triage** - Read every review thread you're involved in and reply in bulk, without leaving the chat
 
 ### Developers
 
@@ -34,6 +35,8 @@ Generate production-ready code directly from designs:
 - **Reduce handoff friction** - Fewer back-and-forth iterations with the design team
 
 > **Key advantage**: Unlike [Figma's official MCP](https://www.figma.com/mcp-catalog/) which requires a Dev Mode license, this MCP **works with any Figma account** (even free ones).
+
+> **Comments included**: Figma's Plugin API cannot see comments at all — they only exist in the REST API. This MCP bridges both, so your agent can read and reply to review threads as well as edit the canvas. See [Comment tools](#-comment-tools).
 
 ## 💡 Real-world use cases
 
@@ -74,13 +77,19 @@ Generate production-ready code directly from designs:
 
 *Enables the Agent to send commands to Figma.*
 
-Open your terminal, navigate to the folder where you want to install the tool, and run:
+Clone this fork and build it:
 
 ```bash
-npx claude-talk-to-figma-mcp
+git clone https://github.com/litoondev/claude-talk-to-figma-mcp-main.git
+cd claude-talk-to-figma-mcp-main
+npm install
+npm run build        # on Windows: npm run build:win
+npm run socket
 ```
 
-> **💡 Tip**: This command is an "all-in-one" (clones, installs, and starts). In subsequent sessions, if you're already inside the project folder `your-project/claude-talk-to-figma-mcp`, you can simply run `bun run socket`.
+> **⚠️ Don't use `npx claude-talk-to-figma-mcp`.** That installs the upstream package, which does **not** include the comment tools. This fork must be built from source (or installed via the DXT below).
+
+> **💡 Tip**: In later sessions just run `npm run socket` from the project folder — you only build once per update.
 
 ### Step 2: Install the plugin in Figma
 
@@ -94,23 +103,25 @@ In Figma Desktop go to Menu → Plugins → Development → Import plugin from m
 
 #### Claude Desktop
 
-Download [claude-talk-to-figma-mcp.dxt](https://github.com/arinspunk/claude-talk-to-figma-mcp/releases) (from Assets section of the latest release) and double-click. Claude configures itself automatically.
+Build the extension with `npm run build:dxt`, then double-click the generated `.dxt`. Claude configures itself automatically and **prompts you for your Figma token** during install — no config file editing needed.
 
 #### Cursor
 
 1. Open **Cursor Settings → Tools & Integrations**
 2. Click **"New MCP Server"** to open the `mcp.json` file
-3. Add this configuration:
+3. Add this configuration, pointing at your local build:
   ```json
   {
     "mcpServers": {
       "ClaudeTalkToFigma": {
-        "command": "npx",
-        "args": ["-p", "claude-talk-to-figma-mcp@latest", "claude-talk-to-figma-mcp-server"]
+        "command": "node",
+        "args": ["/absolute/path/to/claude-talk-to-figma-mcp-main/dist/talk_to_figma_mcp/server.cjs"],
+        "env": { "FIGMA_ACCESS_TOKEN": "figd_your_token_here" }
       }
     }
   }
   ```
+  On Windows, escape the backslashes: `"H:\\claude-talk-to-figma-mcp-main\\dist\\talk_to_figma_mcp\\server.cjs"`
 4. Save the file and restart Cursor
 
 #### Other Agentic Tools
@@ -160,12 +171,71 @@ If you prefer Docker or need to run the WebSocket server in a team environment, 
 - Auto-layout, advanced typography
 - Local components and team library components
 
-**Comments** *(needs a [Figma REST token](INSTALLATION.md#4-optional-enable-comment-tools-figma-rest-token))*
-- Read every comment thread you're involved in, across a whole team or project
-- See which threads are waiting on your reply
-- Reply to one thread or batch-reply to many
+**Comments** — see [below](#-comment-tools)
 
 See [complete command list](COMMANDS.md).
+
+## 💬 Comment tools
+
+Read and reply to Figma review threads directly from your agent.
+
+Figma's Plugin API has **no access to comments** — they aren't part of the document tree and are never exposed to plugins. So these tools take a second route: they call Figma's REST API directly. That has two practical consequences:
+
+- They need a personal access token (every other tool does not).
+- They work **without** the socket running and **without** `join_channel`.
+
+### No file URL required
+
+`fileKey` is optional on every comment tool. Omit it and the server asks the connected plugin which file is open:
+
+```
+You: check all comments
+→ reads the comments on whatever file you're looking at
+```
+
+Pass `fileKey` explicitly only to target a *different* file — which also works with no plugin channel connected.
+
+> Automatic resolution uses `figma.fileKey`, which requires the private plugin API. It's available for locally imported and organisation plugins (this project sets `enablePrivatePluginApi: true`) and `undefined` on public plugin builds. If unavailable you get an explicit message rather than a silent failure.
+
+### Setup
+
+1. Create a token at Figma → Account settings → Security → Personal access tokens, with **file content: read** (add **comments: read/write** to post replies)
+2. Expose it to the MCP server as `FIGMA_ACCESS_TOKEN`:
+
+```json
+{
+  "mcpServers": {
+    "ClaudeTalkToFigma": {
+      "command": "node",
+      "args": ["/absolute/path/to/claude-talk-to-figma-mcp-main/dist/talk_to_figma_mcp/server.cjs"],
+      "env": { "FIGMA_ACCESS_TOKEN": "figd_your_token_here" }
+    }
+  }
+}
+```
+
+If you installed the DXT instead, skip this — the extension prompts for the token on install and stores it as a secret.
+
+3. Restart your client and run `check my Figma account` to verify
+
+Full details, DXT install and tuning options in the [installation guide](INSTALLATION.md#4-optional-enable-comment-tools-figma-rest-token).
+
+### What you can ask
+
+```
+✅ "Check all comments"
+
+✅ "Show me every unresolved comment I'm involved in across the team,
+    and flag the ones waiting on my reply"
+
+✅ "Read my open comments, look up the node each one is pinned to,
+    and draft a reply explaining the fix"
+
+✅ "Reply to all my threads from last week confirming they're addressed
+    in v2 — dry run first"
+```
+
+Threads come back with author, pin location, resolved status, timestamps and the node id each comment is attached to — so you can hand that id straight to `get_node_info` and reason about what the feedback refers to.
 
 ## 📚 Documentation
 
@@ -179,6 +249,8 @@ See [complete command list](COMMANDS.md).
 
 Based on [cursor-talk-to-figma-mcp](https://github.com/sonnylazuardi/cursor-talk-to-figma-mcp) by Sonny Lazuardi. Adapted for Claude Desktop and extended with new tools by [Xúlio Zé](https://github.com/arinspunk).
 
+This fork adds the Figma REST comment tools and automatic file-key resolution, maintained by [litoondev](https://github.com/litoondev). For the original project, see [arinspunk/claude-talk-to-figma-mcp](https://github.com/arinspunk/claude-talk-to-figma-mcp).
+
 If you want to know about all project contributions, you can visit the ["Contributors" chapter of the contribution guide](CONTRIBUTING.md#contributors).
 
 [MIT License](LICENSE)
@@ -189,12 +261,19 @@ If you want to know about all project contributions, you can visit the ["Contrib
 
 ✅ **Stable production** - Tool ready for daily use in design and development teams
 
+🆕 **New in 1.2.0:**
+- Read and reply to Figma comments via the REST API
+- Automatic file-key resolution — no pasting file URLs
+- Token prompt built into the DXT package
+
 🚀 **Under active development:**
 - Complete support for Figma Variables
 - Enhanced export to Tailwind CSS/SwiftUI
 
 ### Need something specific?
 
-**[Propose new ones on GitHub Issues](https://github.com/arinspunk/claude-talk-to-figma-mcp/issues)**
+**[Propose new ones on GitHub Issues](https://github.com/litoondev/claude-talk-to-figma-mcp-main/issues)**
+
+For issues with the underlying MCP (not the comment tools), consider [upstream](https://github.com/arinspunk/claude-talk-to-figma-mcp/issues) instead.
 
 Your feedback and contributions keep the project alive. ❤️
