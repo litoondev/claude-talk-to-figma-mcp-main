@@ -55,94 +55,392 @@ Generate production-ready code directly from designs:
 **Review triage:**
 > "Show me every unresolved comment I'm involved in across the team, flag the ones waiting on my reply, and draft an answer for each"
 
-## ⚡️ Quick installation
+---
 
-**Setup:** 5 minutes | **First automation:** 2 minutes
+# 🚀 Installation — complete beginner's guide
 
-### Requirements
+**Time needed:** ~15 minutes the first time. About 20 seconds every day after that.
 
-- [Node.js](https://nodejs.org/en/download) installed
-- [Figma Desktop](https://www.figma.com/downloads/)
-- AI client:
-  - [Claude Desktop](https://claude.ai/download)
-  - [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
-  - [Cursor](https://cursor.com/downloads)
-  - [Antigravity](https://antigravity.google/download)
-  - [Windsurf](https://windsurf.com/download)
-  - [VS Code](https://code.visualstudio.com/) + [GitHub Copilot](https://github.com/features/copilot)
-  - [Cline](https://marketplace.visualstudio.com/items?itemName=saoudrizwan.claude-dev)
-  - [Roo Code](https://marketplace.visualstudio.com/items?itemName=RooVeterinaryInc.roo-cline)
+This guide assumes **zero prior experience**. Every command is written out in full. If you have never opened a terminal before, that's fine — start at [Step 0](#step-0-open-the-terminal).
 
-### Step 1: Install and start the websocket
+> 💡 Written for **macOS**. Windows differences are called out in `🪟 Windows` notes under each step.
 
-*Enables the Agent to send commands to Figma.*
+## 🧠 First, understand what you're installing
 
-Clone this fork and build it:
+This is not a single app. It's **three pieces that talk to each other**. Knowing this makes every later step (and every error message) make sense.
+
+```
+┌─────────────────┐        ┌──────────────────┐        ┌─────────────────┐
+│  Claude Desktop │◄──────►│  WebSocket server│◄──────►│  Figma Desktop  │
+│                 │  MCP   │  (localhost:3055)│   WS   │  + this plugin  │
+│  1. Extension   │        │  2. Terminal     │        │  3. Plugin      │
+└─────────────────┘        └──────────────────┘        └─────────────────┘
+```
+
+| # | Piece | What it does | Where it lives |
+|---|-------|--------------|----------------|
+| **1** | **The extension** (`.mcpb`) | Gives Claude the ~120 Figma tools | Installed inside Claude Desktop |
+| **2** | **The WebSocket server** | The bridge/messenger between Claude and Figma | Runs in a Terminal window you keep open |
+| **3** | **The Figma plugin** | Receives commands and actually edits your canvas | Installed inside Figma Desktop |
+
+**All three must be running at the same time.** If any one is missing, Claude will say it can't reach Figma. That's the single most common problem people hit — see [Troubleshooting](#-troubleshooting-common-errors).
+
+---
+
+## Step 0: Open the Terminal
+
+You'll need it for a few copy-paste commands. You do **not** need to understand them.
+
+1. Press `Cmd` + `Space`
+2. Type `Terminal`
+3. Press `Enter`
+
+A window with white or black text appears. That's the terminal. To run a command: copy it, paste it (`Cmd` + `V`), press `Enter`, and **wait** until the text stops scrolling and you get a fresh prompt line back.
+
+> 🪟 **Windows:** press `Win`, type `PowerShell`, press `Enter`.
+
+---
+
+## Step 1: Install the four prerequisites
+
+### 1a. Node.js
+
+Check whether you already have it — paste this and press Enter:
 
 ```bash
+node -v
+```
+
+- ✅ You see something like `v22.14.0` (any number **18 or higher**) → skip to 1b.
+- ❌ You see `command not found` → download the **LTS** installer from **[nodejs.org](https://nodejs.org/en/download)**, open the `.pkg` file, click Continue through the installer.
+
+Then **quit and reopen Terminal** and run `node -v` again to confirm.
+
+### 1b. Bun (required, do not skip)
+
+The bridge server (piece #2) is built on Bun and **will not run on Node alone**. Skipping this is the #1 reason the setup fails.
+
+Check:
+
+```bash
+bun -v
+```
+
+If you get `command not found`, install it:
+
+```bash
+curl -fsSL https://bun.sh/install | bash
+```
+
+When it finishes, **quit and reopen Terminal**, then verify:
+
+```bash
+bun -v
+```
+
+You should see a version number like `1.2.4`.
+
+> 🪟 **Windows:** run `powershell -c "irm bun.sh/install.ps1 | iex"` instead.
+
+### 1c. Figma **Desktop** app
+
+Download from **[figma.com/downloads](https://www.figma.com/downloads/)**.
+
+> ⚠️ The browser version of Figma **will not work**. Local plugin development requires the desktop app. Install it even if you normally use Figma in Chrome.
+
+### 1d. Claude Desktop
+
+Download from **[claude.ai/download](https://claude.ai/download)**. Sign in.
+
+> ⚠️ Same rule: the **desktop app**, not claude.ai in a browser. Browser Claude cannot load extensions.
+
+**✅ Checkpoint —** before continuing, `node -v` and `bun -v` should both print version numbers, and both Figma Desktop and Claude Desktop should open.
+
+---
+
+## Step 2: Download this project and build it
+
+Copy this **whole block** at once, paste it into Terminal, press Enter:
+
+```bash
+cd ~/Documents
 git clone https://github.com/litoondev/claude-talk-to-figma-mcp-main.git
 cd claude-talk-to-figma-mcp-main
 npm install
-npm run build        # on Windows: npm run build:win
+npm run build
+```
+
+Plain English, line by line:
+
+| Line | What it does |
+|------|--------------|
+| `cd ~/Documents` | Moves into your Documents folder |
+| `git clone …` | Downloads the project into `Documents/claude-talk-to-figma-mcp-main` |
+| `cd claude-talk…` | Moves inside the folder you just downloaded |
+| `npm install` | Downloads the code libraries it needs (takes 1–3 min, lots of scrolling text — normal) |
+| `npm run build` | Compiles the source into runnable files |
+
+**This folder is now your home base.** You'll come back to it every time you use the tool. Remember where it is: `Documents/claude-talk-to-figma-mcp-main`.
+
+<details>
+<summary>❓ <code>git: command not found</code></summary>
+
+Install Apple's developer tools, then re-run the block above:
+
+```bash
+xcode-select --install
+```
+
+A dialog appears — click **Install** and wait for it to finish.
+
+Alternatively, skip git entirely: download the project as a ZIP from the [GitHub page](https://github.com/litoondev/claude-talk-to-figma-mcp-main) (green **Code** button → **Download ZIP**), unzip it into `Documents`, then run `npm install` and `npm run build` inside the unzipped folder.
+</details>
+
+<details>
+<summary>❓ <code>npm install</code> printed red warnings</summary>
+
+Warnings (`WARN`, `deprecated`) are cosmetic — ignore them. Only stop if you see the word **`ERR!`** and the command exits without finishing.
+</details>
+
+> 🪟 **Windows:** use `npm run build:win` instead of `npm run build`, and `cd $HOME\Documents` instead of `cd ~/Documents`.
+
+---
+
+## Step 3: Build the Claude Desktop extension
+
+The GitHub Releases page only carries an older v1.0.0 build **without the comment tools**, so build the current one yourself. Still inside the project folder, run:
+
+```bash
+npm run build:dxt
+```
+
+This creates a file named something like `claude-talk-to-figma-mcp-1.1.0.dxt` in the project folder.
+
+Now make a copy with the modern extension name — current Claude Desktop expects `.mcpb`:
+
+```bash
+cp claude-talk-to-figma-mcp-*.dxt claude-talk-to-figma-mcp.mcpb
+```
+
+You now have both files. **Use `.mcpb`.**
+
+| File | Use it when |
+|------|-------------|
+| `claude-talk-to-figma-mcp.mcpb` | ✅ **Default — try this first.** Current Claude Desktop |
+| `claude-talk-to-figma-mcp-1.1.0.dxt` | Fallback only, for older Claude Desktop builds that reject `.mcpb` |
+
+> ℹ️ They are byte-identical — Anthropic renamed the format from **DXT** to **MCPB**. Only the file extension differs, so if one is rejected, try the other.
+
+---
+
+## Step 4: Install the extension into Claude Desktop
+
+1. Open **Finder** → go to `Documents` → `claude-talk-to-figma-mcp-main`
+2. **Double-click `claude-talk-to-figma-mcp.mcpb`**
+3. Claude Desktop opens and shows an install prompt → click **Install**
+4. It asks for a **Figma personal access token** → **leave it empty and continue.** It's optional and only needed for reading comments. You can add it later ([Step 7](#step-7-optional-comment-tools)).
+5. **Quit Claude Desktop completely** (`Cmd` + `Q` — not just closing the window) and reopen it
+
+**Alternative if double-clicking does nothing:** Claude Desktop → **Settings** → **Extensions** → drag the `.mcpb` file onto the window.
+
+**✅ Checkpoint —** go to Claude Desktop → Settings → Extensions. You should see **Claude Talk to Figma** listed and enabled.
+
+<details>
+<summary>❓ macOS opened the file in Archive Utility or another app</summary>
+
+Right-click the file → **Open With** → **Claude**. If Claude isn't listed, choose **Other…**, navigate to `Applications`, and pick Claude.
+</details>
+
+<details>
+<summary>❓ Claude says the file is invalid or refuses it</summary>
+
+Try the other file — double-click the `.dxt` instead of the `.mcpb`. If both fail, update Claude Desktop to the latest version and retry.
+</details>
+
+---
+
+## Step 5: Install the plugin inside Figma
+
+1. Open the **Figma Desktop app**
+2. Open any design file (or create a new one)
+3. Top-left **Figma menu** → **Plugins** → **Development** → **Import plugin from manifest…**
+4. In the file picker, navigate to:
+   ```
+   Documents → claude-talk-to-figma-mcp-main → src → claude_mcp_plugin → manifest.json
+   ```
+5. Select **`manifest.json`** and click **Open**
+
+> 💡 Can't see the `src` folder in the picker? Press `Cmd` + `Shift` + `G` and paste `~/Documents/claude-talk-to-figma-mcp-main/src/claude_mcp_plugin` to jump straight there.
+
+**✅ Checkpoint —** **Plugins** → **Development** now lists **Claude Talk to Figma**. You only do this once, ever.
+
+---
+
+## Step 6: Run it — the daily routine
+
+These are the only steps you repeat in future sessions.
+
+### 6a. Start the bridge server
+
+Open Terminal and run:
+
+```bash
+cd ~/Documents/claude-talk-to-figma-mcp-main
 npm run socket
 ```
 
-> **⚠️ Don't use `npx claude-talk-to-figma-mcp`.** That installs the upstream package, which does **not** include the comment tools. This fork must be built from source (or installed via the DXT below).
+You should see:
 
-> **💡 Tip**: In later sessions just run `npm run socket` from the project folder — you only build once per update.
+```
+Claude to Figma WebSocket server running on port 3055
+Status endpoint available at http://localhost:3055/status
+```
 
-### Step 2: Install the plugin in Figma
+> 🚨 **Leave this Terminal window open.** Closing it, or pressing `Ctrl` + `C`, kills the bridge and Claude immediately loses Figma. Just push the window aside.
 
-*Enables Figma to receive commands from the agent and return responses.*
+Want to double-check it's alive? Open **http://localhost:3055/status** in a browser.
 
-In Figma Desktop go to Menu → Plugins → Development → Import plugin from manifest → inside the folder where you installed the MCP, select `src/claude_mcp_plugin/manifest.json`
+<details>
+<summary>❓ <code>ReferenceError: Bun is not defined</code></summary>
 
-### Step 3: Configure your Agentic Tool
+Bun isn't installed. Go back to [Step 1b](#1b-bun-required-do-not-skip). This server genuinely cannot run on Node.
+</details>
 
-*Enables the agent to use the MCP's read and modify tools.*
+<details>
+<summary>❓ <code>EADDRINUSE</code> / port 3055 already in use</summary>
 
-#### Claude Desktop
+The server is already running in another Terminal window — you're done, just use that one. To force-stop it: `pkill -f socket.js`
+</details>
 
-Build the extension with `npm run build:dxt`, then double-click the generated `.dxt`. Claude configures itself automatically and **prompts you for your Figma token** during install — no config file editing needed.
+### 6b. Open the plugin in Figma
 
-#### Cursor
+In your Figma file: **Plugins** → **Development** → **Claude Talk to Figma**.
 
-1. Open **Cursor Settings → Tools & Integrations**
-2. Click **"New MCP Server"** to open the `mcp.json` file
-3. Add this configuration, pointing at your local build:
-  ```json
-  {
-    "mcpServers": {
-      "ClaudeTalkToFigma": {
-        "command": "node",
-        "args": ["/absolute/path/to/claude-talk-to-figma-mcp-main/dist/talk_to_figma_mcp/server.cjs"],
-        "env": { "FIGMA_ACCESS_TOKEN": "figd_your_token_here" }
-      }
+A small panel opens showing a **channel ID** in bold inside a green box — something like `a4f9c2`.
+
+**Copy that ID.**
+
+> ⚠️ The channel ID is **new every time** you reopen the plugin. Don't reuse yesterday's.
+
+### 6c. Connect Claude
+
+In Claude Desktop, type:
+
+```
+Connect to Figma, channel a4f9c2
+```
+
+(substitute your actual ID)
+
+Claude confirms the connection. Now test it:
+
+```
+What's currently selected in Figma?
+```
+
+Select any layer in Figma first, then ask. If Claude describes it — **you're fully set up.** 🎉
+
+---
+
+## Step 7: Optional comment tools
+
+Skip unless you want Claude to **read and reply to Figma comments**. Everything else already works without this.
+
+Figma's Plugin API cannot see comments at all, so those specific tools go through Figma's REST API, which needs a token.
+
+1. In Figma: **your avatar** → **Settings** → **Security** tab → **Personal access tokens** → **Generate new token**
+2. Enable these scopes:
+   - **`files:read`** — read files and comments
+   - **`file_comments:write`** — post replies
+3. Copy the token immediately (Figma shows it only once). It starts with `figd_`.
+4. In Claude Desktop: **Settings** → **Extensions** → **Claude Talk to Figma** → paste the token into the **Figma personal access token** field
+5. Quit Claude (`Cmd` + `Q`) and reopen
+6. Verify by asking: `Check my Figma account`
+
+> 🔒 This token can read **every file your account can open**. Never commit it to a repo or paste it into a chat.
+
+---
+
+## 📅 Every session after the first
+
+Setup is permanent. Daily use is three things, ~20 seconds:
+
+```bash
+cd ~/Documents/claude-talk-to-figma-mcp-main && npm run socket
+```
+
+1. ✅ Run the command above (leave the window open)
+2. ✅ Figma → **Plugins** → **Development** → **Claude Talk to Figma** → copy the channel ID
+3. ✅ Tell Claude: `Connect to Figma, channel {your-ID}`
+
+---
+
+## 🆘 Troubleshooting common errors
+
+| What you see | What's actually wrong | Fix |
+|---|---|---|
+| "I can't connect to Figma" | Bridge server isn't running | [Step 6a](#6a-start-the-bridge-server) — restart it and leave the window open |
+| "Channel not found" / connection refused | Channel ID is stale | Reopen the plugin, copy the **new** ID, connect again |
+| Claude has no Figma tools at all | Extension not installed, or Claude wasn't restarted | Settings → Extensions. If missing, redo [Step 4](#step-4-install-the-extension-into-claude-desktop). Quit with `Cmd`+`Q`, not the window X |
+| `ReferenceError: Bun is not defined` | Bun missing | [Step 1b](#1b-bun-required-do-not-skip) |
+| `EADDRINUSE` on port 3055 | Server already running elsewhere | Use the existing window, or `pkill -f socket.js` |
+| Plugin missing from Figma's menu | Imported into browser Figma, not desktop | Use **Figma Desktop** and redo [Step 5](#step-5-install-the-plugin-inside-figma) |
+| Commands work, comments don't | No Figma token | [Step 7](#step-7-optional-comment-tools) |
+| `git: command not found` | Xcode CLI tools missing | `xcode-select --install`, or download the ZIP |
+| Everything worked yesterday, nothing today | Server stopped when you closed Terminal / rebooted | Normal. Redo the [3-step daily routine](#-every-session-after-the-first) |
+
+Still stuck? See [TROUBLESHOOTING.md](TROUBLESHOOTING.md), or [open an issue](https://github.com/litoondev/claude-talk-to-figma-mcp-main/issues).
+
+---
+
+## 🔧 Other AI tools (Cursor, Claude Code, Windsurf, VS Code…)
+
+Steps 1, 2, 5 and 6 are identical for every tool — only Steps 3 and 4 are Claude-Desktop-specific. Other clients read a JSON config file instead of installing an extension.
+
+> **⚠️ Don't use `npx claude-talk-to-figma-mcp`.** That pulls the upstream package, which does **not** include the comment tools. This fork must be built from source.
+
+### Cursor
+
+1. **Cursor Settings** → **Tools & Integrations** → **New MCP Server** (opens `mcp.json`)
+2. Add this, replacing the path with **your** absolute path:
+
+```json
+{
+  "mcpServers": {
+    "ClaudeTalkToFigma": {
+      "command": "node",
+      "args": ["/Users/YOUR_NAME/Documents/claude-talk-to-figma-mcp-main/dist/talk_to_figma_mcp/server.cjs"],
+      "env": { "FIGMA_ACCESS_TOKEN": "figd_your_token_here" }
     }
   }
-  ```
-  On Windows, escape the backslashes: `"H:\\claude-talk-to-figma-mcp-main\\dist\\talk_to_figma_mcp\\server.cjs"`
-4. Save the file and restart Cursor
+}
+```
 
-#### Other Agentic Tools
+3. Save and restart Cursor
 
-For other tools (Claude Code, Windsurf, VS Code + GitHub Copilot, Cline, Roo Code), you can follow the instructions in the ["Configure your Agentic Tool" chapter of the detailed installation guide](INSTALLATION.md#3-configure-your-agentic-tool).
+> 💡 To get the exact path, run `pwd` inside the project folder and paste the result.
+>
+> 🪟 **Windows:** double the backslashes — `"C:\\Users\\You\\claude-talk-to-figma-mcp-main\\dist\\talk_to_figma_mcp\\server.cjs"`
 
-### Step 4: Start working
+### Claude Code
 
-1. Open the plugin in Figma
-2. Copy the channel ID (bold code inside the green box)
-3. Type in the chat: `Connect to Figma, channel {your-ID}`
+```bash
+claude mcp add ClaudeTalkToFigma \
+  --env FIGMA_ACCESS_TOKEN=figd_your_token_here \
+  -- node ~/Documents/claude-talk-to-figma-mcp-main/dist/talk_to_figma_mcp/server.cjs
+```
 
-✅ Ready to design with AI!
+Check with `claude mcp list`, or `/mcp` inside Claude Code.
 
-## Subsequent work sessions
+### Everything else
 
-To use the MCP again in day-to-day work, you don't need to repeat the entire process:
+Windsurf, Antigravity, VS Code + Copilot, Cline and Roo Code follow the same pattern with slightly different file locations — see the ["Configure your Agentic Tool" chapter of the detailed installation guide](INSTALLATION.md#3-configure-your-agentic-tool).
 
-1. **Start the socket**: In the terminal, enter the project folder `your-project/claude-talk-to-figma-mcp` and run `bun run socket` (or `npm run socket`).
-2. **Open the plugin in Figma**: You'll find it in your recent plugins list.
-3. **Connect the AI**: Copy the channel ID and tell your agent: `Connect to Figma, channel {your-ID}`.
+## 🐳 Alternative: Using Docker
+
+If you prefer Docker or need to run the WebSocket server in a team environment, see the [Docker installation guide](INSTALLATION.md#alternative-using-docker).
+
+---
 
 ## 🤖 Multi-Agent & Parallel execution
 
@@ -151,10 +449,6 @@ This MCP server supports **safe parallel execution** out of the box, allowing mu
 > **Note**: Because multiple agents can modify the document simultaneously, relying on implicit page context is unsafe. As a result, stateful commands like `set_current_page` are **blocked**. All agents must explicitly provide the intended `parentId` parameter when executing any creation or structural modification command (e.g., `create_frame`, `create_text`).
 
 *(Special thanks to [@mmabas77](https://github.com/mmabas77) for architecting and contributing this feature!)*
-
-## 🐳 Alternative: Using Docker
-
-If you prefer Docker or need to run the WebSocket server in a team environment, see the [Docker installation guide](INSTALLATION.md#alternative-using-docker) in the detailed installation documentation.
 
 ## 🛠️ Capabilities
 
@@ -199,8 +493,7 @@ Pass `fileKey` explicitly only to target a *different* file — which also works
 
 ### Setup
 
-1. Create a token at Figma → Account settings → Security → Personal access tokens, with **file content: read** (add **comments: read/write** to post replies)
-2. Expose it to the MCP server as `FIGMA_ACCESS_TOKEN`:
+See [Step 7](#step-7-optional-comment-tools) above for the click-by-click version. For non-Claude-Desktop clients, expose the token as `FIGMA_ACCESS_TOKEN` in the `env` block of your MCP config:
 
 ```json
 {
@@ -214,11 +507,9 @@ Pass `fileKey` explicitly only to target a *different* file — which also works
 }
 ```
 
-If you installed the DXT instead, skip this — the extension prompts for the token on install and stores it as a secret.
+Restart your client and run `check my Figma account` to verify.
 
-3. Restart your client and run `check my Figma account` to verify
-
-Full details, DXT install and tuning options in the [installation guide](INSTALLATION.md#4-optional-enable-comment-tools-figma-rest-token).
+Full details and tuning options in the [installation guide](INSTALLATION.md#4-optional-enable-comment-tools-figma-rest-token).
 
 ### What you can ask
 
@@ -264,7 +555,7 @@ If you want to know about all project contributions, you can visit the ["Contrib
 🆕 **New in 1.2.0:**
 - Read and reply to Figma comments via the REST API
 - Automatic file-key resolution — no pasting file URLs
-- Token prompt built into the DXT package
+- Token prompt built into the DXT/MCPB package
 
 🚀 **Under active development:**
 - Complete support for Figma Variables
