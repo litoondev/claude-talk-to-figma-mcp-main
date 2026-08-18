@@ -112,7 +112,7 @@ node -v
 ```
 
 - ✅ You see something like `v22.14.0` (any number **18 or higher**) → skip to 1b.
-- ❌ You see `command not found` → download the **LTS** installer from **[nodejs.org](https://nodejs.org/en/download)**, open the `.pkg` file, click Continue through the installer.
+- ❌ You see `command not found` → go to **[nodejs.org](https://nodejs.org/en/download)**, click the green **"Download Node.js (LTS)"** button, open the downloaded `.pkg` file, and click **Continue** through every screen of the installer.
 
 Then **quit and reopen Terminal** and run `node -v` again to confirm.
 
@@ -180,6 +180,8 @@ Plain English, line by line:
 | `npm install` | Downloads the code libraries it needs (takes 1–3 min, lots of scrolling text — normal) |
 | `npm run build` | Compiles the source into runnable files |
 
+> 💡 **There is one more important command: `npm run socket`.** It starts the bridge server that connects Claude to Figma. You'll run it in [Step 6a](#6a-start-the-bridge-server) every time you use the tool — **not** during install.
+
 **This folder is now your home base.** You'll come back to it every time you use the tool. Remember where it is: `Documents/claude-talk-to-figma-mcp-main`.
 
 <details>
@@ -222,6 +224,10 @@ Now make a copy with the modern extension name — current Claude Desktop expect
 cp claude-talk-to-figma-mcp-*.dxt claude-talk-to-figma-mcp.mcpb
 ```
 
+> 💡 The `*` in that command is a wildcard — it matches whatever version number is in the filename. Copy-paste it exactly as written.
+
+> 🪟 **Windows:** use `copy claude-talk-to-figma-mcp-*.dxt claude-talk-to-figma-mcp.mcpb` instead.
+
 You now have both files. **Use `.mcpb`.**
 
 | File | Use it when |
@@ -235,13 +241,14 @@ You now have both files. **Use `.mcpb`.**
 
 ## Step 4: Install the extension into Claude Desktop
 
-1. Open **Finder** → go to `Documents` → `claude-talk-to-figma-mcp-main`
-2. **Double-click `claude-talk-to-figma-mcp.mcpb`**
-3. Claude Desktop opens and shows an install prompt → click **Install**
-4. It asks for a **Figma personal access token** → **leave it empty and continue.** It's optional and only needed for reading comments. You can add it later ([Step 7](#step-7-optional-comment-tools)).
-5. **Quit Claude Desktop completely** (`Cmd` + `Q` — not just closing the window) and reopen it
+1. Open **Finder** — click the blue-and-white smiley-face icon in your Dock, or press `Cmd` + `Space`, type `Finder`, press `Enter`
+2. In the **sidebar** on the left, click **Documents**, then open the `claude-talk-to-figma-mcp-main` folder
+3. **Double-click `claude-talk-to-figma-mcp.mcpb`**
+4. Claude Desktop opens and shows an install prompt → click **Install**
+5. It will ask for a **Figma personal access token** → **leave the field blank and click Continue.** This is optional and only needed for comment tools — you can add it later in [Step 7](#step-7-optional-comment-tools).
+6. **Quit Claude Desktop completely** — press `Cmd` + `Q` (do **not** just click the red × to close the window) — then reopen it
 
-**Alternative if double-clicking does nothing:** Claude Desktop → **Settings** → **Extensions** → drag the `.mcpb` file onto the window.
+**Alternative if double-clicking does nothing:** Open Claude Desktop → **Settings** (gear icon or top menu) → **Extensions** tab → drag the `.mcpb` file and drop it anywhere onto that Extensions page.
 
 **✅ Checkpoint —** go to Claude Desktop → Settings → Extensions. You should see **Claude Talk to Figma** listed and enabled.
 
@@ -263,7 +270,7 @@ Try the other file — double-click the `.dxt` instead of the `.mcpb`. If both f
 
 1. Open the **Figma Desktop app**
 2. Open any design file (or create a new one)
-3. Top-left **Figma menu** → **Plugins** → **Development** → **Import plugin from manifest…**
+3. Click the **Figma logo (the "F" icon)** in the very top-left corner of the app → **Plugins** → **Development** → **Import plugin from manifest…**
 4. In the file picker, navigate to:
    ```
    Documents → claude-talk-to-figma-mcp-main → src → claude_mcp_plugin → manifest.json
@@ -318,19 +325,19 @@ In your Figma file: **Plugins** → **Development** → **Claude Talk to Figma**
 
 A small panel opens showing a **channel ID** in bold inside a green box — something like `a4f9c2`.
 
-**Copy that ID.**
+> ⚠️ **This ID changes every time you reopen the plugin.** Never reuse an old one — always copy a fresh one.
 
-> ⚠️ The channel ID is **new every time** you reopen the plugin. Don't reuse yesterday's.
+**→ Copy that 6-character ID now. You'll paste it into Claude in the very next step.**
 
 ### 6c. Connect Claude
 
-In Claude Desktop, type:
+In Claude Desktop, type the message below — but **replace `a4f9c2` with the ID you just copied from the plugin panel**:
 
 ```
 Connect to Figma, channel a4f9c2
 ```
 
-(substitute your actual ID)
+> 🔑 **`a4f9c2` is just an example.** Your real ID will look similar but be different — something like `d7b3f1` or `c90ae4`. You must use your own ID or Claude won't connect.
 
 Claude confirms the connection. Now test it:
 
@@ -369,9 +376,9 @@ Setup is permanent. Daily use is three things, ~20 seconds:
 cd ~/Documents/claude-talk-to-figma-mcp-main && npm run socket
 ```
 
-1. ✅ Run the command above (leave the window open)
-2. ✅ Figma → **Plugins** → **Development** → **Claude Talk to Figma** → copy the channel ID
-3. ✅ Tell Claude: `Connect to Figma, channel {your-ID}`
+1. ✅ Run the command above (leave the Terminal window open)
+2. ✅ Figma → **Plugins** → **Development** → **Claude Talk to Figma** → copy the channel ID from the green box
+3. ✅ Tell Claude: `Connect to Figma, channel` and then paste your ID — e.g. `Connect to Figma, channel d7b3f1`
 
 ---
 
