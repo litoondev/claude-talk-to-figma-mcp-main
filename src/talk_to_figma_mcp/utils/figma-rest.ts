@@ -379,3 +379,59 @@ export function deleteComment(fileKey: string, commentId: string): Promise<unkno
     { method: "DELETE" }
   );
 }
+
+// ---------------------------------------------------------------------------
+// Node reading (for cross-verification of plugin edits)
+// ---------------------------------------------------------------------------
+
+export interface FigmaNodeData {
+  id: string;
+  name: string;
+  type: string;
+  [key: string]: unknown;
+}
+
+export interface FigmaFileNodesResponse {
+  name: string;
+  nodes: Record<string, { document: FigmaNodeData; components: Record<string, unknown> } | null>;
+}
+
+/**
+ * GET /v1/files/:file_key/nodes?ids=...
+ *
+ * Reads one or more nodes from a Figma file via the REST API.
+ * Use this to independently verify that a plugin edit was persisted to
+ * Figma's servers — separate from what the plugin bridge reports.
+ *
+ * Requires FIGMA_ACCESS_TOKEN with at least `files:read` scope,
+ * and the token's account must have view access to the file.
+ */
+export async function getFileNodes(
+  fileKey: string,
+  nodeIds: string[]
+): Promise<FigmaFileNodesResponse> {
+  if (nodeIds.length === 0) {
+    throw new FigmaRestError("getFileNodes: nodeIds must not be empty");
+  }
+  const ids = nodeIds.map(encodeURIComponent).join(",");
+  return figmaRest<FigmaFileNodesResponse>(
+    `/v1/files/${encodeURIComponent(fileKey)}/nodes?ids=${ids}`
+  );
+}
+
+/**
+ * GET /v1/files/:file_key (metadata only — no full document tree)
+ *
+ * Cheapest way to confirm the REST token has access to a specific file
+ * without pulling the entire document.
+ */
+export async function getFileMetadata(
+  fileKey: string
+): Promise<{ name: string; lastModified: string; thumbnailUrl: string }> {
+  const data = await figmaRest<{
+    name: string;
+    lastModified: string;
+    thumbnailUrl: string;
+  }>(`/v1/files/${encodeURIComponent(fileKey)}?depth=1`);
+  return { name: data.name, lastModified: data.lastModified, thumbnailUrl: data.thumbnailUrl };
+}

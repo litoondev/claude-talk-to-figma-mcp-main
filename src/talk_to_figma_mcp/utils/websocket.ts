@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from "uuid";
 import { logger } from "./logger";
 import { serverUrl, defaultPort, WS_URL, reconnectInterval } from "../config/config";
 import { FigmaCommand, FigmaResponse, CommandProgressUpdate, PendingRequest, ProgressMessage } from "../types";
+import { hasScopeState, getScopeState, SCOPE_CREATION_COMMANDS } from "./section-scope";
 
 // WebSocket connection and request tracking
 let ws: WebSocket | null = null;
@@ -255,18 +256,36 @@ export function sendCommandToFigma(
       return;
     }
 
+    // ── Section scope enforcement ─────────────────────────────────────────
+    // When a section scope is active and this is a creation command that has
+    // no parentId, automatically inject the section's node ID so the new
+    // element is created inside the scoped section rather than on the page root.
+    let effectiveParams: Record<string, unknown> = { ...(params as any) };
+    if (
+      hasScopeState() &&
+      SCOPE_CREATION_COMMANDS.has(command as string) &&
+      !(effectiveParams as any).parentId
+    ) {
+      const scope = getScopeState()!;
+      effectiveParams = { ...effectiveParams, parentId: scope.sectionId };
+      logger.info(
+        `[SectionScope] Auto-injecting parentId=${scope.sectionId} ("${scope.sectionName}") for command "${command}"`
+      );
+    }
+    // ─────────────────────────────────────────────────────────────────────
+
     const id = uuidv4();
     const request = {
       id,
       type: command === "join" ? "join" : "message",
       ...(command === "join"
-        ? { channel: (params as any).channel, sessionId: SESSION_ID }
+        ? { channel: (effectiveParams as any).channel, sessionId: SESSION_ID }
         : { channel: currentChannel }),
       message: {
         id,
         command,
         params: {
-          ...(params as any),
+          ...effectiveParams,
           commandId: id, // Include the command ID in params
         },
       },

@@ -10,6 +10,8 @@ import { registerVariableTools } from "./variable-tools";
 import { registerFigJamTools } from "./figjam-tools";
 import { registerStyleTools } from "./style-tools";
 import { registerCommentTools } from "./comment-tools";
+import { registerConnectionTools } from "./connection-tools";
+import { registerSectionScopeTools } from "./section-scope-tools";
 
 /**
  * Register all Figma tools to the MCP server
@@ -29,6 +31,10 @@ export function registerTools(server: McpServer): void {
   registerStyleTools(server);
   // REST-based (no plugin channel required) — see tools/comment-tools.ts
   registerCommentTools(server);
+  // Connection diagnostics + REST cross-verification — see tools/connection-tools.ts
+  registerConnectionTools(server);
+  // Section scope enforcement — see tools/section-scope-tools.ts
+  registerSectionScopeTools(server);
 }
 
 // Export all tool registration functions for individual usage if needed
@@ -44,4 +50,6 @@ export {
   registerFigJamTools,
   registerStyleTools,
   registerCommentTools,
+  registerConnectionTools,
+  registerSectionScopeTools,
 };
