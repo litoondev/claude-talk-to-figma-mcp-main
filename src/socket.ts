@@ -1,4 +1,16 @@
 import { Server, ServerWebSocket } from "bun";
+import {
+  recordActivity,
+  getActivitySnapshot,
+  setQueueDepth,
+  forgetChannel,
+  summarizeParams,
+  extractNodeIds,
+  extractNodeNames,
+  describeCommand,
+  type ActivityEvent,
+} from "./activity";
+import { DASHBOARD_HTML } from "./activity-dashboard";
 
 // Enhanced logging system
 const logger = {
@@ -35,6 +47,53 @@ const stats = {
   discardedResponses: 0,
   cleanedStaleRequests: 0,
 };
+
+// ─── Live Activity Broadcasting ─────────────────────────────────────────────
+
+/**
+ * Metadata for commands currently in flight, keyed by request id.
+ * Lets terminal events report the command name and its wall-clock duration
+ * even though the plugin's response carries only the id.
+ */
+const inFlightMeta = new Map<string, { command: string; startedAt: number }>();
+
+/** Open Server-Sent Events streams for the /activity/stream endpoint. */
+const activityStreams = new Set<(event: ActivityEvent) => void>();
+
+/**
+ * Record an activity event and push it to every client watching this channel.
+ *
+ * The WebSocket fan-out is a genuine broadcast rather than the unicast used for
+ * command responses: the whole point is that observers — the plugin panel, a
+ * second agent, a dashboard — see work they did not themselves request.
+ * `type: "activity"` is distinct from `"broadcast"`, so existing clients that
+ * only understand commands and responses ignore these frames.
+ */
+function emitActivity(input: Parameters<typeof recordActivity>[0]): void {
+  const event = recordActivity(input);
+
+  const channelClients = channels.get(event.channel);
+  if (channelClients) {
+    const payload = JSON.stringify({ type: "activity", event });
+    for (const client of channelClients) {
+      if (client.readyState !== WebSocket.OPEN) continue;
+      try {
+        client.send(payload);
+        stats.messagesSent++;
+      } catch {
+        // A client that cannot receive activity must not disrupt the relay.
+      }
+    }
+  }
+
+  for (const push of activityStreams) {
+    try {
+      push(event);
+    } catch {
+      // Closed SSE stream; cleanup happens in the stream's cancel handler.
+    }
+  }
+}
 
 // ─── Command Queue & Response Routing Infrastructure ────────────────────────
 
@@ -181,6 +240,19 @@ function enqueueCommand(data: any, ws: ServerWebSocket<any>, channelName: string
   });
   stats.queuedCommands++;
 
+  const command = data.message?.command as string;
+  const params = summarizeParams(data.message?.params);
+  setQueueDepth(channelName, queueState.queue.length);
+  emitActivity({
+    channel: channelName,
+    kind: "queued",
+    command,
+    requestId,
+    message: describeCommand(command, params),
+    params,
+    nodeIds: extractNodeIds(data.message?.params),
+  });
+
   // Track max depth
   if (queueState.queue.length > stats.queueDepthMax) {
     stats.queueDepthMax = queueState.queue.length;
@@ -257,6 +329,14 @@ function processQueue(channelName: string): void {
     }
     requestToClient.delete(item.requestId);
     queueState.isProcessing = false;
+    emitActivity({
+      channel: channelName,
+      kind: "error",
+      command: item.data.message?.command,
+      requestId: item.requestId,
+      message: "No Figma plugin connected to this channel",
+    });
+    setQueueDepth(channelName, queueState.queue.length);
     // Use setTimeout to avoid stack overflow when draining large queues without a plugin
     setTimeout(() => processQueue(channelName), 0);
     return;
@@ -264,6 +344,22 @@ function processQueue(channelName: string): void {
 
   // Track current command for timeout/disconnect handling
   queueState.currentRequestId = item.requestId;
+
+  // Announce the command as in-flight. This is the event that flips every
+  // observer's "AI is working" indicator on.
+  const startedCommand = item.data.message?.command as string;
+  const startedParams = summarizeParams(item.data.message?.params);
+  inFlightMeta.set(item.requestId, { command: startedCommand, startedAt: Date.now() });
+  setQueueDepth(channelName, queueState.queue.length);
+  emitActivity({
+    channel: channelName,
+    kind: "started",
+    command: startedCommand,
+    requestId: item.requestId,
+    message: describeCommand(startedCommand, startedParams),
+    params: startedParams,
+    nodeIds: extractNodeIds(item.data.message?.params),
+  });
 
   // Start per-command timeout (safety net if plugin hangs)
   queueState.currentCommandTimeout = setTimeout(() => {
@@ -289,6 +385,18 @@ function processQueue(channelName: string): void {
       }
     }
     requestToClient.delete(item.requestId);
+
+    const meta = inFlightMeta.get(item.requestId);
+    inFlightMeta.delete(item.requestId);
+    emitActivity({
+      channel: channelName,
+      kind: "timeout",
+      command: meta?.command ?? item.data.message?.command,
+      requestId: item.requestId,
+      durationMs: meta ? Date.now() - meta.startedAt : undefined,
+      message: "Timed out waiting for the Figma plugin to respond",
+    });
+
     // Unblock queue
     queueState.isProcessing = false;
     queueState.currentCommandTimeout = undefined;
@@ -340,6 +448,30 @@ function handleResponseFromPlugin(data: any, channelName: string): void {
   const responseId = data.message?.id;
   const entry = responseId ? requestToClient.get(responseId) : null;
 
+  // Emit the terminal activity event before routing, so observers see the
+  // command close out even when the requesting agent has already disconnected.
+  if (responseId) {
+    const meta = inFlightMeta.get(responseId);
+    inFlightMeta.delete(responseId);
+    const isError = data.message?.error !== undefined;
+    const result = data.message?.result;
+    const nodeIds = isError ? [] : extractNodeIds(result);
+    const nodeNames = isError ? [] : extractNodeNames(result);
+
+    emitActivity({
+      channel: channelName,
+      kind: isError ? "error" : "completed",
+      command: meta?.command,
+      requestId: responseId,
+      durationMs: meta ? Date.now() - meta.startedAt : undefined,
+      message: isError
+        ? String(data.message.error)
+        : `${(meta?.command ?? "command").replace(/_/g, " ")} finished`,
+      nodeIds: nodeIds.length ? nodeIds : undefined,
+      nodeNames: nodeNames.length ? nodeNames : undefined,
+    });
+  }
+
   if (entry && entry.ws.readyState === WebSocket.OPEN) {
     // Unicast: send ONLY to the requesting agent
     try {
@@ -378,6 +510,7 @@ function handleResponseFromPlugin(data: any, channelName: string): void {
     }
     queueState.currentRequestId = undefined;
     queueState.isProcessing = false;
+    setQueueDepth(channelName, queueState.queue.length);
     processQueue(channelName);
   }
 }
@@ -506,8 +639,20 @@ function handleConnection(ws: ServerWebSocket<any>) {
 
 // ─── Server ────────────────────────────────────────────────────────────────
 
+/**
+ * Listen port. Defaults to 3055 to match the plugin and MCP client defaults;
+ * override with SOCKET_PORT to run a second relay alongside a live one (useful
+ * for testing without disturbing an in-use session).
+ */
+const LISTEN_PORT = (() => {
+  const raw = process.env.SOCKET_PORT;
+  if (!raw || !/^\d+$/.test(raw)) return 3055;
+  const parsed = Number(raw);
+  return parsed > 0 && parsed < 65536 ? parsed : 3055;
+})();
+
 const server = Bun.serve({
-  port: 3055,
+  port: LISTEN_PORT,
   // uncomment this to allow connections in windows wsl
   // hostname: "0.0.0.0",
   // `Server` is generic in current bun-types; parameterise it to match the
@@ -550,6 +695,95 @@ const server = Bun.serve({
           "Content-Type": "application/json",
           "Access-Control-Allow-Origin": "*"
         }
+      });
+    }
+
+    // ── Live activity dashboard (human-facing) ──────────────────────────
+    if (url.pathname === "/dashboard" || url.pathname === "/activity/dashboard") {
+      return new Response(DASHBOARD_HTML, {
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "no-store",
+        },
+      });
+    }
+
+    // ── Activity snapshot (machine-facing; backs get_activity_log) ──────
+    if (url.pathname === "/activity") {
+      const sinceRaw = url.searchParams.get("since");
+      const limitRaw = url.searchParams.get("limit");
+      const channel = url.searchParams.get("channel") ?? undefined;
+
+      const since = sinceRaw !== null && /^\d+$/.test(sinceRaw) ? Number(sinceRaw) : undefined;
+      const limit = limitRaw !== null && /^\d+$/.test(limitRaw) ? Number(limitRaw) : undefined;
+
+      return new Response(
+        JSON.stringify(getActivitySnapshot({ since, limit, channel })),
+        {
+          headers: {
+            "Content-Type": "application/json",
+            "Cache-Control": "no-store",
+            "Access-Control-Allow-Origin": "*",
+          },
+        }
+      );
+    }
+
+    // ── Activity event stream (Server-Sent Events) ──────────────────────
+    if (url.pathname === "/activity/stream") {
+      const encoder = new TextEncoder();
+      let unsubscribe: (() => void) | null = null;
+      let heartbeat: ReturnType<typeof setInterval> | null = null;
+
+      const body = new ReadableStream({
+        start(controller) {
+          const send = (payload: unknown) => {
+            try {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
+            } catch {
+              // Client vanished between the readyState check and the write.
+            }
+          };
+
+          // Seed the stream with current history so a dashboard opened
+          // mid-session renders immediately instead of waiting for the
+          // next command.
+          const snapshot = getActivitySnapshot({ limit: 200 });
+          send({ type: "snapshot", ...snapshot });
+
+          const push = (event: ActivityEvent) => {
+            send({
+              type: "event",
+              event,
+              channels: getActivitySnapshot({ limit: 0 }).channels,
+            });
+          };
+          activityStreams.add(push);
+          unsubscribe = () => activityStreams.delete(push);
+
+          // Comment frames keep proxies and browsers from dropping an idle
+          // connection during long stretches with no design activity.
+          heartbeat = setInterval(() => {
+            try {
+              controller.enqueue(encoder.encode(": keepalive\n\n"));
+            } catch {
+              /* stream closed */
+            }
+          }, 20_000);
+        },
+        cancel() {
+          if (unsubscribe) unsubscribe();
+          if (heartbeat) clearInterval(heartbeat);
+        },
+      });
+
+      return new Response(body, {
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache, no-transform",
+          Connection: "keep-alive",
+          "Access-Control-Allow-Origin": "*",
+        },
       });
     }
 
@@ -680,6 +914,12 @@ const server = Bun.serve({
             stats.errors++;
           }
 
+          emitActivity({
+            channel: channelName,
+            kind: "connection",
+            message: `A client joined the channel (${channelClients.size} connected)`,
+          });
+
           return;
         }
 
@@ -782,6 +1022,22 @@ const server = Bun.serve({
 
           logger.debug(`Progress update for command ${data.id} in channel ${channelName}: ${data.message?.data?.status || 'unknown'} - ${data.message?.data?.progress || 0}%`);
 
+          // Mirror intermediate progress into the activity stream. Long
+          // operations (bulk text replacement, node scans) would otherwise look
+          // frozen between "started" and "completed".
+          const progressData = data.message?.data;
+          if (progressData && progressData.status !== "started") {
+            const meta = data.id ? inFlightMeta.get(data.id) : undefined;
+            emitActivity({
+              channel: channelName,
+              kind: "progress",
+              command: meta?.command ?? progressData.commandType,
+              requestId: data.id,
+              progress: typeof progressData.progress === "number" ? progressData.progress : undefined,
+              message: progressData.message || "Working…",
+            });
+          }
+
           // Route progress update to the requesting agent (unicast) if tracked
           const requestId = data.id;
           const entry = requestId ? requestToClient.get(requestId) : null;
@@ -835,9 +1091,19 @@ const server = Bun.serve({
       });
 
       // Remove client from their channel
+      const closingClientWasPlugin = pluginClients.has(ws);
+
       channels.forEach((clients, channelName) => {
         if (clients.delete(ws)) {
           logger.debug(`Removed client ${clientId} from channel ${channelName} due to connection close`);
+
+          emitActivity({
+            channel: channelName,
+            kind: "connection",
+            message: closingClientWasPlugin
+              ? "The Figma plugin disconnected — changes cannot be applied until it reconnects"
+              : `A client left the channel (${clients.size} still connected)`,
+          });
 
           // Notify other clients in same channel
           try {
@@ -860,6 +1126,7 @@ const server = Bun.serve({
           if (clients.size === 0) {
             channels.delete(channelName);
             channelQueues.delete(channelName);
+            forgetChannel(channelName);
             logger.debug(`Cleaned up empty channel: ${channelName}`);
           }
         }

@@ -209,6 +209,143 @@
       .operation-error {
         color: #f87359ff;
       }
+
+      /* ── Live activity feed ─────────────────────────────────────────── */
+      .mcp-plugin__activity {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        min-height: 0;
+        flex: 1;
+      }
+      .mcp-plugin__activity-head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .mcp-plugin__activity-title {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        font-weight: 600;
+        opacity: 0.55;
+        margin: 0;
+      }
+      .mcp-plugin__activity-spacer { flex: 1; }
+      .mcp-plugin__status-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 10px;
+        padding: 3px 8px;
+        border-radius: 999px;
+        background: #EDD0F8;
+        color: #400B55;
+        white-space: nowrap;
+      }
+      .dark .mcp-plugin__status-chip {
+        background: #3a3a3a;
+        color: #ddd;
+      }
+      .mcp-plugin__status-chip .dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: #999;
+        flex: none;
+      }
+      .mcp-plugin__status-chip.working { background: #732392; color: #fff; }
+      .dark .mcp-plugin__status-chip.working { background: #5467F7; }
+      .mcp-plugin__status-chip.working .dot {
+        background: #fff;
+        animation: mcp-pulse 1.3s ease-in-out infinite;
+      }
+      @keyframes mcp-pulse { 0%,100% { opacity: 1 } 50% { opacity: 0.25 } }
+
+      .mcp-plugin__activity-list {
+        flex: 1;
+        min-height: 90px;
+        overflow-y: auto;
+        border: 1px solid #EDD0F8;
+        border-radius: 6px;
+        background: #fff;
+        padding: 4px;
+      }
+      .dark .mcp-plugin__activity-list {
+        border-color: #3d3d3d;
+        background: #232323;
+      }
+      .mcp-plugin__activity-empty {
+        padding: 18px 8px;
+        text-align: center;
+        font-size: 11px;
+        opacity: 0.45;
+      }
+      .mcp-plugin__activity-row {
+        display: grid;
+        grid-template-columns: 52px 12px 1fr auto;
+        gap: 6px;
+        align-items: baseline;
+        padding: 4px 5px;
+        border-radius: 4px;
+        font-size: 11px;
+        line-height: 1.4;
+      }
+      .mcp-plugin__activity-row + .mcp-plugin__activity-row {
+        border-top: 1px solid rgba(128, 128, 128, 0.14);
+      }
+      .mcp-plugin__activity-row .t {
+        opacity: 0.45;
+        font-size: 10px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .mcp-plugin__activity-row .i { font-size: 10px; }
+      .mcp-plugin__activity-row .m { word-break: break-word; }
+      .mcp-plugin__activity-row .d {
+        opacity: 0.45;
+        font-size: 10px;
+        white-space: nowrap;
+        font-variant-numeric: tabular-nums;
+      }
+      .mcp-plugin__activity-row.started  .i { color: #732392; }
+      .dark .mcp-plugin__activity-row.started .i { color: #8f9bff; }
+      .mcp-plugin__activity-row.completed .i { color: #2e9e57; }
+      .mcp-plugin__activity-row.error     .i { color: #d94f36; }
+      .mcp-plugin__activity-row.error     .m { color: #d94f36; }
+      .mcp-plugin__activity-row .n {
+        grid-column: 3 / -1;
+        display: block;
+        opacity: 0.45;
+        font-size: 10px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+
+      .mcp-plugin__activity-opts {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        font-size: 10px;
+        opacity: 0.75;
+      }
+      .mcp-plugin__activity-opts label {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        cursor: pointer;
+      }
+      .mcp-plugin__activity-opts input { margin: 0; }
+      .mcp-plugin__link {
+        background: none;
+        border: none;
+        padding: 0;
+        font: inherit;
+        font-size: 10px;
+        color: inherit;
+        opacity: 0.6;
+        text-decoration: underline;
+        cursor: pointer;
+      }
+      .mcp-plugin__link:hover { opacity: 1; }
     </style>
   </head>
   <body class="dark">
@@ -254,6 +391,38 @@
             Disconnect
           </button>
         </div>
+
+        <div class="mcp-plugin__activity">
+          <div class="mcp-plugin__activity-head">
+            <h2 class="mcp-plugin__activity-title">Live activity</h2>
+            <span class="mcp-plugin__activity-spacer"></span>
+            <span id="activity-chip" class="mcp-plugin__status-chip">
+              <span class="dot"></span><span id="activity-chip-text">Idle</span>
+            </span>
+            <button id="btn-clear-activity" class="mcp-plugin__link" type="button">Clear</button>
+          </div>
+
+          <div id="activity-list" class="mcp-plugin__activity-list">
+            <div class="mcp-plugin__activity-empty">
+              No activity yet. Actions will appear here as Claude works.
+            </div>
+          </div>
+
+          <div class="mcp-plugin__activity-opts">
+            <label title="Draw a moving cursor on the canvas that travels to each element as it is edited. Everyone with the file open sees it.">
+              <input type="checkbox" id="opt-cursor"> Live cursor
+            </label>
+            <label title="Select each node as it is changed, so collaborators watching the file see what is being edited">
+              <input type="checkbox" id="opt-highlight" checked> Highlight nodes
+            </label>
+            <label title="Write a live status frame onto the canvas so anyone with the file open can follow progress. Adds nodes to your document.">
+              <input type="checkbox" id="opt-overlay"> Canvas overlay
+            </label>
+            <label title="Pan and zoom the canvas to follow each change">
+              <input type="checkbox" id="opt-follow"> Follow viewport
+            </label>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -285,7 +454,19 @@
             modeToggle: document.querySelector(".mcp-plugin__mode"),
             modeSun: document.querySelector(".mcp-plugin__mode-sun"),
             modeMoon: document.querySelector(".mcp-plugin__mode-moon"),
+            activityList: document.getElementById("activity-list"),
+            activityChip: document.getElementById("activity-chip"),
+            activityChipText: document.getElementById("activity-chip-text"),
+            clearActivityBtn: document.getElementById("btn-clear-activity"),
+            optCursor: document.getElementById("opt-cursor"),
+            optHighlight: document.getElementById("opt-highlight"),
+            optOverlay: document.getElementById("opt-overlay"),
+            optFollow: document.getElementById("opt-follow"),
           };
+
+          // Rendered activity entries, newest last. Bounded so a long session
+          // cannot grow the panel's DOM without limit.
+          this.activity = { entries: [], max: 100, elapsedTimer: null };
 
           this.init();
         }
@@ -304,6 +485,15 @@
 
           // Mode toggle
           this.ui.modeToggle.addEventListener("click", () => this.toggleMode());
+
+          // Activity controls
+          this.ui.clearActivityBtn.addEventListener("click", () => this.clearActivity());
+          ["optCursor", "optHighlight", "optOverlay", "optFollow"].forEach((key) => {
+            this.ui[key].addEventListener("change", () => this.pushActivitySettings());
+          });
+
+          // Keeps the "working · 4s" elapsed counter ticking between events.
+          this.activity.elapsedTimer = setInterval(() => this.renderActivityChip(), 1000);
 
           // Figma messages
           window.onmessage = (event) => this.handleFigmaMessage(event.data.pluginMessage);
@@ -492,7 +682,133 @@
               this.updateProgress(message);
               this.sendProgressUpdate(message);
               break;
+            case "activity-entry":
+              this.addActivityEntry(message.entry, message.state);
+              break;
+            case "activity-settings":
+              this.applyActivitySettingsToUi(message.settings);
+              break;
           }
+        }
+
+        // ── Live activity feed ────────────────────────────────────────────
+
+        /**
+         * Append one lifecycle entry and refresh the header chip.
+         * `state` carries the plugin's current working/idle status.
+         */
+        addActivityEntry(entry, state) {
+          if (!entry) return;
+
+          this.activity.entries.push(entry);
+          if (this.activity.entries.length > this.activity.max) {
+            this.activity.entries.splice(0, this.activity.entries.length - this.activity.max);
+          }
+          this.activity.state = state || this.activity.state;
+
+          this.renderActivity();
+          this.renderActivityChip();
+        }
+
+        clearActivity() {
+          this.activity.entries = [];
+          this.renderActivity();
+        }
+
+        escapeHtml(value) {
+          return String(value == null ? "" : value).replace(/[&<>"']/g, (c) => ({
+            "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+          })[c]);
+        }
+
+        formatClock(ts) {
+          const d = new Date(ts);
+          const pad = (n) => String(n).padStart(2, "0");
+          return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+        }
+
+        formatDuration(ms) {
+          if (ms == null) return "";
+          return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
+        }
+
+        renderActivity() {
+          const entries = this.activity.entries;
+
+          if (!entries.length) {
+            this.ui.activityList.innerHTML =
+              '<div class="mcp-plugin__activity-empty">No activity yet. ' +
+              "Actions will appear here as Claude works.</div>";
+            return;
+          }
+
+          const icons = { started: "▶", completed: "✓", error: "✕" };
+
+          this.ui.activityList.innerHTML = entries.map((e) => {
+            const names = e.nodeNames && e.nodeNames.length
+              ? e.nodeNames
+              : (e.nodeIds || []);
+            const nodeLine = names.length
+              ? `<span class="n">${this.escapeHtml(names.slice(0, 4).join(", "))}` +
+                (names.length > 4 ? ` +${names.length - 4} more` : "") + "</span>"
+              : "";
+
+            return `<div class="mcp-plugin__activity-row ${this.escapeHtml(e.kind)}">` +
+              `<span class="t">${this.formatClock(e.ts)}</span>` +
+              `<span class="i">${icons[e.kind] || "·"}</span>` +
+              `<span class="m">${this.escapeHtml(e.message)}</span>` +
+              `<span class="d">${this.formatDuration(e.durationMs)}</span>` +
+              nodeLine +
+            "</div>";
+          }).join("");
+
+          // Pin to the newest entry.
+          this.ui.activityList.scrollTop = this.ui.activityList.scrollHeight;
+        }
+
+        renderActivityChip() {
+          const state = this.activity.state;
+          const working = !!(state && state.working);
+
+          this.ui.activityChip.className =
+            "mcp-plugin__status-chip" + (working ? " working" : "");
+
+          if (working) {
+            const secs = state.startedAt
+              ? Math.max(0, Math.round((Date.now() - state.startedAt) / 1000))
+              : 0;
+            const name = String(state.currentCommand || "working").replace(/_/g, " ");
+            this.ui.activityChipText.textContent = `${name} · ${secs}s`;
+          } else if (state) {
+            this.ui.activityChipText.textContent =
+              `Idle · ${state.completed} done` + (state.failed ? `, ${state.failed} failed` : "");
+          } else {
+            this.ui.activityChipText.textContent = "Idle";
+          }
+        }
+
+        /** Reflect settings pushed from the plugin core into the checkboxes. */
+        applyActivitySettingsToUi(settings) {
+          if (!settings) return;
+          this.ui.optCursor.checked = !!settings.cursorEnabled;
+          this.ui.optHighlight.checked = !!settings.highlightEnabled;
+          this.ui.optOverlay.checked = !!settings.overlayEnabled;
+          this.ui.optFollow.checked = !!settings.followViewport;
+        }
+
+        /** Send checkbox state back to the plugin core, which persists it. */
+        pushActivitySettings() {
+          parent.postMessage({
+            pluginMessage: {
+              type: "set-activity-settings",
+              settings: {
+                cursorEnabled: this.ui.optCursor.checked,
+                highlightEnabled: this.ui.optHighlight.checked,
+                overlayEnabled: this.ui.optOverlay.checked,
+                followViewport: this.ui.optFollow.checked,
+              },
+            },
+          }, "*");
         }
 
         /**

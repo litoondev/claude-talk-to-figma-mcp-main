@@ -382,6 +382,247 @@ cd ~/Documents/claude-talk-to-figma-mcp-main && npm run socket
 
 ---
 
+## 🎨 Local design library first
+
+The plugin will not design from scratch when your file already answers the
+question. Before creating or modifying anything, it inspects the current file
+and reuses what's there.
+
+### One call, the whole system
+
+`get_design_system` replaces four separate lookups and returns:
+
+| | |
+|---|---|
+| **Variables & tokens** | Every collection, with modes (light/dark) and colour values resolved to hex |
+| **Components** | Standalone components *and* component sets with their **variant properties**, so an existing variant can be selected instead of a new component built |
+| **Typography** | Text styles with family, size, line height, letter spacing, case |
+| **Colours** | Paint styles as hex, with opacity |
+| **Effects & grids** | Shadows, blurs, column grids |
+| **Observed conventions** | The padding, gap, radius and font-size values **actually used in the file**, ranked by frequency |
+
+That last row is the part styles alone can't tell you. Most real files encode
+their spacing rhythm in usage rather than in named tokens, so "match the
+existing spacing" is unanswerable without it. You get output like:
+
+```
+── OBSERVED CONVENTIONS — match this rhythm ──────────────
+  Padding values:  16 (×24), 32 (×8)
+  Gap values:      24 (×6), 12 (×2)
+  Corner radii:    8 (×6), 4 (×2)
+```
+
+Now the agent knows to use `16` and `8`, not a plausible-looking `20` and `10`.
+
+### The rule it follows
+
+Loaded as the `design_system_first` prompt:
+
+1. **Reuse an existing component exactly** when it solves the need
+2. **Reuse an existing variant** when a suitable variation exists
+3. **Compose existing components** when it can be built from current primitives
+4. **Extend the system** when a new variant is genuinely required
+5. **Create something new only as a last resort**
+
+It also binds rather than hardcodes — `apply_variable_to_node` for colour,
+`set_text_style_id` for type, `create_component_instance` for components —
+and when editing, preserves variable bindings and avoids detaching instances.
+
+> The existing `design_strategy` prompt used to say "plan your layout, then
+> create elements", which pulled the other way. It now opens by deferring to
+> this rule and describes *how* to build only once you've confirmed the thing
+> you need doesn't already exist.
+
+### Using it
+
+Usually nothing to do — the agent calls it on its own. To be explicit:
+
+> "Check the design system first, then build the settings page"
+
+> "What components and tokens does this file already have?"
+
+Components often live on a dedicated library page. If a scan comes back empty,
+widen it:
+
+> "Scan the whole document for components, not just this page"
+
+---
+
+## 📱 Responsive Website
+
+Turn an approved desktop design into tablet and mobile versions — by adapting
+layout behaviour, not by shrinking the frame.
+
+### How it works: clone, then adapt
+
+Responsive frames are produced by **cloning** the source and changing how the
+clone *flows*. That single choice is what makes the safety guarantees real
+rather than aspirational:
+
+- component instances stay **connected** — nothing is detached
+- variable and style **bindings survive** untouched
+- **copy is never rewritten**, images never replaced
+- the **original desktop frame is never modified**
+
+### Behaviour, not scaling
+
+Each section is classified and given its own responsive behaviour:
+
+| Section | Tablet 768 | Mobile 320 |
+|---|---|---|
+| **Navigation** | keep horizontal | switch to existing mobile variant; hamburger flagged if none exists |
+| **Hero** | equalise the split | stack, copy above media |
+| **Card grid** | 4 → 2 per row | 1 per row |
+| **Form** | stack if >4 fields | rows stack, inputs fill width |
+| **Table** | horizontal scroll + **flagged** | horizontal scroll + **flagged** |
+| **Footer** | 4 → 2 columns | 1 column |
+
+Nothing is ever scaled proportionally like an image.
+
+### Breakpoints
+
+Default design frames are **1440 → 768 → 320**. Intermediate widths are handled
+by Auto Layout, fill/hug sizing and wrapping rather than by more frames.
+
+**QA runs at both 390px and 320px.** A layout that survives 390 and breaks at
+320 is not responsive.
+
+### The three tools
+
+| Tool | Does |
+|---|---|
+| `analyze_responsive` | Classifies sections, reports the plan, finds existing responsive frames. **Changes nothing.** |
+| `make_responsive` | Generates 768 and 320 frames, validates them, returns a change summary |
+| `validate_responsive` | QA at any widths — overflow, off-canvas, overlap, tiny text, small tap targets |
+
+### Preservation modes
+
+- **`strict`** (default) — layout flow only; typography untouched
+- **`balanced`** — additionally scales *unbound* typography
+- **`flexible`** — allows larger restructuring
+
+Text bound to a text style is **never** overridden in any mode. Overriding the
+design system to fix a layout is backwards.
+
+### Using it
+
+> "Analyze this page for responsive issues"
+
+> "Make this responsive"
+
+> "Check the mobile frame at 320"
+
+### What it flags rather than guesses
+
+When no safe pattern exists, it applies the least destructive change and tells
+you — it does not guess confidently:
+
+```
+Warnings — manual review required:
+  ⚠ Pricing Table (table): no safe automatic responsive pattern.
+    Least-destructive adjustment applied; manual review required.
+  ⚠ Header: no mobile navigation variant exists in the component set.
+    The desktop link list was hidden to prevent overflow — a hamburger
+    menu and open/close states still need to be added.
+```
+
+---
+
+## 👀 Watch the AI work — live activity tracking
+
+By default an AI agent works silently and you only see the finished result. Live
+activity tracking makes the work visible **while it happens** — what's running
+right now, what it just changed, and how long each step took.
+
+There are four places to watch, each covering a different audience.
+
+### 1. The plugin panel
+
+Nothing to turn on. The plugin panel now shows a scrolling feed of every action
+with timestamps, durations and the names of the nodes touched, plus a status
+chip that reads **`create frame · 3s`** while work is in flight and **`Idle · 12
+done`** when it isn't.
+
+### 2. The web dashboard — `http://localhost:3055/dashboard`
+
+Open that URL in any browser while the socket server is running. It streams live
+over Server-Sent Events and shows every connected channel, whether each is
+working, the queue depth, and the full activity log with search and filtering.
+
+Useful when you want a big readable view on a second monitor instead of the
+narrow plugin panel.
+
+### 3. On the Figma canvas — a live cursor, like a real collaborator
+
+The two surfaces above are only visible to *you*. These make the work visible to
+**anyone with the file open**:
+
+| Setting | What collaborators see | Modifies your file? |
+|---|---|---|
+| **Live cursor** (off by default) | A cursor with a name pill that glides to each element as it's edited — just like watching a teammate | **Yes** — adds a node, auto-removed on close |
+| **Highlight nodes** (on by default) | Your selection outline jumps to each element as it's edited, synced through Figma multiplayer | No |
+| **Canvas overlay** (off by default) | A locked status card showing the current action and recent history | **Yes** — adds a frame |
+| **Follow viewport** (off by default) | Nothing extra; pans *your* canvas to follow the work | No |
+
+Toggle them at the bottom of the plugin panel, or just ask:
+
+> "Turn on the live cursor so I can watch you work"
+
+> "Turn on the live cursor and call it Orange Toolz"
+
+#### How the live cursor works — and one honest limitation
+
+**A Figma plugin cannot move your real multiplayer cursor.** That pointer is
+driven by your physical mouse and the Plugin API gives no way to write to it.
+
+So this draws its own: a cursor arrow plus a label pill, built from ordinary
+Figma nodes. Because they *are* ordinary nodes, Figma's multiplayer sync
+broadcasts every position change to everyone in the file — which produces the
+same effect as watching a collaborator move around the canvas.
+
+The label also carries the current action, so observers see not just *where* the
+agent is but *what it's doing there*:
+
+```
+  ↖ Claude — create frame
+```
+
+It glides between elements over ~300ms rather than teleporting, stays locked so
+nobody can drag it by accident, drops back to just the name after 4 seconds of
+quiet, and is **removed automatically when the plugin closes**.
+
+> ⚠️ **The live cursor and the canvas overlay both write real nodes into your
+> document**, so they show up in version history and the undo stack. That's why
+> both are off by default. Node highlighting gives you a good deal of the
+> collaborator visibility and changes nothing at all.
+
+### 4. Ask Claude directly
+
+Three tools are available to the agent:
+
+| Tool | What it does |
+|---|---|
+| `get_activity_log` | Full history from the socket server — works even if the plugin disconnected |
+| `get_activity_state` | The plugin's in-document view, with resolved node names |
+| `set_activity_overlay` | Turn the live cursor, canvas overlay, highlighting and viewport following on or off |
+
+> "What have you changed so far?"
+
+> "Are you still working on that, and how long has it been running?"
+
+### Running a second server on another port
+
+The socket server listens on `3055`. Set `SOCKET_PORT` to run another alongside
+it — handy for testing without disturbing a live session:
+
+```bash
+SOCKET_PORT=3056 npm run socket
+```
+
+Point the MCP server at it with `--port=3056`.
+
+---
+
 ## 🆘 Troubleshooting common errors
 
 | What you see | What's actually wrong | Fix |

@@ -60,8 +60,743 @@ function sendProgressUpdate(commandId, commandType, status, progress, totalItems
   return update;
 }
 
+// ─── Live Activity Tracking ────────────────────────────────────────────────
+//
+// Three surfaces make the agent's work visible, each covering a gap the others
+// cannot:
+//
+//   1. Panel feed   — a scrolling log in the plugin UI. Local to the operator.
+//   2. Selection    — touched nodes are selected as they change. Figma syncs
+//                     selection in multiplayer, so collaborators see coloured
+//                     outlines move around the canvas in real time.
+//   3. Canvas overlay — a locked status frame written into the page itself.
+//                     This is the only surface visible to someone who has the
+//                     file open but is not running the plugin, so it is what
+//                     makes progress trackable by *anyone* with file access.
+//
+// The overlay writes real nodes into the user's document, which shows up in
+// version history and the undo stack. It is therefore OFF by default and must
+// be turned on explicitly (UI toggle, or the set_activity_overlay MCP tool).
+
+const OVERLAY_MARKER_KEY = "claudeActivityOverlay";
+const OVERLAY_FRAME_NAME = "⚡ Claude Live Activity";
+
+const activity = {
+  settings: {
+    overlayEnabled: false,   // writes nodes into the document — opt-in
+    highlightEnabled: true,  // selection sync — free, no document mutation
+    followViewport: false,   // pan the canvas to follow work — can be jarring
+    cursorEnabled: false,    // synthetic multiplayer-style cursor — opt-in
+    cursorLabel: "Claude",   // name shown in the cursor's pill
+  },
+  // Most recent entries, newest last. Bounded so a long session cannot grow
+  // the plugin's memory without limit.
+  log: [],
+  maxLog: 40,
+  overlayLogLines: 8,
+  current: null,           // { command, startedAt } while a command is running
+  completed: 0,
+  failed: 0,
+  // Serialises overlay redraws: Figma node writes are async (font loading), and
+  // overlapping redraws would interleave partial text updates.
+  overlayBusy: false,
+  overlayDirty: false,
+  // Ghost cursor animation handles.
+  cursorAnim: null,
+  cursorIdleTimer: null,
+};
+
+function activityTimestamp(ts) {
+  const d = new Date(ts);
+  const pad = (n) => String(n).padStart(2, "0");
+  return pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
+}
+
+function prettyCommand(command) {
+  return String(command || "command").replace(/_/g, " ");
+}
+
+/**
+ * Record one lifecycle entry and refresh every activity surface.
+ * `entry` is { kind, command, message, durationMs?, nodeIds?, nodeNames? }.
+ */
+function recordActivity(entry) {
+  const record = Object.assign({ ts: Date.now() }, entry);
+
+  activity.log.push(record);
+  if (activity.log.length > activity.maxLog) {
+    activity.log.splice(0, activity.log.length - activity.maxLog);
+  }
+
+  if (entry.kind === "started") {
+    activity.current = { command: entry.command, startedAt: record.ts };
+  } else if (entry.kind === "completed" || entry.kind === "error") {
+    if (entry.kind === "completed") activity.completed++;
+    else activity.failed++;
+    activity.current = null;
+  }
+
+  // Feed the plugin panel.
+  figma.ui.postMessage({
+    type: "activity-entry",
+    entry: record,
+    state: {
+      working: !!activity.current,
+      currentCommand: activity.current ? activity.current.command : null,
+      startedAt: activity.current ? activity.current.startedAt : null,
+      completed: activity.completed,
+      failed: activity.failed,
+      settings: activity.settings,
+    },
+  });
+
+  if (activity.settings.overlayEnabled) {
+    scheduleOverlayUpdate();
+  }
+
+  // Drive the ghost cursor to whatever is being worked on. Fire-and-forget:
+  // cursor movement is cosmetic and must never delay or fail a command.
+  if (activity.settings.cursorEnabled && (entry.kind === "started" || entry.kind === "completed")) {
+    moveCursorToNode(
+      entry.nodeIds,
+      entry.kind === "started" ? prettyCommand(entry.command) : null
+    ).catch(() => {});
+  }
+}
+
+/**
+ * Select the nodes a command touched.
+ *
+ * Selection is per-user state, but Figma broadcasts it over multiplayer — which
+ * means collaborators watching the file see the selection outline jump to each
+ * element as the agent works on it. That is the cheapest possible "show live
+ * movement on the canvas", and unlike the overlay it mutates nothing.
+ */
+async function highlightNodes(nodeIds) {
+  if (!activity.settings.highlightEnabled) return;
+  if (!nodeIds || !nodeIds.length) return;
+
+  try {
+    const nodes = [];
+    for (const id of nodeIds.slice(0, 50)) {
+      const node = await figma.getNodeByIdAsync(id);
+      // Never select our own instrumentation nodes.
+      if (node && node.getPluginData && (
+        node.getPluginData(CURSOR_MARKER_KEY) === "1" ||
+        node.getPluginData(OVERLAY_MARKER_KEY) === "1"
+      )) continue;
+      // Only nodes on the current page can be selected, and only real scene
+      // nodes (pages and the document root are not selectable).
+      if (node && !node.removed && node.type !== "PAGE" && node.type !== "DOCUMENT") {
+        if (figma.currentPage.selection !== undefined) {
+          // Verify the node actually lives on the current page.
+          let parent = node.parent;
+          let onCurrentPage = false;
+          while (parent) {
+            if (parent.id === figma.currentPage.id) { onCurrentPage = true; break; }
+            parent = parent.parent;
+          }
+          if (onCurrentPage) nodes.push(node);
+        }
+      }
+    }
+
+    if (!nodes.length) return;
+    figma.currentPage.selection = nodes;
+
+    if (activity.settings.followViewport) {
+      figma.viewport.scrollAndZoomIntoView(nodes);
+    }
+  } catch (err) {
+    // Highlighting is cosmetic; never let it break a command.
+    console.log("highlightNodes failed:", err && err.message);
+  }
+}
+
+// ─── Canvas overlay ────────────────────────────────────────────────────────
+
+async function loadOverlayFonts() {
+  const candidates = [
+    { family: "Inter", style: "Regular" },
+    { family: "Roboto", style: "Regular" },
+  ];
+  const bolds = [
+    { family: "Inter", style: "Bold" },
+    { family: "Roboto", style: "Bold" },
+  ];
+
+  let regular = null;
+  let bold = null;
+
+  for (const font of candidates) {
+    try { await figma.loadFontAsync(font); regular = font; break; } catch (e) { /* try next */ }
+  }
+  for (const font of bolds) {
+    try { await figma.loadFontAsync(font); bold = font; break; } catch (e) { /* try next */ }
+  }
+
+  if (!regular) return null;
+  return { regular, bold: bold || regular };
+}
+
+function findOverlayFrame() {
+  const children = figma.currentPage.children;
+  for (const child of children) {
+    if (!child.removed && child.getPluginData(OVERLAY_MARKER_KEY) === "1") return child;
+  }
+  return null;
+}
+
+function makeText(name, fonts, useBold, size, color) {
+  const text = figma.createText();
+  text.name = name;
+  text.fontName = useBold ? fonts.bold : fonts.regular;
+  text.fontSize = size;
+  text.fills = [{ type: "SOLID", color: color }];
+  text.layoutAlign = "STRETCH";
+  return text;
+}
+
+/**
+ * Create the overlay frame, positioned just above and left of existing page
+ * content so it does not sit on top of the design being worked on.
+ */
+async function createOverlayFrame(fonts) {
+  const frame = figma.createFrame();
+  frame.name = OVERLAY_FRAME_NAME;
+  frame.setPluginData(OVERLAY_MARKER_KEY, "1");
+
+  frame.layoutMode = "VERTICAL";
+  frame.primaryAxisSizingMode = "AUTO";
+  frame.counterAxisSizingMode = "FIXED";
+  frame.resize(340, 100);
+  frame.itemSpacing = 8;
+  frame.paddingTop = 16;
+  frame.paddingBottom = 16;
+  frame.paddingLeft = 16;
+  frame.paddingRight = 16;
+  frame.cornerRadius = 12;
+  frame.fills = [{ type: "SOLID", color: { r: 0.09, g: 0.07, b: 0.11 } }];
+  frame.strokes = [{ type: "SOLID", color: { r: 0.31, g: 0.21, b: 0.39 } }];
+  frame.strokeWeight = 1;
+
+  frame.appendChild(makeText("title", fonts, true, 13, { r: 1, g: 1, b: 1 }));
+  frame.appendChild(makeText("status", fonts, true, 12, { r: 0.75, g: 0.55, b: 0.93 }));
+  frame.appendChild(makeText("log", fonts, false, 11, { r: 0.68, g: 0.62, b: 0.74 }));
+
+  // Position above the top-left of existing content.
+  let minX = 0;
+  let minY = 0;
+  let found = false;
+  for (const child of figma.currentPage.children) {
+    // Ignore our own instrumentation, or the overlay would drift further away
+    // from the design every time it is recreated.
+    if (child === frame) continue;
+    if (child.getPluginData(OVERLAY_MARKER_KEY) === "1") continue;
+    if (child.getPluginData(CURSOR_MARKER_KEY) === "1") continue;
+    if (typeof child.x !== "number" || typeof child.y !== "number") continue;
+    if (!found) { minX = child.x; minY = child.y; found = true; }
+    else { minX = Math.min(minX, child.x); minY = Math.min(minY, child.y); }
+  }
+  frame.x = found ? minX : 0;
+  frame.y = found ? minY - frame.height - 48 : 0;
+
+  // Locked so it cannot be dragged into the design by accident, and collapsed
+  // so it does not clutter the layers panel.
+  frame.locked = true;
+  frame.expanded = false;
+
+  return frame;
+}
+
+function overlayStatusLine() {
+  if (activity.current) {
+    const seconds = Math.max(0, Math.round((Date.now() - activity.current.startedAt) / 1000));
+    return "● AI working — " + prettyCommand(activity.current.command) + " (" + seconds + "s)";
+  }
+  return "○ Idle — waiting for the next instruction";
+}
+
+function overlayLogLines() {
+  const lines = [];
+  const recent = activity.log.slice(-activity.overlayLogLines);
+  for (const entry of recent) {
+    const mark =
+      entry.kind === "completed" ? "✓" :
+      entry.kind === "error" ? "✕" :
+      entry.kind === "started" ? "▶" : "·";
+    const dur = entry.durationMs != null ? "  " + (entry.durationMs / 1000).toFixed(1) + "s" : "";
+    lines.push(activityTimestamp(entry.ts) + "  " + mark + "  " + entry.message + dur);
+  }
+  return lines.length ? lines.join("\n") : "No activity yet.";
+}
+
+/** Coalesce redraw requests so bursts of commands cause one write, not many. */
+function scheduleOverlayUpdate() {
+  if (activity.overlayBusy) {
+    activity.overlayDirty = true;
+    return;
+  }
+  activity.overlayBusy = true;
+  updateOverlay()
+    .catch((err) => console.log("Overlay update failed:", err && err.message))
+    .then(() => {
+      activity.overlayBusy = false;
+      if (activity.overlayDirty) {
+        activity.overlayDirty = false;
+        scheduleOverlayUpdate();
+      }
+    });
+}
+
+async function updateOverlay() {
+  if (!activity.settings.overlayEnabled) return;
+
+  const fonts = await loadOverlayFonts();
+  if (!fonts) return; // No usable font; skip silently rather than throwing.
+
+  let frame = findOverlayFrame();
+  if (!frame || frame.removed) {
+    frame = await createOverlayFrame(fonts);
+  }
+
+  const byName = {};
+  for (const child of frame.children) byName[child.name] = child;
+
+  const title = byName["title"];
+  const status = byName["status"];
+  const log = byName["log"];
+  if (!title || !status || !log) return; // Frame was tampered with; leave it be.
+
+  const summary = activity.completed + " done · " + activity.failed + " failed";
+
+  // The frame is locked; unlock briefly so text edits are permitted.
+  const wasLocked = frame.locked;
+  frame.locked = false;
+  try {
+    title.characters = "⚡ Claude Talk to Figma — live activity";
+    status.characters = overlayStatusLine() + "\n" + summary;
+    log.characters = overlayLogLines();
+  } finally {
+    frame.locked = wasLocked;
+  }
+}
+
+async function removeOverlay() {
+  const frame = findOverlayFrame();
+  if (frame && !frame.removed) {
+    frame.locked = false;
+    frame.remove();
+  }
+}
+
+// ─── Ghost cursor ──────────────────────────────────────────────────────────
+//
+// Figma's Plugin API cannot move the real multiplayer cursor — that pointer is
+// driven by the user's physical mouse and is not writable. So instead we draw
+// our own: a cursor arrow plus a name pill, built from ordinary nodes.
+//
+// Because it *is* an ordinary node, Figma's multiplayer sync broadcasts every
+// position change to everyone with the file open, which reproduces the effect
+// of watching a collaborator work. The label carries the current action, so
+// observers see not just where the agent is but what it is doing there.
+//
+// The trade-off is the same as the overlay's: this writes to the document.
+// Off by default.
+
+const CURSOR_MARKER_KEY = "claudeActivityCursor";
+const CURSOR_NODE_NAME = "⚡ Claude cursor";
+
+/** Arrow drawn as SVG — simpler and sharper than hand-building vector paths. */
+const CURSOR_SVG =
+  '<svg width="18" height="22" viewBox="0 0 18 22" xmlns="http://www.w3.org/2000/svg">' +
+  '<path d="M1 1 L1 18.2 L5.5 13.8 L8.6 20.9 L11.9 19.5 L8.8 12.5 L15.2 12.5 Z" ' +
+  'fill="#5467F7" stroke="#FFFFFF" stroke-width="1.6" stroke-linejoin="round"/></svg>';
+
+function findCursorNode() {
+  for (const child of figma.currentPage.children) {
+    if (!child.removed && child.getPluginData(CURSOR_MARKER_KEY) === "1") return child;
+  }
+  return null;
+}
+
+async function createCursorNode(fonts) {
+  const container = figma.createFrame();
+  container.name = CURSOR_NODE_NAME;
+  container.setPluginData(CURSOR_MARKER_KEY, "1");
+  container.fills = [];
+  container.clipsContent = false;
+  container.resize(160, 46);
+
+  // Arrow
+  const arrow = figma.createNodeFromSvg(CURSOR_SVG);
+  arrow.name = "arrow";
+  arrow.x = 0;
+  arrow.y = 0;
+  container.appendChild(arrow);
+
+  // Name / action pill
+  const pill = figma.createFrame();
+  pill.name = "label";
+  pill.layoutMode = "HORIZONTAL";
+  pill.primaryAxisSizingMode = "AUTO";
+  pill.counterAxisSizingMode = "AUTO";
+  pill.paddingLeft = 7;
+  pill.paddingRight = 7;
+  pill.paddingTop = 3;
+  pill.paddingBottom = 3;
+  pill.cornerRadius = 4;
+  pill.clipsContent = false;
+  pill.fills = [{ type: "SOLID", color: { r: 0.33, g: 0.40, b: 0.97 } }];
+
+  const label = figma.createText();
+  label.name = "labelText";
+  label.fontName = fonts.bold;
+  label.fontSize = 11;
+  label.fills = [{ type: "SOLID", color: { r: 1, g: 1, b: 1 } }];
+  label.characters = activity.settings.cursorLabel || "Claude";
+  pill.appendChild(label);
+
+  container.appendChild(pill);
+  pill.x = 14;
+  pill.y = 20;
+
+  container.locked = true;
+  container.expanded = false;
+  return container;
+}
+
+/** Create the cursor on demand; returns null if fonts are unavailable. */
+async function ensureCursorNode() {
+  let node = findCursorNode();
+  if (node && !node.removed) return node;
+
+  const fonts = await loadOverlayFonts();
+  if (!fonts) return null;
+  return await createCursorNode(fonts);
+}
+
+/** Update the pill text to reflect what the agent is doing right now. */
+async function setCursorLabel(text) {
+  const node = findCursorNode();
+  if (!node || node.removed) return;
+
+  const pill = node.findOne
+    ? node.findOne((n) => n.name === "label")
+    : null;
+  const label = pill && pill.findOne ? pill.findOne((n) => n.name === "labelText") : null;
+  if (!label) return;
+
+  const fonts = await loadOverlayFonts();
+  if (!fonts) return;
+
+  const wasLocked = node.locked;
+  node.locked = false;
+  try {
+    await figma.loadFontAsync(label.fontName);
+    label.characters = text;
+  } catch (e) {
+    // Font vanished mid-session; leave the previous text in place.
+  } finally {
+    node.locked = wasLocked;
+  }
+}
+
+function easeOutCubic(t) {
+  return 1 - Math.pow(1 - t, 3);
+}
+
+/**
+ * Glide the cursor to a point. Stepwise rather than instant, so observers
+ * perceive movement between elements instead of teleporting.
+ */
+function animateCursorTo(node, targetX, targetY) {
+  if (activity.cursorAnim) {
+    clearInterval(activity.cursorAnim);
+    activity.cursorAnim = null;
+  }
+
+  const startX = node.x;
+  const startY = node.y;
+  const dx = targetX - startX;
+  const dy = targetY - startY;
+
+  // Nothing meaningful to animate.
+  if (Math.abs(dx) < 1 && Math.abs(dy) < 1) {
+    node.x = targetX;
+    node.y = targetY;
+    return;
+  }
+
+  const steps = 12;
+  let step = 0;
+
+  activity.cursorAnim = setInterval(() => {
+    step++;
+    if (node.removed) {
+      clearInterval(activity.cursorAnim);
+      activity.cursorAnim = null;
+      return;
+    }
+
+    const t = easeOutCubic(Math.min(1, step / steps));
+    const wasLocked = node.locked;
+    node.locked = false;
+    try {
+      node.x = startX + dx * t;
+      node.y = startY + dy * t;
+    } catch (e) {
+      // Node became unwritable (deleted, or page switched) — stop cleanly.
+      clearInterval(activity.cursorAnim);
+      activity.cursorAnim = null;
+      return;
+    } finally {
+      if (!node.removed) node.locked = wasLocked;
+    }
+
+    if (step >= steps) {
+      clearInterval(activity.cursorAnim);
+      activity.cursorAnim = null;
+    }
+  }, 25);
+}
+
+/**
+ * Point the cursor at a node, and label it with the action in progress.
+ * Silently does nothing when the target is not on the current page.
+ */
+async function moveCursorToNode(nodeIds, actionLabel) {
+  if (!activity.settings.cursorEnabled) return;
+
+  try {
+    const cursor = await ensureCursorNode();
+    if (!cursor || cursor.removed) return;
+
+    if (actionLabel) {
+      const base = activity.settings.cursorLabel || "Claude";
+      await setCursorLabel(base + " — " + actionLabel);
+    }
+
+    if (!nodeIds || !nodeIds.length) return;
+
+    // First target that is resolvable and has geometry on this page wins.
+    for (const id of nodeIds.slice(0, 10)) {
+      const target = await figma.getNodeByIdAsync(id);
+      if (!target || target.removed) continue;
+      if (target.id === cursor.id) continue;
+
+      const box = target.absoluteBoundingBox;
+      if (!box) continue;
+
+      // Sit just inside the element's top-left, the way a real pointer would
+      // when someone clicks into it.
+      animateCursorTo(cursor, box.x + Math.min(24, box.width * 0.25), box.y + Math.min(24, box.height * 0.25));
+      break;
+    }
+
+    scheduleCursorIdle();
+  } catch (err) {
+    console.log("moveCursorToNode failed:", err && err.message);
+  }
+}
+
+/** After a quiet spell, drop the action from the label so it reads as idle. */
+function scheduleCursorIdle() {
+  if (activity.cursorIdleTimer) clearTimeout(activity.cursorIdleTimer);
+  activity.cursorIdleTimer = setTimeout(() => {
+    if (!activity.settings.cursorEnabled) return;
+    setCursorLabel(activity.settings.cursorLabel || "Claude").catch(() => {});
+  }, 4000);
+}
+
+function removeCursorNode() {
+  if (activity.cursorAnim) {
+    clearInterval(activity.cursorAnim);
+    activity.cursorAnim = null;
+  }
+  if (activity.cursorIdleTimer) {
+    clearTimeout(activity.cursorIdleTimer);
+    activity.cursorIdleTimer = null;
+  }
+  const node = findCursorNode();
+  if (node && !node.removed) {
+    node.locked = false;
+    node.remove();
+  }
+}
+
+/** Apply and persist activity settings; returns the effective settings. */
+async function applyActivitySettings(next) {
+  const overlayBefore = activity.settings.overlayEnabled;
+  const cursorBefore = activity.settings.cursorEnabled;
+
+  if (next && typeof next === "object") {
+    if (typeof next.overlayEnabled === "boolean") activity.settings.overlayEnabled = next.overlayEnabled;
+    if (typeof next.highlightEnabled === "boolean") activity.settings.highlightEnabled = next.highlightEnabled;
+    if (typeof next.followViewport === "boolean") activity.settings.followViewport = next.followViewport;
+    if (typeof next.cursorEnabled === "boolean") activity.settings.cursorEnabled = next.cursorEnabled;
+    if (typeof next.cursorLabel === "string" && next.cursorLabel.trim()) {
+      activity.settings.cursorLabel = next.cursorLabel.trim().slice(0, 24);
+    }
+  }
+
+  try {
+    await figma.clientStorage.setAsync("activitySettings", activity.settings);
+  } catch (e) { /* storage is best-effort */ }
+
+  if (overlayBefore && !activity.settings.overlayEnabled) {
+    await removeOverlay();
+  } else if (activity.settings.overlayEnabled) {
+    await updateOverlay();
+  }
+
+  if (cursorBefore && !activity.settings.cursorEnabled) {
+    removeCursorNode();
+  } else if (activity.settings.cursorEnabled) {
+    // Materialise it immediately so enabling the toggle gives visible feedback
+    // rather than waiting for the next command.
+    await ensureCursorNode();
+    await setCursorLabel(activity.settings.cursorLabel || "Claude");
+  } else if (!activity.settings.cursorEnabled) {
+    removeCursorNode();
+  }
+
+  figma.ui.postMessage({ type: "activity-settings", settings: activity.settings });
+  return activity.settings;
+}
+
+async function loadActivitySettings() {
+  try {
+    const stored = await figma.clientStorage.getAsync("activitySettings");
+    if (stored && typeof stored === "object") {
+      Object.assign(activity.settings, stored);
+    }
+  } catch (e) { /* defaults are fine */ }
+  figma.ui.postMessage({ type: "activity-settings", settings: activity.settings });
+}
+
+/**
+ * Best-effort extraction of node ids from a command's params or its result,
+ * so activity entries can name what was touched. Mirrors the shapes used across
+ * the tool surface: id / nodeId / parentId / nodeIds / arrays of {id}.
+ */
+function collectNodeIds(value, budget) {
+  const limit = budget || 12;
+  const found = [];
+
+  const walk = (v, depth) => {
+    if (found.length >= limit || depth < 0 || !v || typeof v !== "object") return;
+    if (Array.isArray(v)) {
+      for (const item of v) walk(item, depth - 1);
+      return;
+    }
+    for (const key of Object.keys(v)) {
+      if (found.length >= limit) return;
+      const raw = v[key];
+      if ((key === "id" || key === "nodeId" || key === "parentId") && typeof raw === "string" && raw) {
+        if (found.indexOf(raw) === -1) found.push(raw);
+        continue;
+      }
+      if (key === "nodeIds" && Array.isArray(raw)) {
+        for (const item of raw) {
+          if (typeof item === "string" && found.indexOf(item) === -1) found.push(item);
+          if (found.length >= limit) return;
+        }
+        continue;
+      }
+      if (raw && typeof raw === "object") walk(raw, depth - 1);
+    }
+  };
+
+  walk(value, 4);
+  return found;
+}
+
+function collectNodeNames(value, budget) {
+  const limit = budget || 12;
+  const found = [];
+
+  const walk = (v, depth) => {
+    if (found.length >= limit || depth < 0 || !v || typeof v !== "object") return;
+    if (Array.isArray(v)) {
+      for (const item of v) walk(item, depth - 1);
+      return;
+    }
+    // Only count `name` when it accompanies an `id`, so font and style names
+    // do not masquerade as node names.
+    if (typeof v.name === "string" && typeof v.id === "string" && v.name) {
+      if (found.indexOf(v.name) === -1) found.push(v.name);
+    }
+    for (const key of Object.keys(v)) {
+      if (found.length >= limit) return;
+      if (v[key] && typeof v[key] === "object") walk(v[key], depth - 1);
+    }
+  };
+
+  walk(value, 4);
+  return found;
+}
+
+/** Backing implementation for the set_activity_overlay MCP tool. */
+async function setActivityOverlayCommand(params) {
+  const settings = await applyActivitySettings(params || {});
+  const visibleToOthers = [];
+  if (settings.cursorEnabled) visibleToOthers.push("a live cursor");
+  if (settings.overlayEnabled) visibleToOthers.push("a status overlay");
+  if (settings.highlightEnabled) visibleToOthers.push("selection highlighting");
+
+  return {
+    settings: {
+      overlayEnabled: settings.overlayEnabled,
+      highlightEnabled: settings.highlightEnabled,
+      followViewport: settings.followViewport,
+      cursorEnabled: settings.cursorEnabled,
+      cursorLabel: settings.cursorLabel,
+    },
+    overlayPresent: !!findOverlayFrame(),
+    cursorPresent: !!findCursorNode(),
+    message: visibleToOthers.length
+      ? "Collaborators in this file will see " + visibleToOthers.join(", ") + "."
+      : "All in-canvas indicators are off. Nothing is visible to other collaborators.",
+  };
+}
+
+/** Backing implementation for the get_activity_state MCP tool. */
+function getActivityStateCommand() {
+  return {
+    working: !!activity.current,
+    currentCommand: activity.current ? activity.current.command : null,
+    startedAt: activity.current ? activity.current.startedAt : null,
+    completed: activity.completed,
+    failed: activity.failed,
+    settings: activity.settings,
+    recent: activity.log.slice(-15).map((entry) => ({
+      ts: entry.ts,
+      kind: entry.kind,
+      command: entry.command,
+      message: entry.message,
+      durationMs: entry.durationMs,
+      nodeIds: entry.nodeIds,
+      nodeNames: entry.nodeNames,
+    })),
+  };
+}
+
+function describeForLog(command, params) {
+  const pretty = prettyCommand(command);
+  if (params && typeof params === "object") {
+    const label = params.name || params.text || params.characters;
+    if (typeof label === "string" && label.trim()) {
+      const trimmed = label.length > 36 ? label.slice(0, 36) + "…" : label;
+      return pretty + ' "' + trimmed + '"';
+    }
+  }
+  return pretty;
+}
+
 // Show UI
-figma.showUI(__html__, { width: 300, height: 220 });
+figma.showUI(__html__, { width: 360, height: 520 });
+loadActivitySettings();
 
 // Plugin commands from UI
 figma.ui.onmessage = async (msg) => {
@@ -75,10 +810,41 @@ figma.ui.onmessage = async (msg) => {
     case "close-plugin":
       figma.closePlugin();
       break;
-    case "execute-command":
-      // Execute commands received from UI (which gets them from WebSocket)
+    case "execute-command": {
+      // Execute commands received from UI (which gets them from WebSocket).
+      // Every command is bracketed by activity events so the panel, the canvas
+      // overlay and any watching collaborator can follow the work live.
+      const startedAt = Date.now();
+      const inputIds = collectNodeIds(msg.params);
+
+      recordActivity({
+        kind: "started",
+        command: msg.command,
+        message: describeForLog(msg.command, msg.params),
+        nodeIds: inputIds,
+      });
+
+      // Highlight the inputs immediately so the canvas shows *where* work is
+      // about to happen, not just where it landed.
+      if (inputIds.length) highlightNodes(inputIds);
+
       try {
         const result = await handleCommand(msg.command, msg.params);
+
+        const resultIds = collectNodeIds(result);
+        const touched = resultIds.length ? resultIds : inputIds;
+
+        recordActivity({
+          kind: "completed",
+          command: msg.command,
+          message: describeForLog(msg.command, msg.params),
+          durationMs: Date.now() - startedAt,
+          nodeIds: touched,
+          nodeNames: collectNodeNames(result),
+        });
+
+        if (touched.length) highlightNodes(touched);
+
         // Send result back to UI
         figma.ui.postMessage({
           type: "command-result",
@@ -86,12 +852,24 @@ figma.ui.onmessage = async (msg) => {
           result,
         });
       } catch (error) {
+        recordActivity({
+          kind: "error",
+          command: msg.command,
+          message: (error && error.message) || "Error executing command",
+          durationMs: Date.now() - startedAt,
+          nodeIds: inputIds,
+        });
+
         figma.ui.postMessage({
           type: "command-error",
           id: msg.id,
-          error: error.message || "Error executing command",
+          error: (error && error.message) || "Error executing command",
         });
       }
+      break;
+    }
+    case "set-activity-settings":
+      applyActivitySettings(msg.settings);
       break;
   }
 };
@@ -99,6 +877,13 @@ figma.ui.onmessage = async (msg) => {
 // Listen for plugin commands from menu
 figma.on("run", ({ command }) => {
   figma.ui.postMessage({ type: "auto-connect" });
+});
+
+// The ghost cursor is ephemeral instrumentation, not part of the design, so it
+// must not outlive the session that drew it. The overlay is deliberately left
+// in place — it is a status record the user chose to add.
+figma.on("close", () => {
+  try { removeCursorNode(); } catch (e) { /* nothing useful to do on teardown */ }
 });
 
 // Update plugin settings
@@ -126,6 +911,10 @@ async function handleCommand(command, params) {
   switch (command) {
     case "ping":
       return { status: "ok" };
+    case "set_activity_overlay":
+      return await setActivityOverlayCommand(params);
+    case "get_activity_state":
+      return getActivityStateCommand();
     case "get_document_info":
       return await getDocumentInfo();
     case "get_selection":
@@ -158,6 +947,16 @@ async function handleCommand(command, params) {
       return await resizeNode(params);
     case "delete_node":
       return await deleteNode(params);
+    case "get_design_system":
+      return await getDesignSystem(params);
+    case "analyze_responsive":
+      return await analyzeResponsive(params);
+    case "make_responsive":
+      return await makeResponsive(params);
+    case "validate_responsive":
+      return await validateResponsiveCommand(params);
+    case "clean_layers":
+      return await cleanLayersCommand(params);
     case "get_styles":
       return await getStyles();
     case "get_local_components":
@@ -986,6 +1785,2262 @@ async function getStyles() {
       name: style.name,
       key: style.key,
     })),
+  };
+}
+
+// ─── Design system inspection ──────────────────────────────────────────────
+//
+// WHY THIS EXISTS
+// ---------------
+// The "local design library first" rule requires the agent to know what the
+// file already defines *before* it designs anything. The individual primitives
+// (get_styles, get_variables, get_local_components) each answer a fragment of
+// that, which meant four-plus round trips and no single view — expensive enough
+// that the rule tended to get skipped.
+//
+// This gathers the whole picture in one call: typography, colour, tokens,
+// components with their variant properties, and — importantly — the spacing,
+// radius and gap values actually *observed* in the file. That last part matters
+// because most real files encode their layout rhythm in usage rather than in
+// named tokens, so "match the existing spacing" is unanswerable from styles
+// alone.
+
+/** Convert a Figma 0-1 RGB paint to a #RRGGBB string for legibility. */
+function paintToHex(paint) {
+  if (!paint || paint.type !== "SOLID" || !paint.color) return null;
+  const toByte = (c) => {
+    const v = Math.round(Math.max(0, Math.min(1, c)) * 255);
+    return v.toString(16).padStart(2, "0");
+  };
+  return "#" + toByte(paint.color.r) + toByte(paint.color.g) + toByte(paint.color.b);
+}
+
+/** Flatten a Figma lineHeight / letterSpacing union into something printable. */
+function typographyUnit(value) {
+  if (!value || typeof value !== "object") return null;
+  if (value.unit === "AUTO") return "auto";
+  if (value.unit === "PERCENT") return value.value + "%";
+  return value.value + "px";
+}
+
+/**
+ * Tally a value into a frequency map. Used to surface the dominant spacing and
+ * radius values rather than a raw dump of every number in the document.
+ */
+function tally(map, value) {
+  if (typeof value !== "number" || !isFinite(value) || value <= 0) return;
+  const key = Math.round(value * 100) / 100;
+  map[key] = (map[key] || 0) + 1;
+}
+
+/** Return the most common entries of a tally, most frequent first. */
+function topTally(map, limit) {
+  return Object.keys(map)
+    .map((k) => ({ value: Number(k), count: map[k] }))
+    .sort((a, b) => b.count - a.count || a.value - b.value)
+    .slice(0, limit || 12);
+}
+
+/**
+ * Walk a bounded sample of the document collecting layout conventions.
+ * Bounded because a large file can hold tens of thousands of nodes and the
+ * point is the *rhythm*, which a sample captures perfectly well.
+ */
+function collectLayoutConventions(roots, budget) {
+  const limit = budget || 4000;
+  const padding = {};
+  const gaps = {};
+  const radii = {};
+  const fontSizes = {};
+  const autoLayoutModes = { HORIZONTAL: 0, VERTICAL: 0, NONE: 0 };
+  const fontFamilies = {};
+  let visited = 0;
+
+  const walk = (node) => {
+    if (visited >= limit || !node || node.removed) return;
+    visited++;
+
+    // Skip our own instrumentation so it cannot pollute the conventions.
+    if (node.getPluginData) {
+      const marker = node.getPluginData(OVERLAY_MARKER_KEY) || node.getPluginData(CURSOR_MARKER_KEY);
+      if (marker === "1") return;
+    }
+
+    if ("layoutMode" in node && node.layoutMode) {
+      autoLayoutModes[node.layoutMode] = (autoLayoutModes[node.layoutMode] || 0) + 1;
+      if (node.layoutMode !== "NONE") {
+        tally(padding, node.paddingTop);
+        tally(padding, node.paddingRight);
+        tally(padding, node.paddingBottom);
+        tally(padding, node.paddingLeft);
+        tally(gaps, node.itemSpacing);
+      }
+    }
+
+    if (typeof node.cornerRadius === "number") tally(radii, node.cornerRadius);
+
+    if (node.type === "TEXT") {
+      if (typeof node.fontSize === "number") tally(fontSizes, node.fontSize);
+      const fn = node.fontName;
+      if (fn && typeof fn === "object" && fn.family) {
+        fontFamilies[fn.family] = (fontFamilies[fn.family] || 0) + 1;
+      }
+    }
+
+    if ("children" in node && node.children) {
+      for (const child of node.children) {
+        if (visited >= limit) return;
+        walk(child);
+      }
+    }
+  };
+
+  for (const root of roots) walk(root);
+
+  return {
+    sampledNodes: visited,
+    padding: topTally(padding, 10),
+    gaps: topTally(gaps, 10),
+    cornerRadii: topTally(radii, 10),
+    fontSizes: topTally(fontSizes, 14),
+    fontFamilies: Object.keys(fontFamilies)
+      .map((k) => ({ family: k, count: fontFamilies[k] }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 8),
+    autoLayoutUsage: autoLayoutModes,
+  };
+}
+
+/**
+ * One-call snapshot of everything the local file already defines.
+ * `scope`: "page" (default, fast) or "document" (all pages).
+ */
+async function getDesignSystem(params) {
+  const opts = params || {};
+  const scope = opts.scope === "document" ? "document" : "page";
+  const includeVariables = opts.includeVariables !== false;
+  const includeComponents = opts.includeComponents !== false;
+
+  // ── Styles ────────────────────────────────────────────────────────────
+  const [paintStyles, textStyles, effectStyles, gridStyles] = await Promise.all([
+    figma.getLocalPaintStylesAsync(),
+    figma.getLocalTextStylesAsync(),
+    figma.getLocalEffectStylesAsync(),
+    figma.getLocalGridStylesAsync(),
+  ]);
+
+  const colors = paintStyles.map((style) => ({
+    id: style.id,
+    name: style.name,
+    key: style.key,
+    hex: paintToHex(style.paints && style.paints[0]),
+    type: style.paints && style.paints[0] ? style.paints[0].type : null,
+    opacity:
+      style.paints && style.paints[0] && typeof style.paints[0].opacity === "number"
+        ? style.paints[0].opacity
+        : 1,
+  }));
+
+  const typography = textStyles.map((style) => ({
+    id: style.id,
+    name: style.name,
+    key: style.key,
+    fontFamily: style.fontName ? style.fontName.family : null,
+    fontStyle: style.fontName ? style.fontName.style : null,
+    fontSize: style.fontSize,
+    lineHeight: typographyUnit(style.lineHeight),
+    letterSpacing: typographyUnit(style.letterSpacing),
+    paragraphSpacing: style.paragraphSpacing,
+    textCase: style.textCase,
+    textDecoration: style.textDecoration,
+  }));
+
+  const effects = effectStyles.map((style) => ({
+    id: style.id,
+    name: style.name,
+    key: style.key,
+    effects: (style.effects || []).map((e) => ({
+      type: e.type,
+      radius: e.radius,
+      spread: e.spread,
+      offset: e.offset,
+      color: e.color ? paintToHex({ type: "SOLID", color: e.color }) : null,
+      opacity: e.color && typeof e.color.a === "number" ? e.color.a : undefined,
+    })),
+  }));
+
+  const grids = gridStyles.map((style) => ({
+    id: style.id,
+    name: style.name,
+    key: style.key,
+    layoutGrids: (style.layoutGrids || []).map((g) => ({
+      pattern: g.pattern,
+      sectionSize: g.sectionSize,
+      gutterSize: g.gutterSize,
+      count: g.count,
+      alignment: g.alignment,
+    })),
+  }));
+
+  // ── Variables / tokens ────────────────────────────────────────────────
+  let variableCollections = [];
+  let variablesAvailable = false;
+  if (includeVariables && figma.variables) {
+    try {
+      const collections = await figma.variables.getLocalVariableCollectionsAsync();
+      variablesAvailable = true;
+      for (const collection of collections) {
+        const vars = [];
+        for (const variableId of collection.variableIds) {
+          const variable = await figma.variables.getVariableByIdAsync(variableId);
+          if (!variable) continue;
+          // Resolve colour values to hex so the agent can match them by eye.
+          const values = {};
+          for (const modeId of Object.keys(variable.valuesByMode || {})) {
+            const raw = variable.valuesByMode[modeId];
+            if (raw && typeof raw === "object" && "r" in raw) {
+              values[modeId] = paintToHex({ type: "SOLID", color: raw });
+            } else {
+              values[modeId] = raw;
+            }
+          }
+          vars.push({
+            id: variable.id,
+            name: variable.name,
+            resolvedType: variable.resolvedType,
+            valuesByMode: values,
+          });
+        }
+        variableCollections.push({
+          id: collection.id,
+          name: collection.name,
+          modes: (collection.modes || []).map((m) => ({ modeId: m.modeId, name: m.name })),
+          variableCount: vars.length,
+          variables: vars,
+        });
+      }
+    } catch (err) {
+      // Variables API unavailable in this Figma build — not fatal.
+      variablesAvailable = false;
+    }
+  }
+
+  // ── Components ────────────────────────────────────────────────────────
+  let components = [];
+  let componentSets = [];
+  if (includeComponents) {
+    if (scope === "document") await figma.loadAllPagesAsync();
+    const root = scope === "document" ? figma.root : figma.currentPage;
+
+    const sets = root.findAllWithCriteria({ types: ["COMPONENT_SET"] });
+    componentSets = sets.map((set) => ({
+      id: set.id,
+      name: set.name,
+      key: "key" in set ? set.key : null,
+      // Variant properties are what make a set reusable — surface them so the
+      // agent can pick an existing variant instead of building a new component.
+      variantProperties: set.variantGroupProperties
+        ? Object.keys(set.variantGroupProperties).map((prop) => ({
+            property: prop,
+            values: set.variantGroupProperties[prop].values,
+          }))
+        : [],
+      variantCount: set.children ? set.children.length : 0,
+    }));
+
+    const setIds = {};
+    for (const s of sets) setIds[s.id] = true;
+
+    const found = root.findAllWithCriteria({ types: ["COMPONENT"] });
+    components = found
+      // Children of a set are already described by the set itself.
+      .filter((c) => !(c.parent && setIds[c.parent.id]))
+      .map((component) => ({
+        id: component.id,
+        name: component.name,
+        key: "key" in component ? component.key : null,
+        description: component.description || "",
+        width: Math.round(component.width),
+        height: Math.round(component.height),
+      }));
+  }
+
+  // ── Observed layout conventions ───────────────────────────────────────
+  const roots = scope === "document" ? figma.root.children : [figma.currentPage];
+  const conventions = collectLayoutConventions(roots, opts.sampleLimit || 4000);
+
+  return {
+    scope,
+    page: { id: figma.currentPage.id, name: figma.currentPage.name },
+    summary: {
+      colorStyles: colors.length,
+      textStyles: typography.length,
+      effectStyles: effects.length,
+      gridStyles: grids.length,
+      variableCollections: variableCollections.length,
+      variables: variableCollections.reduce((n, c) => n + c.variableCount, 0),
+      components: components.length,
+      componentSets: componentSets.length,
+      variablesAvailable,
+    },
+    colors,
+    typography,
+    effects,
+    grids,
+    variableCollections,
+    components,
+    componentSets,
+    conventions,
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RESPONSIVE WEBSITE ENGINE
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Inspect → Reuse → Adapt → Validate.
+//
+// The central design decision here is that responsive versions are produced by
+// CLONING the source frame and adapting the clone's layout, never by rebuilding
+// it from primitives. Cloning is what makes the safety rules true by
+// construction rather than by discipline:
+//
+//   - component instances stay connected (no detaching)
+//   - variable and style bindings survive untouched
+//   - text content, fills, images, effects and section order are preserved
+//   - the original desktop frame is never mutated
+//
+// Everything after the clone is a layout adaptation: changing layout direction,
+// sizing behaviour, padding and spacing. We change how the design *flows*, not
+// what it *is*. Nothing here rewrites copy, swaps colours, or restyles.
+
+const RESPONSIVE_PRESETS = {
+  desktop: { key: "desktop", label: "Desktop", width: 1440, sidePadding: 72, maxContent: 1240 },
+  tablet: { key: "tablet", label: "Tablet", width: 768, sidePadding: 30, maxContent: 708 },
+  mobile: { key: "mobile", label: "Mobile", width: 320, sidePadding: 16, maxContent: 288 },
+};
+
+// 320 is the default mobile *design* frame. Both widths are always used for QA
+// because a layout that survives 390 but breaks at 320 is not responsive.
+const QA_WIDTHS = [390, 320];
+
+// Section spacing envelopes, used only when the file defines no spacing tokens.
+const SECTION_SPACING_FALLBACK = {
+  desktop: { min: 96, max: 128 },
+  tablet: { min: 72, max: 96 },
+  mobile: { min: 48, max: 72 },
+};
+
+// Tokens that mark a text style as belonging to a breakpoint, so that
+// "Heading/Display/Desktop" can be resolved to "Heading/Display/Mobile".
+//
+// There is deliberately NO hardcoded type scale here. Inventing sizes such as
+// "mobile H1 = 36px" would fabricate a typography system the file never agreed
+// to. Responsive typography is resolved by finding the local style the project
+// already defines for the target breakpoint; when none exists, the existing
+// style is preserved and the gap is reported rather than papered over.
+const BREAKPOINT_STYLE_TOKENS = {
+  desktop: ["desktop", "dsk", "lg", "large", "wide", "1440", "1280"],
+  tablet: ["tablet", "tab", "md", "medium", "768", "1024"],
+  mobile: ["mobile", "mob", "sm", "small", "phone", "320", "390"],
+};
+
+// Elements whose size is intrinsic — the spec's allowed exceptions to the
+// "no fixed dimensions" rule.
+const INTRINSIC_SIZE_PATTERN = /\b(icon|avatar|logo|badge|dot|bullet|divider|spacer|flag|thumb)\b/i;
+
+// Content-driven elements that must hug rather than fill.
+const HUG_PATTERN = /\b(button|btn|cta|badge|tag|chip|pill|label|nav.?item|menu.?item|link|toggle|switch|checkbox|radio|icon)\b/i;
+
+// Flexible elements that should fill their parent.
+const FILL_PATTERN = /\b(wrapper|container|content|column|col|card|field|input|textarea|section|row|stack|grid|group|body|main|header|footer|nav|form|image|img|media)\b/i;
+
+const MIN_TAP_TARGET = 44;
+const MIN_READABLE_FONT = 12;
+
+// ─── Analysis helpers ──────────────────────────────────────────────────────
+
+function isContainer(node) {
+  return !!node && "children" in node && Array.isArray(node.children);
+}
+
+function isAutoLayout(node) {
+  return !!node && "layoutMode" in node && node.layoutMode && node.layoutMode !== "NONE";
+}
+
+function isInstrumentation(node) {
+  if (!node || !node.getPluginData) return false;
+  return (
+    node.getPluginData(OVERLAY_MARKER_KEY) === "1" ||
+    node.getPluginData(CURSOR_MARKER_KEY) === "1"
+  );
+}
+
+/** Horizontal sizing behaviour, tolerant of older Figma API surfaces. */
+function readHorizontalSizing(node) {
+  try {
+    if ("layoutSizingHorizontal" in node && node.layoutSizingHorizontal) {
+      return node.layoutSizingHorizontal;
+    }
+  } catch (e) { /* fall through */ }
+  if (node.layoutGrow === 1) return "FILL";
+  return "FIXED";
+}
+
+/** Set horizontal sizing, degrading gracefully when the API is unavailable. */
+function writeHorizontalSizing(node, value) {
+  try {
+    if ("layoutSizingHorizontal" in node) {
+      node.layoutSizingHorizontal = value;
+      return true;
+    }
+  } catch (e) { /* fall through to legacy path */ }
+  try {
+    if (value === "FILL") {
+      node.layoutAlign = "STRETCH";
+      node.layoutGrow = 1;
+      return true;
+    }
+  } catch (e) { /* unsupported */ }
+  return false;
+}
+
+function nodeIsImageLike(node) {
+  if (!node) return false;
+  if (node.type === "VECTOR" || node.type === "BOOLEAN_OPERATION") return false;
+  const name = (node.name || "").toLowerCase();
+  if (/image|img|photo|picture|illustration|screenshot|hero.?visual|thumbnail/.test(name)) return true;
+  const fills = node.fills;
+  if (Array.isArray(fills) && fills.some((f) => f && f.type === "IMAGE")) return true;
+  return false;
+}
+
+function nodeIsTextLike(node) {
+  if (!node) return false;
+  if (node.type === "TEXT") return true;
+  if (!isContainer(node)) return false;
+  return node.children.some((c) => nodeIsTextLike(c));
+}
+
+function nodeIsInputLike(node) {
+  const name = (node.name || "").toLowerCase();
+  return /input|field|textarea|select|dropdown|checkbox|radio|form.?control/.test(name);
+}
+
+function nodeIsButtonLike(node) {
+  const name = (node.name || "").toLowerCase();
+  return /button|btn|cta|submit/.test(name);
+}
+
+function countDescendants(node, predicate, budget) {
+  let count = 0;
+  const limit = budget || 400;
+  const walk = (n, depth) => {
+    if (count >= limit || depth > 8 || !n) return;
+    if (predicate(n)) count++;
+    if (isContainer(n)) for (const c of n.children) walk(c, depth + 1);
+  };
+  walk(node, 0);
+  return count;
+}
+
+/**
+ * A card grid is a container whose children are broadly uniform in size and
+ * numerous enough that the row count is the thing that should change
+ * responsively, rather than the cards themselves shrinking.
+ */
+function looksLikeCardGrid(node) {
+  if (!isContainer(node) || node.children.length < 3) return false;
+  const kids = node.children.filter((c) => c.visible !== false);
+  if (kids.length < 3) return false;
+
+  const widths = kids.map((c) => c.width).filter((w) => typeof w === "number" && w > 0);
+  if (widths.length < 3) return false;
+
+  const avg = widths.reduce((a, b) => a + b, 0) / widths.length;
+  if (avg <= 0) return false;
+  const uniform = widths.every((w) => Math.abs(w - avg) / avg < 0.25);
+
+  const horizontal = node.layoutMode === "HORIZONTAL" || !isAutoLayout(node);
+  return uniform && horizontal;
+}
+
+/** Text and imagery sitting side by side — the classic hero shape. */
+function looksLikeSplitSection(node) {
+  if (!isContainer(node)) return false;
+  const kids = node.children.filter((c) => c.visible !== false);
+  if (kids.length !== 2) return false;
+  if (isAutoLayout(node) && node.layoutMode !== "HORIZONTAL") return false;
+
+  const hasText = kids.some((k) => nodeIsTextLike(k));
+  const hasVisual = kids.some((k) => nodeIsImageLike(k) || countDescendants(k, nodeIsImageLike, 20) > 0);
+  return hasText && hasVisual;
+}
+
+function looksLikeHorizontalBar(node) {
+  if (!isContainer(node)) return false;
+  if (node.height > 160) return false;
+  return node.layoutMode === "HORIZONTAL" || node.children.length >= 2;
+}
+
+/**
+ * Classify a top-level section so the decision engine knows which responsive
+ * behaviour applies. Name conventions are checked first because designers name
+ * things deliberately; structure is the fallback.
+ */
+function classifySection(node, index, total) {
+  const name = (node.name || "").toLowerCase();
+
+  if (/\b(nav|navbar|header|topbar|menu|app.?bar)\b/.test(name)) return "navigation";
+  if (/\bfooter\b/.test(name)) return "footer";
+  if (/\b(hero|banner|masthead|jumbotron)\b/.test(name)) return "hero";
+  if (/\b(form|contact|signup|sign.?up|subscribe|newsletter)\b/.test(name)) return "form";
+  if (/\b(table|comparison|pricing.?table|spec|matrix)\b/.test(name)) return "table";
+  if (/\b(grid|cards?|services?|features?|gallery|portfolio|testimonials?|logos?)\b/.test(name)) {
+    return "cardGrid";
+  }
+
+  // Structural fallbacks.
+  if (index === 0 && looksLikeHorizontalBar(node)) return "navigation";
+  if (index === total - 1 && total > 2) return "footer";
+  if (countDescendants(node, nodeIsInputLike, 40) >= 2) return "form";
+  if (looksLikeCardGrid(node)) return "cardGrid";
+  if (looksLikeSplitSection(node)) return "hero";
+  return "generic";
+}
+
+/** Inspect one section and describe what the engine needs to know about it. */
+function analyzeSection(node, index, total) {
+  const kind = classifySection(node, index, total);
+  const fixedWidthChildren = [];
+  const absoluteChildren = [];
+
+  if (isContainer(node)) {
+    for (const child of node.children) {
+      if (child.visible === false) continue;
+      if (isAutoLayout(node) && readHorizontalSizing(child) === "FIXED" && child.width > 400) {
+        fixedWidthChildren.push({ id: child.id, name: child.name, width: Math.round(child.width) });
+      }
+      if (!isAutoLayout(node) && "x" in child) {
+        absoluteChildren.push({ id: child.id, name: child.name });
+      }
+    }
+  }
+
+  return {
+    id: node.id,
+    name: node.name,
+    kind,
+    type: node.type,
+    width: Math.round(node.width || 0),
+    height: Math.round(node.height || 0),
+    autoLayout: isAutoLayout(node) ? node.layoutMode : "NONE",
+    itemSpacing: isAutoLayout(node) ? node.itemSpacing : null,
+    padding: isAutoLayout(node)
+      ? { top: node.paddingTop, right: node.paddingRight, bottom: node.paddingBottom, left: node.paddingLeft }
+      : null,
+    childCount: isContainer(node) ? node.children.length : 0,
+    columns: kind === "cardGrid" && isContainer(node) ? node.children.filter((c) => c.visible !== false).length : null,
+    hasImages: countDescendants(node, nodeIsImageLike, 50) > 0,
+    inputCount: countDescendants(node, nodeIsInputLike, 40),
+    buttonCount: countDescendants(node, nodeIsButtonLike, 40),
+    instanceCount: countDescendants(node, (n) => n.type === "INSTANCE", 200),
+    fixedWidthChildren,
+    absoluteChildren,
+    usesAutoLayout: isAutoLayout(node),
+  };
+}
+
+/**
+ * Detect frames in the file that already represent other breakpoints, so the
+ * engine can update them rather than creating duplicates, and can learn the
+ * project's existing responsive conventions.
+ */
+function findExistingResponsiveFrames(sourceNode) {
+  const parent = sourceNode.parent || figma.currentPage;
+  if (!isContainer(parent)) return [];
+
+  const baseName = (sourceNode.name || "").replace(/\s*\/?\s*(desktop|tablet|mobile)[^/]*$/i, "").trim();
+  const found = [];
+
+  for (const sibling of parent.children) {
+    if (sibling.id === sourceNode.id || sibling.removed) continue;
+    if (typeof sibling.width !== "number") continue;
+
+    const name = (sibling.name || "").trim();
+    const sharesBase = baseName && name.toLowerCase().indexOf(baseName.toLowerCase()) === 0;
+    const namesBreakpoint = /\b(desktop|tablet|mobile)\b|\b(1440|768|390|320)\b/i.test(name);
+    if (!sharesBase && !namesBreakpoint) continue;
+
+    found.push({
+      id: sibling.id,
+      name: sibling.name,
+      width: Math.round(sibling.width),
+      matchesBase: !!sharesBase,
+    });
+  }
+  return found;
+}
+
+// ─── Decision engine ───────────────────────────────────────────────────────
+
+/**
+ * Decide how a section should behave at a target breakpoint.
+ *
+ * This is deliberately behaviour-based rather than scale-based: the output is a
+ * list of layout intentions, never "shrink everything by 0.53". Proportional
+ * scaling is the failure mode this whole feature exists to avoid.
+ */
+function decideBehaviors(section, presetKey, preservation) {
+  const behaviors = [];
+  const isMobile = presetKey === "mobile";
+  const isTablet = presetKey === "tablet";
+  const flexible = preservation === "flexible";
+  const balanced = preservation === "balanced" || flexible;
+
+  // Universal: tighten the rhythm, release fixed widths, keep content flowing.
+  behaviors.push("reduce-padding");
+  behaviors.push("reduce-gap");
+  if (section.fixedWidthChildren.length) behaviors.push("release-fixed-width");
+
+  switch (section.kind) {
+    case "navigation":
+      if (isMobile) {
+        behaviors.push("collapse-navigation");
+      } else if (isTablet) {
+        behaviors.push("keep-horizontal");
+        if (balanced) behaviors.push("collapse-navigation-if-crowded");
+      }
+      break;
+
+    case "hero":
+      if (isMobile) {
+        behaviors.push("stack-vertical");
+        behaviors.push("text-before-media");
+        behaviors.push("media-full-width");
+      } else if (isTablet) {
+        behaviors.push("keep-horizontal");
+        behaviors.push("equalize-split");
+      }
+      break;
+
+    case "cardGrid": {
+      const cards = section.columns || section.childCount || 0;
+      if (isMobile) {
+        behaviors.push("columns:1");
+      } else if (isTablet) {
+        behaviors.push(cards >= 4 ? "columns:2" : "columns:" + Math.min(2, Math.max(1, cards)));
+      }
+      behaviors.push("enable-wrap");
+      break;
+    }
+
+    case "form":
+      if (isMobile || (isTablet && section.inputCount > 4)) {
+        behaviors.push("stack-form-rows");
+      }
+      behaviors.push("inputs-fill-width");
+      break;
+
+    case "table":
+      // Converting a table to stacked cards rewrites structure and cannot be
+      // done safely without knowing the project's pattern. Horizontal scroll is
+      // the least destructive fallback, and we flag it for a human.
+      behaviors.push("table-horizontal-scroll");
+      behaviors.push("flag-manual-review");
+      break;
+
+    case "footer":
+      if (isMobile) behaviors.push("columns:1");
+      else if (isTablet) behaviors.push("columns:2");
+      behaviors.push("enable-wrap");
+      break;
+
+    default:
+      if (isMobile && section.autoLayout === "HORIZONTAL" && section.childCount > 1) {
+        behaviors.push("stack-vertical");
+      } else if (isTablet && section.autoLayout === "HORIZONTAL" && section.childCount > 3) {
+        behaviors.push("enable-wrap");
+      }
+      break;
+  }
+
+  // Typography is no longer a per-section behaviour: it is resolved globally
+  // against the file's own text styles after the layout settles.
+  if (section.absoluteChildren.length && flexible) behaviors.push("flag-absolute-positioning");
+  else if (section.absoluteChildren.length) behaviors.push("flag-manual-review");
+
+  return behaviors;
+}
+
+/** Build the full responsive plan for a source frame at one breakpoint. */
+function buildPlan(sections, presetKey, preservation) {
+  return sections.map((section) => ({
+    id: section.id,
+    name: section.name,
+    kind: section.kind,
+    behaviors: decideBehaviors(section, presetKey, preservation),
+  }));
+}
+
+// ─── Transforms ────────────────────────────────────────────────────────────
+
+/** Scale a spacing value toward a target, never below a sensible floor. */
+function scaleSpacing(value, factor, floor) {
+  if (typeof value !== "number" || value <= 0) return value;
+  return Math.max(floor === undefined ? 0 : floor, Math.round(value * factor));
+}
+
+function applyPaddingScale(node, factor, sidePadding) {
+  if (!isAutoLayout(node)) return;
+  // Horizontal padding is pinned to the breakpoint's container rule; vertical
+  // padding scales, because vertical rhythm is proportional but gutters are not.
+  if (typeof sidePadding === "number") {
+    if (node.paddingLeft > 0) node.paddingLeft = Math.min(node.paddingLeft, sidePadding);
+    if (node.paddingRight > 0) node.paddingRight = Math.min(node.paddingRight, sidePadding);
+  } else {
+    node.paddingLeft = scaleSpacing(node.paddingLeft, factor, 0);
+    node.paddingRight = scaleSpacing(node.paddingRight, factor, 0);
+  }
+  node.paddingTop = scaleSpacing(node.paddingTop, factor, 0);
+  node.paddingBottom = scaleSpacing(node.paddingBottom, factor, 0);
+}
+
+// ─── Typography: resolve against the file's own text styles ────────────────
+
+/**
+ * Split a text style name into a family and a breakpoint, so that styles which
+ * already encode responsive intent can be paired up.
+ *
+ *   "Heading/Display/Desktop" → { family: "heading/display", breakpoint: "desktop" }
+ *   "H1 - Mobile"             → { family: "h1",              breakpoint: "mobile" }
+ *   "Body"                    → { family: "body",            breakpoint: null }
+ */
+function parseStyleName(name) {
+  const raw = String(name || "").trim();
+  const parts = raw.split(/[\/>|]+/).map((p) => p.trim()).filter(Boolean);
+
+  // Check the trailing segment, then any hyphen/space suffix within it.
+  const testSegments = [];
+  if (parts.length) testSegments.push({ text: parts[parts.length - 1], viaSlash: true });
+  const dashMatch = raw.match(/^(.*?)[\s]*[-–—][\s]*([A-Za-z0-9]+)$/);
+  if (dashMatch) testSegments.push({ text: dashMatch[2], viaSlash: false, head: dashMatch[1] });
+
+  for (const seg of testSegments) {
+    const token = seg.text.toLowerCase().replace(/[^a-z0-9]/g, "");
+    for (const bp of Object.keys(BREAKPOINT_STYLE_TOKENS)) {
+      if (BREAKPOINT_STYLE_TOKENS[bp].indexOf(token) !== -1) {
+        const family = seg.viaSlash
+          ? parts.slice(0, parts.length - 1).join("/").toLowerCase()
+          : String(seg.head || "").trim().toLowerCase();
+        return { family: family || raw.toLowerCase(), breakpoint: bp };
+      }
+    }
+  }
+  return { family: raw.toLowerCase(), breakpoint: null };
+}
+
+/**
+ * Index the file's local text styles by family, so a style can be exchanged
+ * for its equivalent at another breakpoint. Built once per generation run.
+ */
+async function buildTextStyleIndex() {
+  const index = { byId: {}, families: {}, total: 0 };
+  let styles = [];
+  try {
+    styles = await figma.getLocalTextStylesAsync();
+  } catch (e) {
+    return index;
+  }
+
+  for (const style of styles) {
+    const parsed = parseStyleName(style.name);
+    const entry = {
+      id: style.id,
+      name: style.name,
+      family: parsed.family,
+      breakpoint: parsed.breakpoint,
+      fontSize: style.fontSize,
+    };
+    index.byId[style.id] = entry;
+    if (!index.families[parsed.family]) index.families[parsed.family] = {};
+    // A family may legitimately hold one style per breakpoint, plus a
+    // breakpoint-less base under the "base" key.
+    index.families[parsed.family][parsed.breakpoint || "base"] = entry;
+    index.total++;
+  }
+  return index;
+}
+
+/**
+ * Verify typography survived the adaptation untouched.
+ *
+ * THE RULE: Desktop, Tablet and Mobile use the SAME local text style. Responsive
+ * design changes the layout, never the typography. A layer that reads
+ * "Subtitle Alt" on desktop must still read "Subtitle Alt" at 320px — not
+ * "Subtitle Alt / Mobile", not a smaller style, not a manual override.
+ *
+ * This function therefore MUTATES NOTHING. Cloning already carried every style
+ * link across intact; the job here is to confirm that, record which styles are
+ * in play, and flag layers that were never linked to a local style in the first
+ * place. Text that does not fit is a layout problem and is solved by fill/hug,
+ * wrapping and stacking — never by touching the type.
+ */
+function verifyTypographyPreserved(root, index, report) {
+  const texts = [];
+  const walk = (n, depth) => {
+    if (!n || depth > 16 || texts.length > 400) return;
+    if (n.type === "TEXT") texts.push(n);
+    if (isContainer(n)) for (const c of n.children) walk(c, depth + 1);
+  };
+  walk(root, 0);
+
+  for (const text of texts) {
+    const styleId = text.textStyleId;
+
+    if (!styleId || styleId === "" || styleId === figma.mixed) {
+      report.unlinkedText.push(text.name || "(unnamed text)");
+      continue;
+    }
+
+    report.preservedTextStyles++;
+    const entry = index && index.byId ? index.byId[styleId] : null;
+    const label = entry ? entry.name : "(local style)";
+    if (report.textStylesInUse.indexOf(label) === -1) {
+      report.textStylesInUse.push(label);
+    }
+  }
+}
+
+// ─── Sizing: Fill container / Hug contents, never fixed ────────────────────
+
+/** Intrinsically-sized elements keep their dimensions (icons, avatars, logos). */
+function hasIntrinsicSize(node) {
+  return INTRINSIC_SIZE_PATTERN.test(node.name || "");
+}
+
+/**
+ * Release a fixed height so a container hugs its content.
+ *
+ * Height must follow content at every breakpoint. A height fixed to match the
+ * desktop appearance clips or strands content the moment text rewraps, which is
+ * exactly what happens when a 1440px layout is rendered at 320px.
+ */
+function releaseFixedHeight(node, report) {
+  if (!isAutoLayout(node)) return false;
+  if (hasIntrinsicSize(node)) return false;
+
+  // Modern API: one property regardless of layout direction.
+  try {
+    if ("layoutSizingVertical" in node && node.layoutSizingVertical === "FIXED") {
+      node.layoutSizingVertical = "HUG";
+      if (report) report.fixedHeightsReleased++;
+      return true;
+    }
+    if ("layoutSizingVertical" in node) return false; // already HUG or FILL
+  } catch (e) { /* fall through to the axis-based path */ }
+
+  // Legacy API: height lives on a different axis per layout direction.
+  try {
+    if (node.layoutMode === "VERTICAL" && node.primaryAxisSizingMode === "FIXED") {
+      node.primaryAxisSizingMode = "AUTO";
+      if (report) report.fixedHeightsReleased++;
+      return true;
+    }
+    if (node.layoutMode === "HORIZONTAL" && node.counterAxisSizingMode === "FIXED") {
+      node.counterAxisSizingMode = "AUTO";
+      if (report) report.fixedHeightsReleased++;
+      return true;
+    }
+  } catch (e) { /* sizing mode not writable */ }
+  return false;
+}
+
+/** True when this node is meant to size to its own content horizontally. */
+function shouldHugHorizontally(node) {
+  const name = node.name || "";
+  return HUG_PATTERN.test(name) && !FILL_PATTERN.test(name);
+}
+
+/**
+ * Apply the Fill/Hug policy across a subtree.
+ *
+ * The rule the spec insists on: responsive elements must never carry fixed
+ * width or height. Flexible things fill their parent; content-driven things hug
+ * their contents. Only intrinsically-sized elements keep explicit dimensions.
+ */
+function enforceResponsiveSizing(root, report) {
+  const walk = (n, depth) => {
+    if (!n || depth > 14 || n.removed) return;
+
+    const parentIsAutoLayout = n.parent && isAutoLayout(n.parent);
+
+    if (parentIsAutoLayout && !hasIntrinsicSize(n)) {
+      if (shouldHugHorizontally(n)) {
+        // Content-driven: buttons, tags, labels, nav items.
+        try {
+          if ("layoutSizingHorizontal" in n && n.layoutSizingHorizontal === "FIXED") {
+            n.layoutSizingHorizontal = "HUG";
+            report.setToHug++;
+          }
+        } catch (e) { /* not hug-able */ }
+      } else if (n.type === "TEXT") {
+        // Text fills the width it is given so it can wrap, UNLESS it sits inside
+        // something that hugs — a button label filling its hugging button would
+        // be circular.
+        const parentHugs = shouldHugHorizontally(n.parent);
+        if (!parentHugs && readHorizontalSizing(n) === "FIXED") {
+          if (writeHorizontalSizing(n, "FILL")) report.setToFill++;
+        }
+      } else if (FILL_PATTERN.test(n.name || "") || isContainer(n)) {
+        // Width → Fill container is the default for structural elements.
+        if (readHorizontalSizing(n) === "FIXED") {
+          if (writeHorizontalSizing(n, "FILL")) report.setToFill++;
+        }
+      }
+    }
+
+    // Text grows with its content rather than clipping when it rewraps.
+    if (n.type === "TEXT") {
+      try {
+        if (n.textAutoResize === "NONE") {
+          n.textAutoResize = "HEIGHT";
+          report.textAutoHeight++;
+        }
+      } catch (e) { /* not writable */ }
+    }
+
+    // Height → Hug contents for every container, at every depth.
+    releaseFixedHeight(n, report);
+
+    if (isContainer(n)) for (const c of n.children) walk(c, depth + 1);
+  };
+
+  // Skip the root itself: its width is the viewport and is set deliberately.
+  if (isContainer(root)) for (const c of root.children) walk(c, 0);
+}
+
+/** Turn a horizontal row into a vertical stack, preserving child order. */
+function stackVertical(node) {
+  if (!isContainer(node)) return false;
+  if (!isAutoLayout(node)) return false;
+  if (node.layoutMode !== "HORIZONTAL") return false;
+  node.layoutMode = "VERTICAL";
+  try {
+    node.counterAxisAlignItems = "MIN";
+  } catch (e) { /* alignment unsupported on this node */ }
+  for (const child of node.children) {
+    writeHorizontalSizing(child, "FILL");
+  }
+  return true;
+}
+
+/** Move the text child ahead of the media child, per mobile hero convention. */
+function textBeforeMedia(node) {
+  if (!isContainer(node) || node.children.length !== 2) return false;
+  const [first, second] = node.children;
+  const firstIsMedia = nodeIsImageLike(first) || countDescendants(first, nodeIsImageLike, 20) > 0;
+  const secondIsText = nodeIsTextLike(second);
+  if (firstIsMedia && secondIsText) {
+    node.insertChild(0, second);
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Lay a uniform grid out at N columns.
+ *
+ * Cards are set to Fill container and given a MIN WIDTH, rather than a fixed
+ * width. A fixed width would pin the cards to one viewport and break at every
+ * other size — precisely what the "no fixed dimensions" rule exists to prevent.
+ * A min-width is a constraint: it decides how many cards fit per row, and the
+ * cards still stretch to consume whatever space that row actually has, so the
+ * layout stays correct at intermediate widths too.
+ */
+function setGridColumns(node, columns, availableWidth, report) {
+  if (!isContainer(node)) return false;
+  const kids = node.children.filter((c) => c.visible !== false);
+  if (!kids.length) return false;
+
+  if (columns === 1) {
+    // A single column is a vertical stack; children simply fill the width.
+    if (!isAutoLayout(node)) node.layoutMode = "VERTICAL";
+    else node.layoutMode = "VERTICAL";
+    try { node.layoutWrap = "NO_WRAP"; } catch (e) { /* unsupported */ }
+    for (const child of kids) {
+      writeHorizontalSizing(child, "FILL");
+      try { if ("minWidth" in child) child.minWidth = null; } catch (e) { /* unsupported */ }
+      releaseFixedHeight(child, report);
+    }
+    return true;
+  }
+
+  if (!isAutoLayout(node)) node.layoutMode = "HORIZONTAL";
+  else node.layoutMode = "HORIZONTAL";
+  try {
+    node.layoutWrap = "WRAP";
+  } catch (e) { /* older API without wrap; min-width still constrains sizing */ }
+
+  const gap = typeof node.itemSpacing === "number" ? node.itemSpacing : 0;
+  const inner = availableWidth - (node.paddingLeft || 0) - (node.paddingRight || 0);
+  // The width at which exactly `columns` cards fit on one row.
+  const minWidth = Math.max(1, Math.floor((inner - gap * (columns - 1)) / columns));
+
+  let usedMinWidth = false;
+  for (const child of kids) {
+    writeHorizontalSizing(child, "FILL");
+    releaseFixedHeight(child, report);
+    try {
+      if ("minWidth" in child) {
+        child.minWidth = minWidth;
+        usedMinWidth = true;
+      }
+    } catch (e) { /* min-width unsupported on this node */ }
+  }
+
+  if (!usedMinWidth && report) {
+    // Without min-width support the row cannot be constrained to N columns
+    // without a fixed width, which the sizing rules forbid. Say so plainly.
+    report.warnings.push(
+      `${node.name}: this Figma version does not support min-width, so a ${columns}-column ` +
+        "row could not be constrained without fixed widths. Cards fill the row instead — " +
+        "set a min width manually to control the column count."
+    );
+  }
+  return true;
+}
+
+/** Stack multi-field form rows into single-column. */
+function stackFormRows(node) {
+  let changed = 0;
+  const walk = (n, depth) => {
+    if (!n || depth > 8) return;
+    if (isContainer(n) && isAutoLayout(n) && n.layoutMode === "HORIZONTAL") {
+      const inputs = n.children.filter((c) => nodeIsInputLike(c) || countDescendants(c, nodeIsInputLike, 8) > 0);
+      if (inputs.length >= 2) {
+        n.layoutMode = "VERTICAL";
+        for (const c of n.children) writeHorizontalSizing(c, "FILL");
+        changed++;
+      }
+    }
+    if (isContainer(n)) for (const c of n.children) walk(c, depth + 1);
+  };
+  walk(node, 0);
+  return changed;
+}
+
+function inputsFillWidth(node) {
+  let changed = 0;
+  const walk = (n, depth) => {
+    if (!n || depth > 10) return;
+    if (nodeIsInputLike(n)) {
+      if (writeHorizontalSizing(n, "FILL")) changed++;
+    }
+    if (isContainer(n)) for (const c of n.children) walk(c, depth + 1);
+  };
+  walk(node, 0);
+  return changed;
+}
+
+/**
+ * Collapse desktop navigation for small screens.
+ *
+ * Reuse first: if the nav is an instance whose component set has a mobile-ish
+ * variant, switch to it and touch nothing else. Only when no such variant
+ * exists do we fall back to hiding the link list, and we always flag that
+ * fallback for human review rather than pretending it is finished work.
+ */
+async function collapseNavigation(node, report) {
+  // 1. Existing mobile variant on an existing component set.
+  const instances = [];
+  const walk = (n, depth) => {
+    if (!n || depth > 6) return;
+    if (n.type === "INSTANCE") instances.push(n);
+    if (isContainer(n)) for (const c of n.children) walk(c, depth + 1);
+  };
+  if (node.type === "INSTANCE") instances.push(node);
+  else walk(node, 0);
+
+  for (const instance of instances) {
+    try {
+      const main = await instance.getMainComponentAsync();
+      const set = main && main.parent && main.parent.type === "COMPONENT_SET" ? main.parent : null;
+      if (!set || !set.variantGroupProperties) continue;
+
+      for (const prop of Object.keys(set.variantGroupProperties)) {
+        const values = set.variantGroupProperties[prop].values || [];
+        const mobileValue = values.find((v) => /mobile|small|sm|compact|320|390/i.test(v));
+        if (!mobileValue) continue;
+        const current = instance.variantProperties ? instance.variantProperties[prop] : null;
+        if (current === mobileValue) {
+          report.reusedVariants.push(`${set.name} / ${prop}=${mobileValue} (already set)`);
+          return { method: "existing-variant", flagged: false };
+        }
+        instance.setProperties({ [prop]: mobileValue });
+        report.reusedVariants.push(`${set.name} / ${prop}=${mobileValue}`);
+        return { method: "existing-variant", flagged: false };
+      }
+    } catch (e) {
+      // Instance could not be switched; try the next one.
+    }
+  }
+
+  // 2. An existing mobile navigation component elsewhere in the file.
+  // "Do not create a new hamburger menu when the project already has one" —
+  // so look for one before falling back to hiding anything.
+  if (instances.length) {
+    try {
+      const candidates = figma.currentPage.findAllWithCriteria({ types: ["COMPONENT"] });
+      const mobileNav = candidates.find((c) => {
+        const nm = (c.name || "").toLowerCase();
+        const parentName = c.parent && c.parent.name ? c.parent.name.toLowerCase() : "";
+        const isNav = /nav|header|menu|topbar|app.?bar/.test(nm + " " + parentName);
+        const isMobile = /mobile|small|compact|burger|hamburger|320|390/.test(nm + " " + parentName);
+        return isNav && isMobile;
+      });
+
+      if (mobileNav && typeof instances[0].swapComponent === "function") {
+        instances[0].swapComponent(mobileNav);
+        report.reusedVariants.push(`${mobileNav.name} (existing mobile navigation component)`);
+        return { method: "existing-component", flagged: false };
+      }
+    } catch (e) {
+      // Search failed; fall through to the least-destructive fallback.
+    }
+  }
+
+  // 3. Fallback: hide the link list so the bar cannot overflow, and flag it.
+  let hidden = 0;
+  const hideLinkLists = (n, depth) => {
+    if (!n || depth > 5) return;
+    if (isContainer(n) && isAutoLayout(n) && n.layoutMode === "HORIZONTAL") {
+      const linkish = n.children.filter((c) => {
+        const nm = (c.name || "").toLowerCase();
+        return /link|item|menu.?item|nav.?item/.test(nm) || c.type === "TEXT";
+      });
+      if (linkish.length >= 3 && n !== node) {
+        n.visible = false;
+        hidden++;
+        return;
+      }
+    }
+    if (isContainer(n)) for (const c of n.children) hideLinkLists(c, depth + 1);
+  };
+  hideLinkLists(node, 0);
+
+  return { method: hidden ? "hid-desktop-links" : "none", flagged: true, hidden };
+}
+
+/** Release oversized fixed widths so content can reflow. */
+function releaseFixedWidths(node, maxWidth) {
+  let changed = 0;
+  const walk = (n, depth) => {
+    if (!n || depth > 12) return;
+    if (isContainer(n) && isAutoLayout(n)) {
+      for (const child of n.children) {
+        if (typeof child.width === "number" && child.width > maxWidth) {
+          if (writeHorizontalSizing(child, "FILL")) changed++;
+        }
+      }
+    }
+    if (isContainer(n)) for (const c of n.children) walk(c, depth + 1);
+  };
+  walk(node, 0);
+  return changed;
+}
+
+/** Make a table scroll horizontally instead of shrinking to illegibility. */
+function tableHorizontalScroll(node) {
+  try {
+    if ("clipsContent" in node) node.clipsContent = true;
+    if ("overflowDirection" in node) node.overflowDirection = "HORIZONTAL";
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+// ─── Generation ────────────────────────────────────────────────────────────
+
+/**
+ * Produce one responsive frame from a source frame.
+ * Returns a per-frame report describing what was reused, changed and flagged.
+ */
+async function generateBreakpoint(source, presetKey, options) {
+  const preset = RESPONSIVE_PRESETS[presetKey];
+  const preservation = options.preservation || "strict";
+  const factor = preset.width / Math.max(1, source.width);
+
+  const report = {
+    breakpoint: preset.label,
+    width: preset.width,
+    frameId: null,
+    frameName: "",
+    created: false,
+    updated: false,
+    sections: [],
+    reusedVariants: [],
+    // Typography is never altered across breakpoints — only verified.
+    preservedTextStyles: 0,
+    textStylesInUse: [],
+    unlinkedText: [],
+    // Sizing: fill/hug replacing fixed dimensions.
+    setToFill: 0,
+    setToHug: 0,
+    textAutoHeight: 0,
+    fixedHeightsReleased: 0,
+    fixedWidthsReleased: 0,
+    // Layer hygiene.
+    renamed: [],
+    removed: [],
+    collapsed: [],
+    warnings: [],
+  };
+
+  // Clone rather than rebuild: this is what preserves instances, bindings,
+  // content and styling without any explicit effort.
+  const frame = source.clone();
+  frame.name = buildResponsiveName(source.name, preset);
+  report.frameName = frame.name;
+  report.frameId = frame.id;
+  report.created = true;
+
+  // Place it beside the source without disturbing existing layout order.
+  const parent = source.parent || figma.currentPage;
+  if (isContainer(parent)) {
+    try {
+      parent.appendChild(frame);
+    } catch (e) { /* parent refused; clone stays where it landed */ }
+  }
+  if (!isAutoLayout(parent)) {
+    frame.x = source.x + source.width + (options.gutter || 120);
+    frame.y = source.y;
+  }
+
+  // Resize to the target viewport. Height hugs if the frame auto-layouts.
+  try {
+    frame.resize(preset.width, frame.height);
+  } catch (e) {
+    report.warnings.push(`Could not resize frame to ${preset.width}px: ${e && e.message}`);
+  }
+  if (isAutoLayout(frame)) {
+    try {
+      frame.primaryAxisSizingMode = "AUTO";
+      frame.counterAxisSizingMode = "FIXED";
+    } catch (e) { /* sizing modes unsupported */ }
+  }
+
+  // Apply the container rule for this breakpoint.
+  if (isAutoLayout(frame)) {
+    if (frame.paddingLeft > preset.sidePadding) frame.paddingLeft = preset.sidePadding;
+    if (frame.paddingRight > preset.sidePadding) frame.paddingRight = preset.sidePadding;
+    const spacing = SECTION_SPACING_FALLBACK[presetKey];
+    if (typeof frame.itemSpacing === "number" && frame.itemSpacing > spacing.max) {
+      frame.itemSpacing = spacing.max;
+    }
+  }
+
+  // Adapt each section according to its plan.
+  const children = isContainer(frame) ? frame.children.slice() : [];
+  const total = children.length;
+
+  for (let i = 0; i < total; i++) {
+    const child = children[i];
+    if (!child || child.removed || isInstrumentation(child)) continue;
+
+    const analysis = analyzeSection(child, i, total);
+    const behaviors = decideBehaviors(analysis, presetKey, preservation);
+    const applied = [];
+
+    for (const behavior of behaviors) {
+      try {
+        if (behavior === "reduce-padding") {
+          applyPaddingScale(child, Math.max(0.5, factor), preset.sidePadding);
+          applied.push("reduced padding");
+        } else if (behavior === "reduce-gap") {
+          if (isAutoLayout(child) && typeof child.itemSpacing === "number") {
+            child.itemSpacing = scaleSpacing(child.itemSpacing, Math.max(0.5, factor), 8);
+            applied.push("reduced gap");
+          }
+        } else if (behavior === "release-fixed-width") {
+          const n = releaseFixedWidths(child, preset.width - preset.sidePadding * 2);
+          report.fixedWidthsReleased += n;
+          if (n) applied.push(`released ${n} fixed width${n === 1 ? "" : "s"}`);
+        } else if (behavior === "stack-vertical") {
+          if (stackVertical(child)) applied.push("stacked vertically");
+        } else if (behavior === "text-before-media") {
+          if (textBeforeMedia(child)) applied.push("moved media below copy");
+        } else if (behavior === "media-full-width") {
+          for (const c of child.children || []) {
+            if (nodeIsImageLike(c)) writeHorizontalSizing(c, "FILL");
+          }
+          applied.push("media full width");
+        } else if (behavior === "equalize-split") {
+          for (const c of child.children || []) writeHorizontalSizing(c, "FILL");
+          applied.push("equalised split");
+        } else if (behavior.indexOf("columns:") === 0) {
+          const cols = parseInt(behavior.split(":")[1], 10);
+          const before = analysis.columns || analysis.childCount;
+          if (setGridColumns(child, cols, preset.width - preset.sidePadding * 2, report)) {
+            applied.push(`${before} columns → ${cols}`);
+          }
+        } else if (behavior === "enable-wrap") {
+          if (isContainer(child) && isAutoLayout(child) && child.layoutMode === "HORIZONTAL") {
+            try { child.layoutWrap = "WRAP"; applied.push("enabled wrapping"); } catch (e) { /* unsupported */ }
+          }
+        } else if (behavior === "stack-form-rows") {
+          const n = stackFormRows(child);
+          if (n) applied.push(`stacked ${n} form row${n === 1 ? "" : "s"}`);
+        } else if (behavior === "inputs-fill-width") {
+          const n = inputsFillWidth(child);
+          if (n) applied.push(`${n} inputs fill width`);
+        } else if (behavior === "collapse-navigation") {
+          const nav = await collapseNavigation(child, report);
+          if (nav.method === "existing-variant") {
+            applied.push("switched to existing mobile nav variant");
+          } else if (nav.method === "existing-component") {
+            applied.push("swapped to the file's existing mobile navigation component");
+          } else if (nav.method === "hid-desktop-links") {
+            applied.push("hid desktop link list");
+            report.warnings.push(
+              `${child.name}: no mobile navigation variant exists in the component set. ` +
+                "The desktop link list was hidden to prevent overflow — a hamburger " +
+                "menu and open/close states still need to be added."
+            );
+          } else {
+            report.warnings.push(
+              `${child.name}: could not determine a safe mobile navigation pattern. Left unchanged.`
+            );
+          }
+        } else if (behavior === "table-horizontal-scroll") {
+          if (tableHorizontalScroll(child)) applied.push("table scrolls horizontally");
+        } else if (behavior === "flag-manual-review") {
+          report.warnings.push(
+            `${child.name} (${analysis.kind}): no safe automatic responsive pattern. ` +
+              "Least-destructive adjustment applied; manual review required."
+          );
+        } else if (behavior === "flag-absolute-positioning") {
+          report.warnings.push(
+            `${child.name}: contains ${analysis.absoluteChildren.length} absolutely positioned ` +
+              "children, which cannot reflow. Convert to Auto Layout for reliable responsiveness."
+          );
+        }
+      } catch (err) {
+        report.warnings.push(
+          `${child.name}: "${behavior}" failed (${err && err.message}). Section left as cloned.`
+        );
+      }
+    }
+
+    report.sections.push({
+      name: analysis.name,
+      kind: analysis.kind,
+      changes: applied,
+    });
+  }
+
+  // Enforce Fill/Hug sizing across the whole frame. This runs in every
+  // preservation mode: fixed widths and heights are a correctness problem at
+  // other viewports, not a stylistic preference.
+  enforceResponsiveSizing(frame, report);
+
+  // Tidy the layer tree. Runs after the layout work so names describe the
+  // final structure, and before the typography check so that check sees what
+  // actually shipped.
+  if (options.cleanLayers !== false) {
+    cleanLayers(frame, options.cleanupOptions, report);
+  }
+
+  // Confirm typography came through untouched. Deliberately read-only: the
+  // same local style must appear at every breakpoint.
+  verifyTypographyPreserved(frame, options.textStyleIndex, report);
+
+  if (report.unlinkedText.length) {
+    const sample = report.unlinkedText.slice(0, 5).join(", ");
+    report.warnings.push(
+      `${report.unlinkedText.length} text layer(s) are not linked to a local text style ` +
+        `(${sample}${report.unlinkedText.length > 5 ? ", …" : ""}). ` +
+        "They were left untouched — link them to a local style rather than setting values by hand."
+    );
+  }
+
+  return report;
+}
+
+/** Follow the project's naming convention when we can infer one. */
+function buildResponsiveName(sourceName, preset) {
+  const name = (sourceName || "Frame").trim();
+  // "Homepage / Desktop / 1440" → "Homepage / Mobile / 320"
+  const slashPattern = /^(.*?)\s*\/\s*(desktop|tablet|mobile)\s*\/\s*\d+\s*$/i;
+  const m = name.match(slashPattern);
+  if (m) return `${m[1]} / ${preset.label} / ${preset.width}`;
+
+  const trailing = /^(.*?)[\s\-–—/]*\b(desktop|tablet|mobile)\b.*$/i;
+  const t = name.match(trailing);
+  if (t) return `${t[1].trim()} / ${preset.label} / ${preset.width}`;
+
+  return `${name} / ${preset.label} / ${preset.width}`;
+}
+
+// ─── QA validation ─────────────────────────────────────────────────────────
+
+/**
+ * Check a frame for the failure modes that make a layout "not responsive".
+ * `width` may differ from the frame's own width so a 320-wide frame can also
+ * be reasoned about at 390 without creating another frame.
+ */
+function validateResponsive(node, width, label) {
+  const issues = [];
+  const viewport = typeof width === "number" ? width : node.width;
+  const frameBox = node.absoluteBoundingBox;
+
+  let inspected = 0;
+  const walk = (n, depth) => {
+    if (!n || depth > 12 || inspected > 3000 || n.removed) return;
+    if (n.visible === false || isInstrumentation(n)) return;
+    inspected++;
+
+    const box = n.absoluteBoundingBox;
+
+    if (box && frameBox) {
+      const relLeft = box.x - frameBox.x;
+      const relRight = relLeft + box.width;
+
+      // Horizontal overflow — the single most common responsive failure.
+      if (relRight > viewport + 0.5) {
+        issues.push({
+          severity: "error",
+          type: "horizontal-overflow",
+          node: n.name,
+          nodeId: n.id,
+          message: `extends ${Math.round(relRight - viewport)}px past the ${viewport}px viewport`,
+        });
+      }
+      if (relLeft < -0.5) {
+        issues.push({
+          severity: "error",
+          type: "off-canvas",
+          node: n.name,
+          nodeId: n.id,
+          message: `starts ${Math.round(-relLeft)}px left of the frame`,
+        });
+      }
+    }
+
+    // Fixed widths wider than the viewport can never fit.
+    if (typeof n.width === "number" && n.width > viewport && n.parent && isAutoLayout(n.parent)) {
+      if (readHorizontalSizing(n) === "FIXED") {
+        issues.push({
+          severity: "error",
+          type: "fixed-width-too-wide",
+          node: n.name,
+          nodeId: n.id,
+          message: `fixed at ${Math.round(n.width)}px inside a ${viewport}px viewport`,
+        });
+      }
+    }
+
+    // Readability.
+    if (n.type === "TEXT" && typeof n.fontSize === "number" && n.fontSize < MIN_READABLE_FONT) {
+      issues.push({
+        severity: "warning",
+        type: "text-too-small",
+        node: n.name,
+        nodeId: n.id,
+        message: `${n.fontSize}px is below the ${MIN_READABLE_FONT}px readability floor`,
+      });
+    }
+
+    // Layer hygiene: a generic name tells the next reader nothing.
+    if (n !== node && isGenericName(n.name) && !isInsideInstance(n)) {
+      issues.push({
+        severity: "warning",
+        type: "generic-layer-name",
+        node: n.name,
+        nodeId: n.id,
+        message: "auto-generated layer name — rename it for what it is",
+      });
+    }
+
+    // Empty and purposeless layers.
+    if (n !== node && isRemovableLayer(n) && !isInsideInstance(n)) {
+      issues.push({
+        severity: "warning",
+        type: "empty-layer",
+        node: n.name,
+        nodeId: n.id,
+        message: "empty or zero-size layer with no layout or visual purpose",
+      });
+    }
+
+    // A text layer pinned to a fixed height clips the moment it rewraps.
+    if (n.type === "TEXT" && n.textAutoResize === "NONE") {
+      issues.push({
+        severity: "warning",
+        type: "text-fixed-height",
+        node: n.name,
+        nodeId: n.id,
+        message: "fixed height — set auto height so it grows when it wraps to more lines",
+      });
+    }
+
+    // Typography that is not linked to a local style carries arbitrary values
+    // and will not follow the design system when it changes.
+    if (n.type === "TEXT" && (!n.textStyleId || n.textStyleId === "")) {
+      issues.push({
+        severity: "warning",
+        type: "typography-not-linked",
+        node: n.name,
+        nodeId: n.id,
+        message: "not linked to a local text style — its size and spacing are arbitrary values",
+      });
+    }
+
+    // Fixed dimensions inside auto layout: the sizing rule violation that
+    // breaks a layout at every viewport other than the one it was set for.
+    if (n.parent && isAutoLayout(n.parent) && !hasIntrinsicSize(n) && n.type !== "TEXT") {
+      if (isContainer(n) && readHorizontalSizing(n) === "FIXED") {
+        issues.push({
+          severity: "warning",
+          type: "fixed-width-container",
+          node: n.name,
+          nodeId: n.id,
+          message: `fixed width (${Math.round(n.width)}px) — use Fill container or Hug contents instead`,
+        });
+      }
+      if (isAutoLayout(n)) {
+        const verticalFixed = n.layoutMode === "VERTICAL" && n.primaryAxisSizingMode === "FIXED";
+        const horizontalFixed = n.layoutMode === "HORIZONTAL" && n.counterAxisSizingMode === "FIXED";
+        if (verticalFixed || horizontalFixed) {
+          issues.push({
+            severity: "warning",
+            type: "fixed-height",
+            node: n.name,
+            nodeId: n.id,
+            message: `fixed height (${Math.round(n.height)}px) — content cannot grow when it reflows`,
+          });
+        }
+      }
+    }
+
+
+    // Tap targets.
+    if (nodeIsButtonLike(n) && typeof n.height === "number" && n.height > 0 && n.height < MIN_TAP_TARGET) {
+      issues.push({
+        severity: "warning",
+        type: "tap-target-small",
+        node: n.name,
+        nodeId: n.id,
+        message: `${Math.round(n.height)}px tall, below the ${MIN_TAP_TARGET}px tap-target minimum`,
+      });
+    }
+
+    // Overlap between siblings in a non-auto-layout container.
+    if (isContainer(n) && !isAutoLayout(n) && n.children.length > 1 && n.children.length < 40) {
+      const boxes = n.children
+        .filter((c) => c.visible !== false && c.absoluteBoundingBox)
+        .map((c) => ({ c, b: c.absoluteBoundingBox }));
+      for (let i = 0; i < boxes.length; i++) {
+        for (let j = i + 1; j < boxes.length; j++) {
+          const a = boxes[i].b;
+          const b = boxes[j].b;
+          const overlapX = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x);
+          const overlapY = Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y);
+          // Require meaningful overlap on both axes — deliberate stacking
+          // (badges, avatars) touches edges and should not be reported.
+          if (overlapX > 8 && overlapY > 8) {
+            issues.push({
+              severity: "warning",
+              type: "overlap",
+              node: `${boxes[i].c.name} ↔ ${boxes[j].c.name}`,
+              nodeId: boxes[i].c.id,
+              message: `overlap by ${Math.round(overlapX)}×${Math.round(overlapY)}px`,
+            });
+          }
+        }
+      }
+    }
+
+    if (isContainer(n)) for (const c of n.children) walk(c, depth + 1);
+  };
+
+  walk(node, 0);
+
+  // Deduplicate: one message per node per issue type.
+  const seen = {};
+  const unique = [];
+  for (const issue of issues) {
+    const key = `${issue.type}|${issue.nodeId}`;
+    if (seen[key]) continue;
+    seen[key] = true;
+    unique.push(issue);
+  }
+
+  const errors = unique.filter((i) => i.severity === "error");
+  return {
+    label: label || `${viewport}px`,
+    viewport,
+    frameId: node.id,
+    frameName: node.name,
+    inspected,
+    passed: errors.length === 0,
+    errorCount: errors.length,
+    warningCount: unique.length - errors.length,
+    issues: unique.slice(0, 120),
+    truncated: unique.length > 120 ? unique.length - 120 : 0,
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// LAYER CLEANUP
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Clean layers → meaningful names → remove redundancy → Auto Layout →
+// Fill container → Hug contents → no fixed height.
+//
+// A file can look correct and still be unusable by the next person who opens
+// it. This pass makes the layer tree itself legible.
+//
+// THE SAFETY BOUNDARY: this never descends into a component instance. An
+// instance's children take their names and structure from the main component;
+// renaming or deleting inside one produces overrides that fight the design
+// system. Instances are treated as sealed units — their contents are exactly
+// as designed, and not ours to tidy.
+
+// Figma's auto-generated names: "Frame 123", "Group 45", "Rectangle 12",
+// "Text 8", "Component 27", "Vector 16", "Ellipse 3", "Line 2"...
+const GENERIC_NAME_PATTERN =
+  /^(frame|group|rectangle|rect|text|component|vector|ellipse|line|star|polygon|slice|image|instance|union|subtract|intersect|exclude)(\s+\d+)?$/i;
+
+function isGenericName(name) {
+  return GENERIC_NAME_PATTERN.test(String(name || "").trim());
+}
+
+/** Inside a component instance nothing may be renamed, removed or restructured. */
+function isInsideInstance(node) {
+  let p = node.parent;
+  let depth = 0;
+  while (p && depth < 30) {
+    if (p.type === "INSTANCE") return true;
+    p = p.parent;
+    depth++;
+  }
+  return false;
+}
+
+function isComponentLike(node) {
+  return node.type === "INSTANCE" || node.type === "COMPONENT" || node.type === "COMPONENT_SET";
+}
+
+/**
+ * Does this frame earn its place in the tree?
+ *
+ * A frame is justified when it controls auto layout, padding, gap, alignment,
+ * responsive direction, clipping, background, border or component structure.
+ * A frame that does none of those is a wrapper around nothing.
+ */
+function frameHasLayoutPurpose(node) {
+  if (!node || !isContainer(node)) return true;
+  if (isComponentLike(node)) return true;
+
+  if (isAutoLayout(node)) return true;
+  if (node.clipsContent) return true;
+
+  const hasFill = Array.isArray(node.fills) && node.fills.some((f) => f && f.visible !== false);
+  if (hasFill) return true;
+  const hasStroke = Array.isArray(node.strokes) && node.strokes.length > 0;
+  if (hasStroke) return true;
+  const hasEffects = Array.isArray(node.effects) && node.effects.some((e) => e && e.visible !== false);
+  if (hasEffects) return true;
+
+  if (typeof node.cornerRadius === "number" && node.cornerRadius > 0) return true;
+  if (typeof node.opacity === "number" && node.opacity < 1) return true;
+  if (node.blendMode && node.blendMode !== "NORMAL" && node.blendMode !== "PASS_THROUGH") return true;
+
+  return false;
+}
+
+/** Node types that genuinely hold other layers. */
+const CONTAINER_TYPES = {
+  FRAME: true, GROUP: true, COMPONENT: true, COMPONENT_SET: true,
+  INSTANCE: true, SECTION: true,
+};
+
+function isLayoutContainerType(node) {
+  return !!(node && CONTAINER_TYPES[node.type]);
+}
+
+function hasVisualPresence(node) {
+  const hasFill = Array.isArray(node.fills) && node.fills.some((f) => f && f.visible !== false);
+  const hasStroke = Array.isArray(node.strokes) && node.strokes.length > 0;
+  const hasEffects = Array.isArray(node.effects) && node.effects.some((e) => e && e.visible !== false);
+  return hasFill || hasStroke || hasEffects;
+}
+
+/**
+ * Empty containers and zero-size shapes serve no layout or visual purpose.
+ *
+ * Deliberately conservative. Deleting is the one irreversible thing this whole
+ * feature does, so anything ambiguous is left alone and reported instead:
+ *
+ *   - TEXT is judged only on whether it has content. It is never treated as an
+ *     "empty container" — a text layer has no children by definition.
+ *   - A sized, empty frame inside an Auto Layout parent is very likely a
+ *     deliberate spacer. Removing it would silently change the layout, so it is
+ *     flagged rather than deleted.
+ */
+function isRemovableLayer(node) {
+  if (!node || node.removed) return false;
+  if (isComponentLike(node)) return false;
+  if (isInstrumentation(node)) return false;
+
+  // Text: content is the only question.
+  if (node.type === "TEXT") {
+    return typeof node.characters === "string" && node.characters.trim() === "";
+  }
+
+  // Anything with no area renders nothing.
+  if (typeof node.width === "number" && typeof node.height === "number") {
+    if (node.width < 0.5 || node.height < 0.5) return true;
+  }
+
+  if (isLayoutContainerType(node) && Array.isArray(node.children) && node.children.length === 0) {
+    // Doing visual work in its own right — a divider, a coloured block.
+    if (hasVisualPresence(node)) return false;
+
+    // Hidden and empty: nothing to lose.
+    if (node.visible === false) return true;
+
+    // Sized and empty inside Auto Layout: probably a spacer. Leave it.
+    const parentIsAutoLayout = node.parent && isAutoLayout(node.parent);
+    if (parentIsAutoLayout && node.width > 0.5 && node.height > 0.5) return false;
+
+    return true;
+  }
+
+  return false;
+}
+
+/** Empty frames we chose not to delete, so a human can decide. */
+function isPossibleSpacer(node) {
+  if (!node || node.removed || node.type === "TEXT") return false;
+  if (!isLayoutContainerType(node)) return false;
+  if (!Array.isArray(node.children) || node.children.length !== 0) return false;
+  if (hasVisualPresence(node) || node.visible === false) return false;
+  return !!(node.parent && isAutoLayout(node.parent) && node.width > 0.5 && node.height > 0.5);
+}
+
+function shortenForName(value, limit) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  const max = limit || 32;
+  if (!text) return "";
+  return text.length > max ? text.slice(0, max).trim() + "…" : text;
+}
+
+function findFirstText(node, budget) {
+  let found = null;
+  const limit = budget || 60;
+  let seen = 0;
+  const walk = (n, depth) => {
+    if (found || !n || depth > 6 || seen > limit) return;
+    seen++;
+    if (n.type === "TEXT" && n.characters && n.characters.trim()) {
+      found = n;
+      return;
+    }
+    if (isContainer(n)) for (const c of n.children) walk(c, depth + 1);
+  };
+  walk(node, 0);
+  return found;
+}
+
+/**
+ * Derive a meaningful name from what a layer actually is.
+ * Deterministic, so the same source produces the same names at every
+ * breakpoint — which is what keeps the three frames structurally comparable.
+ */
+function inferLayerName(node, context) {
+  const ctx = context || {};
+
+  if (node.type === "TEXT") {
+    const chars = shortenForName(node.characters, 30);
+    return chars || "Text";
+  }
+
+  if (nodeIsButtonLike(node)) return node.name && !isGenericName(node.name) ? node.name : "Button";
+  if (nodeIsInputLike(node)) return node.name && !isGenericName(node.name) ? node.name : "Input Field";
+
+  if (nodeIsImageLike(node)) return "Image";
+
+  // A top-level section names itself after its role.
+  if (ctx.sectionKind) {
+    const map = {
+      navigation: "Navigation",
+      hero: "Hero Section",
+      cardGrid: "Card Grid",
+      form: "Form",
+      table: "Table",
+      footer: "Footer",
+      generic: "Section",
+    };
+    return map[ctx.sectionKind] || "Section";
+  }
+
+  if (isContainer(node)) {
+    const kids = node.children.filter((c) => c.visible !== false);
+    if (kids.length === 0) return "Empty Frame";
+
+    // A container holding one image is an image wrapper.
+    if (kids.length === 1 && nodeIsImageLike(kids[0])) return "Media";
+
+    const allText = kids.every((c) => c.type === "TEXT");
+    if (allText) {
+      const first = findFirstText(node);
+      if (first) return shortenForName(first.characters, 24) + " Group";
+      return "Text Content";
+    }
+
+    if (kids.every((c) => nodeIsButtonLike(c))) return "CTA Group";
+
+    const first = findFirstText(node);
+    if (first) return shortenForName(first.characters, 24) + " Block";
+
+    // Never fall back to a name that is itself generic ("Group", "Frame").
+    if (kids.every((c) => nodeIsImageLike(c))) return "Media Group";
+    return isAutoLayout(node) ? "Content" : "Content Group";
+  }
+
+  return node.type
+    ? node.type.charAt(0) + node.type.slice(1).toLowerCase().replace(/_/g, " ")
+    : "Layer";
+}
+
+/**
+ * Remove empty and purposeless layers.
+ * Runs bottom-up so that a wrapper emptied by its children's removal is itself
+ * then removable in the same pass.
+ */
+function removeUnwantedLayers(root, report) {
+  const walk = (node, depth) => {
+    if (!node || node.removed || depth > 16) return;
+    if (isInstrumentation(node)) return;
+    // Never restructure the inside of a component.
+    if (node.type === "INSTANCE") return;
+
+    if (isContainer(node)) {
+      // Copy the list: children mutate as we remove.
+      for (const child of node.children.slice()) walk(child, depth + 1);
+    }
+
+    if (node === root) return;
+
+    if (isPossibleSpacer(node)) {
+      report.warnings.push(
+        `"${node.name}" is an empty ${Math.round(node.width)}×${Math.round(node.height)} frame ` +
+          "inside an Auto Layout parent. It was kept in case it is a deliberate spacer — " +
+          "delete it manually if it is not, or replace it with a gap value."
+      );
+      return;
+    }
+
+    if (isRemovableLayer(node)) {
+      const label = `${node.name} (${node.type.toLowerCase()})`;
+      try {
+        node.remove();
+        report.removed.push(label);
+      } catch (e) {
+        // Locked or otherwise unremovable — leave it.
+      }
+    }
+  };
+  walk(root, 0);
+}
+
+/**
+ * Collapse wrappers that provide no layout function.
+ *
+ * Only a single-child frame with no auto layout, background, border, effect or
+ * clipping is collapsed — those are pure nesting. Anything doing real work is
+ * left exactly as it is.
+ */
+function collapseRedundantWrappers(root, report) {
+  let collapsed = 0;
+
+  const walk = (node, depth) => {
+    if (!node || node.removed || depth > 16) return;
+    if (isInstrumentation(node) || node.type === "INSTANCE") return;
+    if (isContainer(node)) for (const child of node.children.slice()) walk(child, depth + 1);
+
+    if (node === root || !node.parent) return;
+    if (!isContainer(node) || isComponentLike(node)) return;
+    if (node.children.length !== 1) return;
+    if (frameHasLayoutPurpose(node)) return;
+
+    const parent = node.parent;
+    if (!isContainer(parent)) return;
+
+    const child = node.children[0];
+    if (isInstrumentation(child)) return;
+
+    try {
+      const index = parent.children.indexOf(node);
+      parent.insertChild(index, child);
+      const label = node.name;
+      node.remove();
+      report.collapsed.push(label);
+      collapsed++;
+    } catch (e) {
+      // Reparenting refused (locked layer, incompatible parent) — leave it.
+    }
+  };
+
+  walk(root, 0);
+  return collapsed;
+}
+
+/**
+ * Give every layer a meaningful name, and number repeated siblings
+ * consistently: "Feature Card / 01", "Feature Card / 02", …
+ */
+function renameLayers(root, sectionKinds, report) {
+  const walk = (node, depth, sectionKind) => {
+    if (!node || node.removed || depth > 16) return;
+    if (isInstrumentation(node)) return;
+    // An instance's own name may be improved, but never its children's.
+    const descend = node.type !== "INSTANCE";
+
+    if (node !== root && !isInsideInstance(node)) {
+      if (isGenericName(node.name)) {
+        const suggested = inferLayerName(node, { sectionKind });
+        if (suggested && suggested !== node.name) {
+          try {
+            const before = node.name;
+            node.name = suggested;
+            report.renamed.push(`${before} → ${suggested}`);
+          } catch (e) { /* name not writable */ }
+        }
+      }
+    }
+
+    if (descend && isContainer(node)) {
+      for (const child of node.children) walk(child, depth + 1, null);
+
+      // Number repeated siblings that share a name.
+      const byName = {};
+      for (const child of node.children) {
+        if (child.removed || isInsideInstance(child)) continue;
+        const key = child.name;
+        if (!byName[key]) byName[key] = [];
+        byName[key].push(child);
+      }
+      for (const key of Object.keys(byName)) {
+        const group = byName[key];
+        if (group.length < 3) continue;
+        if (/\s\/\s\d+$/.test(key)) continue; // already numbered
+        for (let i = 0; i < group.length; i++) {
+          const numbered = `${key} / ${String(i + 1).padStart(2, "0")}`;
+          try {
+            group[i].name = numbered;
+          } catch (e) { /* not writable */ }
+        }
+        report.renamed.push(`${key} ×${group.length} → ${key} / 01…`);
+      }
+    }
+  };
+
+  // Top-level children carry their section classification into naming.
+  if (isContainer(root)) {
+    const kids = root.children;
+    for (let i = 0; i < kids.length; i++) {
+      const kind = sectionKinds && sectionKinds[i] ? sectionKinds[i] : null;
+      walk(kids[i], 1, kind);
+    }
+  }
+}
+
+/** Flag groups that are standing in for responsive structure. */
+function flagLayoutGroups(root, report) {
+  const walk = (node, depth) => {
+    if (!node || node.removed || depth > 14) return;
+    if (node.type === "INSTANCE" || isInstrumentation(node)) return;
+
+    if (node.type === "GROUP" && node.children && node.children.length > 1) {
+      report.warnings.push(
+        `"${node.name}" is a Group holding ${node.children.length} layers. Groups cannot ` +
+          "control padding, gap or direction, so they do not adapt across breakpoints. " +
+          "Convert it to an Auto Layout frame."
+      );
+    }
+    if (isContainer(node)) for (const c of node.children) walk(c, depth + 1);
+  };
+  walk(root, 0);
+}
+
+/** Report nesting chains deep enough to be hard to follow. */
+function flagExcessiveNesting(root, report, maxDepth) {
+  const limit = maxDepth || 6;
+  const walk = (node, depth, trail) => {
+    if (!node || node.removed || depth > 18) return;
+    if (node.type === "INSTANCE" || isInstrumentation(node)) return;
+
+    if (depth >= limit && isContainer(node) && node.children.length === 1) {
+      report.warnings.push(
+        `Deep nesting (${depth} levels): ${trail.slice(-limit).join(" → ")}. ` +
+          "Flatten wrappers that do not control layout."
+      );
+      return; // one report per chain
+    }
+    if (isContainer(node)) {
+      for (const c of node.children) walk(c, depth + 1, trail.concat([c.name]));
+    }
+  };
+  walk(root, 0, [root.name]);
+}
+
+/**
+ * Full cleanup pass. Order matters: remove dead layers first, then collapse the
+ * wrappers that removal has emptied of purpose, then name what remains — so
+ * names describe the final structure rather than an intermediate one.
+ */
+function cleanLayers(root, options, report) {
+  const opts = options || {};
+
+  if (opts.removeUnwanted !== false) removeUnwantedLayers(root, report);
+  if (opts.collapseWrappers !== false) collapseRedundantWrappers(root, report);
+
+  // Re-derive section kinds after restructuring so names match reality.
+  let sectionKinds = null;
+  if (isContainer(root)) {
+    const kids = root.children.filter((c) => !isInstrumentation(c));
+    sectionKinds = kids.map((c, i) => classifySection(c, i, kids.length));
+  }
+
+  if (opts.rename !== false) renameLayers(root, sectionKinds, report);
+  if (opts.flagGroups !== false) flagLayoutGroups(root, report);
+  if (opts.flagNesting !== false) flagExcessiveNesting(root, report);
+
+  return report;
+}
+
+function emptyCleanupReport() {
+  return { renamed: [], removed: [], collapsed: [], warnings: [] };
+}
+
+// ─── Command entry points ──────────────────────────────────────────────────
+
+async function resolveResponsiveTarget(params) {
+  const nodeId = params && params.nodeId;
+  if (nodeId) {
+    const node = await getNodeByIdSafe(nodeId);
+    if (!node) throw new Error(`Node not found with ID: ${nodeId}`);
+    return node;
+  }
+  const selection = figma.currentPage.selection;
+  if (!selection || selection.length === 0) {
+    throw new Error(
+      "Nothing selected. Select a desktop frame, page or section in Figma, or pass nodeId."
+    );
+  }
+  return selection[0];
+}
+
+/**
+ * Standalone layer cleanup, for tidying a frame the responsive flow did not
+ * generate — most usefully the desktop source, so all three breakpoints end up
+ * with matching names.
+ */
+async function cleanLayersCommand(params) {
+  const opts = params || {};
+  const node = await resolveResponsiveTarget(opts);
+
+  const report = emptyCleanupReport();
+  const before = countDescendants(node, function () { return true; }, 5000);
+
+  if (opts.dryRun) {
+    // Report only: flag what would change without touching the document.
+    const generic = [];
+    const empties = [];
+    const walk = (n, depth) => {
+      if (!n || depth > 16 || n.removed) return;
+      if (isInstrumentation(n) || isInsideInstance(n)) return;
+      if (n !== node && isGenericName(n.name)) generic.push(n.name);
+      if (n !== node && isRemovableLayer(n)) empties.push(`${n.name} (${n.type.toLowerCase()})`);
+      if (isContainer(n) && n.type !== "INSTANCE") for (const c of n.children) walk(c, depth + 1);
+    };
+    walk(node, 0);
+    flagLayoutGroups(node, report);
+    flagExcessiveNesting(node, report);
+
+    return {
+      dryRun: true,
+      frame: { id: node.id, name: node.name },
+      layerCount: before,
+      genericNames: generic,
+      removableLayers: empties,
+      warnings: report.warnings,
+    };
+  }
+
+  cleanLayers(node, opts, report);
+  const after = countDescendants(node, function () { return true; }, 5000);
+
+  return {
+    dryRun: false,
+    frame: { id: node.id, name: node.name },
+    layerCountBefore: before,
+    layerCountAfter: after,
+    renamed: report.renamed,
+    removed: report.removed,
+    collapsed: report.collapsed,
+    warnings: report.warnings,
+  };
+}
+
+async function analyzeResponsive(params) {
+  const node = await resolveResponsiveTarget(params);
+  const preservation = (params && params.preservation) || "strict";
+
+  const children = isContainer(node)
+    ? node.children.filter((c) => c.visible !== false && !isInstrumentation(c))
+    : [];
+  const sections = children.map((c, i) => analyzeSection(c, i, children.length));
+
+  // Which preset does the source most resemble?
+  let sourcePreset = "desktop";
+  let bestDelta = Infinity;
+  for (const key of Object.keys(RESPONSIVE_PRESETS)) {
+    const delta = Math.abs(RESPONSIVE_PRESETS[key].width - node.width);
+    if (delta < bestDelta) { bestDelta = delta; sourcePreset = key; }
+  }
+
+  const plans = {};
+  for (const key of ["tablet", "mobile"]) {
+    plans[key] = buildPlan(sections, key, preservation);
+  }
+
+  const selfCheck = validateResponsive(node, node.width, `source ${Math.round(node.width)}px`);
+
+  return {
+    source: {
+      id: node.id,
+      name: node.name,
+      type: node.type,
+      width: Math.round(node.width || 0),
+      height: Math.round(node.height || 0),
+      autoLayout: isAutoLayout(node) ? node.layoutMode : "NONE",
+      padding: isAutoLayout(node)
+        ? { top: node.paddingTop, right: node.paddingRight, bottom: node.paddingBottom, left: node.paddingLeft }
+        : null,
+      itemSpacing: isAutoLayout(node) ? node.itemSpacing : null,
+      closestPreset: sourcePreset,
+    },
+    sectionCount: sections.length,
+    sections,
+    plans,
+    existingResponsiveFrames: findExistingResponsiveFrames(node),
+    sourceIssues: selfCheck,
+    layerHygiene: (function () {
+      const generic = [];
+      const empties = [];
+      let deepest = 0;
+      const walk = (n, depth) => {
+        if (!n || depth > 18 || n.removed) return;
+        if (isInstrumentation(n) || isInsideInstance(n)) return;
+        if (depth > deepest) deepest = depth;
+        if (n !== node && isGenericName(n.name) && generic.length < 40) generic.push(n.name);
+        if (n !== node && isRemovableLayer(n) && empties.length < 40) {
+          empties.push(`${n.name} (${n.type.toLowerCase()})`);
+        }
+        if (isContainer(n) && n.type !== "INSTANCE") for (const c of n.children) walk(c, depth + 1);
+      };
+      walk(node, 0);
+      return { genericNames: generic, removableLayers: empties, maxDepth: deepest };
+    })(),
+    readiness: {
+      usesAutoLayout: isAutoLayout(node),
+      sectionsWithoutAutoLayout: sections.filter((s) => !s.usesAutoLayout).map((s) => s.name),
+      sectionsWithAbsoluteChildren: sections.filter((s) => s.absoluteChildren.length).map((s) => s.name),
+      totalInstances: sections.reduce((n, s) => n + s.instanceCount, 0),
+    },
+  };
+}
+
+async function makeResponsive(params) {
+  const opts = params || {};
+  const node = await resolveResponsiveTarget(opts);
+  const preservation = opts.preservation || "strict";
+  const requested = Array.isArray(opts.breakpoints) && opts.breakpoints.length
+    ? opts.breakpoints
+    : ["tablet", "mobile"];
+
+  if (opts.mode === "preview") {
+    const analysis = await analyzeResponsive(opts);
+    return { mode: "preview", previewOnly: true, analysis, frames: [] };
+  }
+
+  // Index the file's text styles once; every breakpoint resolves against it.
+  const textStyleIndex = await buildTextStyleIndex();
+
+  const frames = [];
+  for (const key of requested) {
+    if (!RESPONSIVE_PRESETS[key]) {
+      frames.push({ breakpoint: key, error: `Unknown breakpoint "${key}"` });
+      continue;
+    }
+    if (key === "desktop") continue; // the source already is the desktop frame
+    const report = await generateBreakpoint(node, key, {
+      preservation,
+      gutter: opts.gutter,
+      textStyleIndex,
+      cleanLayers: opts.cleanLayers !== false,
+      cleanupOptions: opts.cleanupOptions,
+    });
+    frames.push(report);
+  }
+
+  // QA covers all three required frames. The desktop source is validated at
+  // 1440 as well — the spec's final checklist requires it, and a desktop frame
+  // that already overflows will hand its problems to every derived breakpoint.
+  const validations = [];
+  validations.push(
+    validateResponsive(node, RESPONSIVE_PRESETS.desktop.width, `Desktop @ ${RESPONSIVE_PRESETS.desktop.width}px (source)`)
+  );
+
+  for (const frame of frames) {
+    if (!frame.frameId) continue;
+    const generated = await getNodeByIdSafe(frame.frameId);
+    if (!generated) continue;
+
+    if (frame.width <= 480) {
+      // A layout that survives 390 but fails at 320 is not responsive.
+      for (const qaWidth of QA_WIDTHS) {
+        validations.push(validateResponsive(generated, qaWidth, `${frame.breakpoint} @ ${qaWidth}px`));
+      }
+    } else {
+      validations.push(validateResponsive(generated, frame.width, `${frame.breakpoint} @ ${frame.width}px`));
+    }
+  }
+
+  return {
+    source: { id: node.id, name: node.name, width: Math.round(node.width) },
+    preservation,
+    textStylesAvailable: textStyleIndex.total,
+    frames,
+    validations,
+    qaWidths: QA_WIDTHS,
+  };
+}
+
+async function validateResponsiveCommand(params) {
+  const node = await resolveResponsiveTarget(params);
+  const widths = Array.isArray(params && params.widths) && params.widths.length
+    ? params.widths
+    : [Math.round(node.width)];
+
+  return {
+    frame: { id: node.id, name: node.name, width: Math.round(node.width) },
+    results: widths.map((w) => validateResponsive(node, w, `${w}px`)),
   };
 }
 
