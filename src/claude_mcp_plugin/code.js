@@ -975,10 +975,14 @@ async function handleCommand(command, params) {
       return await cloneNode(params);
     case "scan_text_nodes":
       return await scanTextNodes(params);
+    case "fix_text_sizing":
+      return await fixTextSizing(params);
     case "set_multiple_text_contents":
       return await setMultipleTextContents(params);
     case "set_auto_layout":
       return await setAutoLayout(params);
+    case "set_layout_sizing":
+      return await setLayoutSizing(params);
     // Nuevos comandos para propiedades de texto
     case "set_font_name":
       return await setFontName(params);
@@ -1101,6 +1105,14 @@ async function handleCommand(command, params) {
       return await applyVariableToNode(params);
     case "switch_variable_mode":
       return await switchVariableMode(params);
+    case "find_variable":
+      return await findVariable(params);
+    case "apply_variable_bindings":
+      return await applyVariableBindings(params);
+    case "get_node_variable_bindings":
+      return await getNodeVariableBindings(params);
+    case "import_library_variable":
+      return await importLibraryVariable(params);
     // ── FigJam commands ──────────────────────────────────────────────────
     case "get_figjam_elements":
       return await getFigJamElements();
@@ -1449,10 +1461,17 @@ async function createText(params) {
     textNode.textAlignHorizontal = textAlignHorizontal;
   }
 
-  // Set text auto resize if provided (WIDTH_AND_HEIGHT, HEIGHT, NONE, TRUNCATE)
-  if (textAutoResize && ["WIDTH_AND_HEIGHT", "HEIGHT", "NONE", "TRUNCATE"].includes(textAutoResize)) {
-    textNode.textAutoResize = textAutoResize;
-  }
+  // Determine textAutoResize automatically when not explicitly set.
+  // Rules (applied before width so the resize call below doesn't lock height):
+  //   - width provided → paragraph context → HEIGHT (auto height, fixed width)
+  //   - no width, no explicit resize → single-line context → WIDTH_AND_HEIGHT (hug both)
+  // An explicit textAutoResize param always wins.
+  const resolvedResize = textAutoResize && ["WIDTH_AND_HEIGHT", "HEIGHT", "NONE", "TRUNCATE"].includes(textAutoResize)
+    ? textAutoResize
+    : (width && typeof width === "number" && width > 0)
+      ? "HEIGHT"
+      : "WIDTH_AND_HEIGHT";
+  textNode.textAutoResize = resolvedResize;
 
   // Set width if provided (useful with textAutoResize "HEIGHT" for fixed-width wrapping text)
   if (width && typeof width === "number" && width > 0) {
@@ -1699,15 +1718,24 @@ async function moveNode(params) {
   };
 }
 
+/** Read one axis's sizing without throwing on a node that has no layout axis. */
+function safeReadSizing(node, axis) {
+  try {
+    return axis === "vertical" ? readVerticalSizing(node) : readHorizontalSizing(node);
+  } catch (e) {
+    return null;
+  }
+}
+
 async function resizeNode(params) {
-  const { nodeId, width, height } = params || {};
+  const { nodeId, width, height, allowFixedHeight } = params || {};
 
   if (!nodeId) {
     throw new Error("Missing nodeId parameter");
   }
 
-  if (width === undefined || height === undefined) {
-    throw new Error("Missing width or height parameters");
+  if (width === undefined && height === undefined) {
+    throw new Error("Provide at least one of width or height");
   }
 
   const node = await getNodeByIdSafe(nodeId);
@@ -1719,13 +1747,44 @@ async function resizeNode(params) {
     throw new Error(`Node does not support resizing: ${nodeId}`);
   }
 
-  node.resize(width, height);
+  // resize() writes a literal height and, on an auto layout frame, silently
+  // flips Hug contents back to Fixed. That is the single easiest way to
+  // reintroduce the fixed heights this plugin exists to avoid, so a container
+  // whose height follows its content has to be pinned deliberately.
+  const heightRequested = height !== undefined;
+  const isContentDrivenHeight =
+    isContainer(node) && !hasIntrinsicSize(node) && readVerticalSizing(node) !== "FIXED";
+
+  if (heightRequested && isContentDrivenHeight && allowFixedHeight !== true) {
+    throw new Error(
+      `"${node.name}" sizes its height to its content (${readVerticalSizing(node)}). Setting a ` +
+        `fixed height of ${height}px would clip or strand that content when it reflows. ` +
+        "Change the content or the padding instead, or use set_layout_sizing to change how it " +
+        "sizes. Pass allowFixedHeight: true only for something that genuinely needs a fixed " +
+        "physical size, such as an image crop or an avatar."
+    );
+  }
+
+  // resize() takes both axes and pins both, so a width-only call would still
+  // convert Hug height to Fixed. Remember the sizing of whichever axis the
+  // caller did not ask about, and put it back afterwards.
+  const priorVertical = heightRequested ? null : safeReadSizing(node, "vertical");
+  const priorHorizontal = width === undefined ? safeReadSizing(node, "horizontal") : null;
+
+  const targetWidth = width === undefined ? node.width : width;
+  const targetHeight = heightRequested ? height : node.height;
+  node.resize(targetWidth, targetHeight);
+
+  if (priorVertical && priorVertical !== "FIXED") writeVerticalSizing(node, priorVertical);
+  if (priorHorizontal && priorHorizontal !== "FIXED") writeHorizontalSizing(node, priorHorizontal);
 
   return {
     id: node.id,
     name: node.name,
     width: node.width,
     height: node.height,
+    layoutSizingVertical: readVerticalSizing(node),
+    heightPinned: heightRequested,
   };
 }
 
@@ -1989,16 +2048,24 @@ async function getDesignSystem(params) {
     try {
       const collections = await figma.variables.getLocalVariableCollectionsAsync();
       variablesAvailable = true;
+      // One index so an alias can be reported by the name it points at. A raw
+      // {type:"VARIABLE_ALIAS", id:"VariableID:12:34"} tells a reader nothing,
+      // and an alias flattened to its hex invites copying the hex.
+      const aliasIndex = await buildVariableIndex();
       for (const collection of collections) {
         const vars = [];
         for (const variableId of collection.variableIds) {
           const variable = await figma.variables.getVariableByIdAsync(variableId);
           if (!variable) continue;
-          // Resolve colour values to hex so the agent can match them by eye.
+          // Resolve colour values to hex so the agent can match them by eye;
+          // aliases stay aliases, named for what they point at.
           const values = {};
           for (const modeId of Object.keys(variable.valuesByMode || {})) {
             const raw = variable.valuesByMode[modeId];
-            if (raw && typeof raw === "object" && "r" in raw) {
+            if (raw && typeof raw === "object" && raw.type === "VARIABLE_ALIAS") {
+              const target = aliasIndex.byId[raw.id];
+              values[modeId] = `→ ${target ? target.name : "(alias outside this file)"}`;
+            } else if (raw && typeof raw === "object" && "r" in raw) {
               values[modeId] = paintToHex({ type: "SOLID", color: raw });
             } else {
               values[modeId] = raw;
@@ -2008,6 +2075,7 @@ async function getDesignSystem(params) {
             id: variable.id,
             name: variable.name,
             resolvedType: variable.resolvedType,
+            scopes: variable.scopes || [],
             valuesByMode: values,
           });
         }
@@ -2120,6 +2188,25 @@ const RESPONSIVE_PRESETS = {
   mobile: { key: "mobile", label: "Mobile", width: 320, sidePadding: 16, maxContent: 288 },
 };
 
+/** Return a breakpoint preset at the exact width requested by the designer. */
+function resolveResponsivePreset(key, requestedWidth) {
+  const base = RESPONSIVE_PRESETS[key];
+  if (!base) return null;
+  if (requestedWidth === undefined || requestedWidth === null) return { ...base };
+
+  const width = Number(requestedWidth);
+  if (!Number.isFinite(width) || width <= 0) {
+    throw new Error('targetWidth must be a positive number.');
+  }
+
+  return {
+    ...base,
+    width,
+    maxContent: Math.max(0, Math.min(base.maxContent, width - base.sidePadding * 2)),
+    customWidth: Math.abs(width - base.width) > 0.01,
+  };
+}
+
 // 320 is the default mobile *design* frame. Both widths are always used for QA
 // because a layout that survives 390 but breaks at 320 is not responsive.
 const QA_WIDTHS = [390, 320];
@@ -2176,6 +2263,37 @@ function isInstrumentation(node) {
   );
 }
 
+/**
+ * Explicit Figma Auto Layout absolute positioning is designer-controlled.
+ * Responsive generation treats the layer as an opaque, immutable subtree.
+ */
+function isAbsolutePositionedLayer(node) {
+  if (!node) return false;
+  try {
+    return "layoutPositioning" in node && node.layoutPositioning === "ABSOLUTE";
+  } catch (e) {
+    return false;
+  }
+}
+
+function collectAbsolutePositionedLayers(root, includeRoot) {
+  const found = [];
+  const walk = (node, depth) => {
+    if (!node || node.removed || depth > 18) return;
+    if ((node !== root || includeRoot === true) && isAbsolutePositionedLayer(node)) {
+      found.push(node);
+      return; // The complete subtree is protected by its absolute root.
+    }
+    if (isContainer(node)) for (const child of node.children) walk(child, depth + 1);
+  };
+  walk(root, 0);
+  return found;
+}
+
+function containsAbsolutePositionedLayer(node) {
+  return collectAbsolutePositionedLayers(node, true).length > 0;
+}
+
 /** Horizontal sizing behaviour, tolerant of older Figma API surfaces. */
 function readHorizontalSizing(node) {
   try {
@@ -2185,6 +2303,44 @@ function readHorizontalSizing(node) {
   } catch (e) { /* fall through */ }
   if (node.layoutGrow === 1) return "FILL";
   return "FIXED";
+}
+
+/**
+ * Vertical sizing behaviour, tolerant of older Figma API surfaces.
+ *
+ * Reports FIXED for a container with no auto layout too: such a frame holds a
+ * literal height that nothing will update when its content reflows, which is
+ * the same defect from the layout's point of view.
+ */
+function readVerticalSizing(node) {
+  try {
+    if ("layoutSizingVertical" in node && node.layoutSizingVertical) {
+      return node.layoutSizingVertical;
+    }
+  } catch (e) { /* fall through to the axis-based path */ }
+  if (!isAutoLayout(node)) return "FIXED";
+  if (node.layoutMode === "VERTICAL") {
+    return node.primaryAxisSizingMode === "AUTO" ? "HUG" : "FIXED";
+  }
+  return node.counterAxisSizingMode === "AUTO" ? "HUG" : "FIXED";
+}
+
+/** Set vertical sizing, degrading gracefully when the API is unavailable. */
+function writeVerticalSizing(node, value) {
+  try {
+    if ("layoutSizingVertical" in node) {
+      node.layoutSizingVertical = value;
+      return true;
+    }
+  } catch (e) { /* fall through to the legacy axis path */ }
+  if (!isAutoLayout(node)) return false;
+  try {
+    const mode = value === "HUG" ? "AUTO" : "FIXED";
+    if (node.layoutMode === "VERTICAL") node.primaryAxisSizingMode = mode;
+    else node.counterAxisSizingMode = mode;
+    return true;
+  } catch (e) { /* sizing mode not writable */ }
+  return false;
 }
 
 /** Set horizontal sizing, degrading gracefully when the API is unavailable. */
@@ -2213,6 +2369,54 @@ function nodeIsImageLike(node) {
   const fills = node.fills;
   if (Array.isArray(fills) && fills.some((f) => f && f.type === "IMAGE")) return true;
   return false;
+}
+
+/** Keep cloned image/crop containers locked to their desktop aspect ratio. */
+function preserveImageAspectRatios(source, target) {
+  let preserved = 0;
+  const pair = (desktopNode, responsiveNode, depth) => {
+    if (!desktopNode || !responsiveNode || depth > 18) return;
+    if (
+      isAbsolutePositionedLayer(desktopNode) ||
+      isAbsolutePositionedLayer(responsiveNode)
+    ) {
+      return;
+    }
+
+    if (
+      nodeIsImageLike(desktopNode) &&
+      desktopNode.width > 0 &&
+      desktopNode.height > 0
+    ) {
+      try {
+        if ('constrainProportions' in responsiveNode) {
+          responsiveNode.constrainProportions = true;
+          preserved++;
+        }
+      } catch (e) { /* this node type does not expose ratio locking */ }
+    }
+
+    if (!isContainer(desktopNode) || !isContainer(responsiveNode)) return;
+    const unusedResponsive = responsiveNode.children.slice();
+    for (const desktopChild of desktopNode.children) {
+      let matchIndex = unusedResponsive.findIndex(
+        (candidate) =>
+          candidate.type === desktopChild.type && candidate.name === desktopChild.name
+      );
+      if (matchIndex < 0) {
+        matchIndex = unusedResponsive.findIndex(
+          (candidate) =>
+            candidate.type === desktopChild.type &&
+            nodeIsImageLike(candidate) === nodeIsImageLike(desktopChild)
+        );
+      }
+      if (matchIndex < 0) continue;
+      const responsiveChild = unusedResponsive.splice(matchIndex, 1)[0];
+      pair(desktopChild, responsiveChild, depth + 1);
+    }
+  };
+  pair(source, target, 0);
+  return preserved;
 }
 
 function nodeIsTextLike(node) {
@@ -2313,16 +2517,21 @@ function classifySection(node, index, total) {
 function analyzeSection(node, index, total) {
   const kind = classifySection(node, index, total);
   const fixedWidthChildren = [];
-  const absoluteChildren = [];
+  const absoluteChildren = collectAbsolutePositionedLayers(node, true).map((child) => ({
+    id: child.id,
+    name: child.name,
+  }));
 
   if (isContainer(node)) {
     for (const child of node.children) {
       if (child.visible === false) continue;
-      if (isAutoLayout(node) && readHorizontalSizing(child) === "FIXED" && child.width > 400) {
+      if (
+        !isAbsolutePositionedLayer(child) &&
+        isAutoLayout(node) &&
+        readHorizontalSizing(child) === "FIXED" &&
+        child.width > 400
+      ) {
         fixedWidthChildren.push({ id: child.id, name: child.name, width: Math.round(child.width) });
-      }
-      if (!isAutoLayout(node) && "x" in child) {
-        absoluteChildren.push({ id: child.id, name: child.name });
       }
     }
   }
@@ -2340,6 +2549,11 @@ function analyzeSection(node, index, total) {
       ? { top: node.paddingTop, right: node.paddingRight, bottom: node.paddingBottom, left: node.paddingLeft }
       : null,
     childCount: isContainer(node) ? node.children.length : 0,
+    childWidths: isContainer(node)
+      ? node.children
+          .filter((child) => child.visible !== false && !isAbsolutePositionedLayer(child))
+          .map((child) => Number(child.width) || 0)
+      : [],
     columns: kind === "cardGrid" && isContainer(node) ? node.children.filter((c) => c.visible !== false).length : null,
     hasImages: countDescendants(node, nodeIsImageLike, 50) > 0,
     inputCount: countDescendants(node, nodeIsInputLike, 40),
@@ -2356,11 +2570,71 @@ function analyzeSection(node, index, total) {
  * engine can update them rather than creating duplicates, and can learn the
  * project's existing responsive conventions.
  */
-function findExistingResponsiveFrames(sourceNode) {
-  const parent = sourceNode.parent || figma.currentPage;
+function responsiveBaseName(value) {
+  let name = (value || "Frame").trim();
+  const breakpointSuffix = /\s*(?:[-\u2013\u2014/]\s*)?(?:(?:\d+\s*(?:px)?\s*)?(?:desktop|desk|tablet|tab|mobile|mobi|mob)|(?:desktop|desk|tablet|tab|mobile|mobi|mob)(?:\s*[-\u2013\u2014/]?\s*\d+\s*(?:px)?)?)\s*$/i;
+  let previous = "";
+  while (name && name !== previous) {
+    previous = name;
+    name = name.replace(breakpointSuffix, "").trim();
+  }
+  return name.replace(/[\s\-/\u2013\u2014]+$/, "").trim() || "Frame";
+}
+
+function breakpointNameMatches(name, preset) {
+  const value = (name || "").toLowerCase();
+  const width = new RegExp(`\\b${preset.width}\\s*(?:px)?\\b`, "i").test(value);
+  if (preset.key === "tablet") return width || /\b(tablet|tab)\b/i.test(value);
+  if (preset.key === "mobile") return width || /\b(mobile|mobi|mob|phone)\b/i.test(value);
+  return width || /\b(desktop|desk)\b/i.test(value);
+}
+
+function breakpointNameMentionsWidth(name, preset) {
+  return new RegExp(`\\b${preset.width}\\s*(?:px)?\\b`, 'i').test(name || '');
+}
+
+function findExistingBreakpointFrame(sourceNode, preset, parentOverride) {
+  const parent = parentOverride || sourceNode.parent || figma.currentPage;
+  if (!isContainer(parent)) return null;
+
+  const baseName = responsiveBaseName(sourceNode.name).toLowerCase();
+  const candidates = [];
+  const genericCandidates = [];
+  for (const sibling of parent.children) {
+    if (sibling.id === sourceNode.id || sibling.removed) continue;
+    if (typeof sibling.width !== "number") continue;
+
+    const sharesBase = responsiveBaseName(sibling.name).toLowerCase() === baseName;
+    const exactWidth = Math.abs(sibling.width - preset.width) <= 1;
+    const namesBreakpoint = breakpointNameMatches(sibling.name, preset);
+    const namesExactWidth = breakpointNameMentionsWidth(sibling.name, preset);
+
+    // A 768px Tab and an 834px Tab are separate requested outputs. A generic
+    // breakpoint label must never cause one exact-width frame to overwrite the other.
+    if (!exactWidth && !namesExactWidth) continue;
+
+    const candidate = {
+      node: sibling,
+      score: (exactWidth ? 4 : 0) + (namesExactWidth ? 2 : 0) + (namesBreakpoint ? 1 : 0),
+    };
+    if (sharesBase) candidates.push(candidate);
+    else if (responsiveBaseName(sibling.name) === "Frame") genericCandidates.push(candidate);
+  }
+
+  candidates.sort((a, b) => b.score - a.score);
+  if (candidates.length) return candidates[0].node;
+
+  // A same-area frame named only "Tab / 768px" or "Mobile" is a valid slot
+  // even though it carries no page base name. Reuse it only when unambiguous.
+  genericCandidates.sort((a, b) => b.score - a.score);
+  return genericCandidates.length === 1 ? genericCandidates[0].node : null;
+}
+
+function findExistingResponsiveFrames(sourceNode, parentOverride) {
+  const parent = parentOverride || sourceNode.parent || figma.currentPage;
   if (!isContainer(parent)) return [];
 
-  const baseName = (sourceNode.name || "").replace(/\s*\/?\s*(desktop|tablet|mobile)[^/]*$/i, "").trim();
+  const baseName = responsiveBaseName(sourceNode.name).toLowerCase();
   const found = [];
 
   for (const sibling of parent.children) {
@@ -2368,9 +2642,11 @@ function findExistingResponsiveFrames(sourceNode) {
     if (typeof sibling.width !== "number") continue;
 
     const name = (sibling.name || "").trim();
-    const sharesBase = baseName && name.toLowerCase().indexOf(baseName.toLowerCase()) === 0;
-    const namesBreakpoint = /\b(desktop|tablet|mobile)\b|\b(1440|768|390|320)\b/i.test(name);
-    if (!sharesBase && !namesBreakpoint) continue;
+    const normalizedSibling = responsiveBaseName(name);
+    const sharesBase = normalizedSibling.toLowerCase() === baseName;
+    const isGenericSlot = normalizedSibling === "Frame";
+    const namesBreakpoint = /\b(desktop|desk|tablet|tab|mobile|mobi|mob)\b|\b(1440|768|390|320)\b/i.test(name);
+    if ((!sharesBase && !isGenericSlot) || !namesBreakpoint) continue;
 
     found.push({
       id: sibling.id,
@@ -2382,6 +2658,54 @@ function findExistingResponsiveFrames(sourceNode) {
   return found;
 }
 
+function responsiveSiblingAnchor(source, presetKey, parent) {
+  if (presetKey === "mobile") {
+    const tablet = findExistingBreakpointFrame(source, RESPONSIVE_PRESETS.tablet, parent);
+    if (tablet) return tablet;
+
+    // A custom-width Tablet (for example 834px) is still the canonical anchor
+    // for Mobile. Exact-width matching protects generation from overwriting it,
+    // while this category-only lookup is used solely for sibling ordering.
+    if (isContainer(parent)) {
+      const baseName = responsiveBaseName(source.name).toLowerCase();
+      const customTablet = parent.children.find(
+        (sibling) =>
+          sibling.id !== source.id &&
+          !sibling.removed &&
+          responsiveBaseName(sibling.name).toLowerCase() === baseName &&
+          /\b(tablet|tab)\b/i.test(sibling.name || '')
+      );
+      if (customTablet) return customTablet;
+    }
+  }
+  return source.parent === parent ? source : null;
+}
+
+function placeResponsiveFrame(frame, source, presetKey, parent, gutter, report) {
+  const anchor = responsiveSiblingAnchor(source, presetKey, parent);
+
+  try {
+    if (anchor && typeof parent.insertChild === "function") {
+      const anchorIndex = parent.children.indexOf(anchor);
+      parent.insertChild(anchorIndex + 1, frame);
+    } else if (frame.parent !== parent && typeof parent.appendChild === "function") {
+      parent.appendChild(frame);
+    }
+  } catch (e) {
+    report.warnings.push(`Could not order ${frame.name} beside the desktop frame: ${e && e.message}`);
+  }
+
+  if (!isAutoLayout(parent) && anchor) {
+    frame.x = anchor.x + anchor.width + gutter;
+    frame.y = source.y;
+  } else if (isAutoLayout(parent) && parent.layoutMode === "VERTICAL") {
+    report.warnings.push(
+      `${parent.name} uses vertical Auto Layout, so ${frame.name} was ordered after its ` +
+        "breakpoint sibling but cannot be positioned beside it without changing the parent."
+    );
+  }
+}
+
 // ─── Decision engine ───────────────────────────────────────────────────────
 
 /**
@@ -2391,8 +2715,24 @@ function findExistingResponsiveFrames(sourceNode) {
  * list of layout intentions, never "shrink everything by 0.53". Proportional
  * scaling is the failure mode this whole feature exists to avoid.
  */
-function decideBehaviors(section, presetKey, preservation) {
+function splitRemainsReadable(section, preset) {
+  const widths = (section.childWidths || []).filter((width) => width > 0);
+  if (widths.length < 2) return preset.width >= RESPONSIVE_PRESETS.tablet.width;
+
+  const total = widths.reduce((sum, width) => sum + width, 0);
+  if (total <= 0) return false;
+  const narrowestRatio = Math.min(...widths) / total;
+  const gap = typeof section.itemSpacing === 'number' ? section.itemSpacing : 0;
+  const usable = Math.max(0, preset.width - preset.sidePadding * 2 - gap);
+
+  // Roughly 240px is the minimum useful text/image column at Tablet widths.
+  // The source ratio is preserved for this estimate instead of assuming 50/50.
+  return usable * narrowestRatio >= 240;
+}
+
+function decideBehaviors(section, presetKey, preservation, targetPreset) {
   const behaviors = [];
+  const preset = targetPreset || RESPONSIVE_PRESETS[presetKey];
   const isMobile = presetKey === "mobile";
   const isTablet = presetKey === "tablet";
   const flexible = preservation === "flexible";
@@ -2419,8 +2759,13 @@ function decideBehaviors(section, presetKey, preservation) {
         behaviors.push("text-before-media");
         behaviors.push("media-full-width");
       } else if (isTablet) {
-        behaviors.push("keep-horizontal");
-        behaviors.push("equalize-split");
+        if (splitRemainsReadable(section, preset)) {
+          behaviors.push("keep-horizontal");
+          behaviors.push("equalize-split");
+        } else {
+          behaviors.push("stack-vertical");
+          behaviors.push("media-full-width");
+        }
       }
       break;
 
@@ -2459,6 +2804,13 @@ function decideBehaviors(section, presetKey, preservation) {
     default:
       if (isMobile && section.autoLayout === "HORIZONTAL" && section.childCount > 1) {
         behaviors.push("stack-vertical");
+      } else if (
+        isTablet &&
+        section.autoLayout === "HORIZONTAL" &&
+        section.childCount === 2 &&
+        !splitRemainsReadable(section, preset)
+      ) {
+        behaviors.push("stack-vertical");
       } else if (isTablet && section.autoLayout === "HORIZONTAL" && section.childCount > 3) {
         behaviors.push("enable-wrap");
       }
@@ -2467,19 +2819,19 @@ function decideBehaviors(section, presetKey, preservation) {
 
   // Typography is no longer a per-section behaviour: it is resolved globally
   // against the file's own text styles after the layout settles.
-  if (section.absoluteChildren.length && flexible) behaviors.push("flag-absolute-positioning");
-  else if (section.absoluteChildren.length) behaviors.push("flag-manual-review");
+  if (section.absoluteChildren.length) behaviors.push("flag-absolute-positioning");
 
   return behaviors;
 }
 
 /** Build the full responsive plan for a source frame at one breakpoint. */
-function buildPlan(sections, presetKey, preservation) {
+function buildPlan(sections, presetKey, preservation, targetPreset) {
+  const preset = targetPreset || RESPONSIVE_PRESETS[presetKey];
   return sections.map((section) => ({
     id: section.id,
     name: section.name,
     kind: section.kind,
-    behaviors: decideBehaviors(section, presetKey, preservation),
+    behaviors: decideBehaviors(section, presetKey, preservation, preset),
   }));
 }
 
@@ -2491,7 +2843,7 @@ function scaleSpacing(value, factor, floor) {
   return Math.max(floor === undefined ? 0 : floor, Math.round(value * factor));
 }
 
-function applyPaddingScale(node, factor, sidePadding) {
+function applyPaddingScale(node, factor, sidePadding, verticalPadding) {
   if (!isAutoLayout(node)) return;
   // Horizontal padding is pinned to the breakpoint's container rule; vertical
   // padding scales, because vertical rhythm is proportional but gutters are not.
@@ -2502,8 +2854,13 @@ function applyPaddingScale(node, factor, sidePadding) {
     node.paddingLeft = scaleSpacing(node.paddingLeft, factor, 0);
     node.paddingRight = scaleSpacing(node.paddingRight, factor, 0);
   }
-  node.paddingTop = scaleSpacing(node.paddingTop, factor, 0);
-  node.paddingBottom = scaleSpacing(node.paddingBottom, factor, 0);
+  if (typeof verticalPadding === "number") {
+    node.paddingTop = Math.min(node.paddingTop, verticalPadding);
+    node.paddingBottom = Math.min(node.paddingBottom, verticalPadding);
+  } else {
+    node.paddingTop = scaleSpacing(node.paddingTop, factor, 0);
+    node.paddingBottom = scaleSpacing(node.paddingBottom, factor, 0);
+  }
 }
 
 // ─── Typography: resolve against the file's own text styles ────────────────
@@ -2516,6 +2873,169 @@ function applyPaddingScale(node, factor, sidePadding) {
  *   "H1 - Mobile"             → { family: "h1",              breakpoint: "mobile" }
  *   "Body"                    → { family: "body",            breakpoint: null }
  */
+const RESPONSIVE_SPACING_FIELDS = [
+  "itemSpacing",
+  "counterAxisSpacing",
+  "paddingTop",
+  "paddingRight",
+  "paddingBottom",
+  "paddingLeft",
+];
+
+/**
+ * Pair the responsive copy with its desktop source before any layout changes.
+ * Object references survive reordering, so the comparison remains valid after
+ * heroes stack, grids wrap, or cleanup changes the sibling order.
+ */
+function buildDesktopSpacingReferences(source, target) {
+  const references = new Map();
+
+  const pair = (desktopNode, responsiveNode, depth) => {
+    if (!desktopNode || !responsiveNode || depth > 18) return;
+    if (
+      isAbsolutePositionedLayer(desktopNode) ||
+      isAbsolutePositionedLayer(responsiveNode)
+    ) {
+      return;
+    }
+
+    if (isAutoLayout(desktopNode) && isAutoLayout(responsiveNode)) {
+      const values = {};
+      for (const field of RESPONSIVE_SPACING_FIELDS) {
+        if (typeof desktopNode[field] === "number") values[field] = desktopNode[field];
+      }
+      let resolvedModes = {};
+      try {
+        resolvedModes = { ...(desktopNode.resolvedVariableModes || {}) };
+      } catch (e) {
+        resolvedModes = { ...(desktopNode.explicitVariableModes || {}) };
+      }
+      references.set(responsiveNode, {
+        desktopNodeId: desktopNode.id,
+        desktopNodeName: desktopNode.name,
+        values,
+        resolvedModes,
+      });
+    }
+
+    if (!isContainer(desktopNode) || !isContainer(responsiveNode)) return;
+    const unusedDesktop = desktopNode.children.slice();
+    for (let i = 0; i < responsiveNode.children.length; i++) {
+      const responsiveChild = responsiveNode.children[i];
+      let matchIndex = unusedDesktop.findIndex(
+        (candidate) =>
+          candidate.type === responsiveChild.type &&
+          candidate.name === responsiveChild.name
+      );
+      if (matchIndex < 0 && i < unusedDesktop.length) matchIndex = i;
+      if (matchIndex < 0) continue;
+      const desktopChild = unusedDesktop.splice(matchIndex, 1)[0];
+      pair(desktopChild, responsiveChild, depth + 1);
+    }
+  };
+
+  pair(source, target, 0);
+  return references;
+}
+
+function variableAliasId(binding) {
+  const value = Array.isArray(binding) ? binding[0] : binding;
+  return value && value.id ? value.id : null;
+}
+
+/**
+ * Desktop is the spacing ceiling. Responsive gaps and padding may stay equal or
+ * become smaller, but never grow accidentally. Bound spacing keeps its token:
+ * when a Tab/Mobi mode resolves larger, pin that node to the desktop mode for
+ * the relevant collection instead of detaching the variable.
+ */
+async function enforceDesktopSpacingCeiling(references, report) {
+  const prevented = [];
+  const warnings = [];
+  if (!references || typeof references.entries !== "function") {
+    return { prevented, warnings };
+  }
+
+  for (const [node, reference] of references.entries()) {
+    if (!node || node.removed || isAbsolutePositionedLayer(node)) continue;
+
+    const increased = [];
+    for (const field of Object.keys(reference.values || {})) {
+      const desktopValue = reference.values[field];
+      const responsiveValue = node[field];
+      if (
+        typeof desktopValue === "number" &&
+        typeof responsiveValue === "number" &&
+        responsiveValue > desktopValue + 0.01
+      ) {
+        increased.push({ field, desktopValue, responsiveValue });
+      }
+    }
+    if (!increased.length) continue;
+
+    const frozenCollections = new Set();
+    for (const increase of increased) {
+      const binding = node.boundVariables && node.boundVariables[increase.field];
+      const variableId = variableAliasId(binding);
+      if (!variableId || !figma.variables) continue;
+      try {
+        const variable = await figma.variables.getVariableByIdAsync(variableId);
+        if (!variable) continue;
+        const collectionId = variable.variableCollectionId;
+        const desktopModeId = reference.resolvedModes[collectionId];
+        if (!desktopModeId || frozenCollections.has(collectionId)) continue;
+        const collection = await figma.variables.getVariableCollectionByIdAsync(collectionId);
+        if (!collection || !("setExplicitVariableModeForCollection" in node)) continue;
+        node.setExplicitVariableModeForCollection(collection, desktopModeId);
+        frozenCollections.add(collectionId);
+      } catch (e) {
+        // A raw-value cap below still handles unbound or unsupported nodes.
+      }
+    }
+
+    for (const increase of increased) {
+      let finalValue = node[increase.field];
+      const method = frozenCollections.size
+        ? "preserved desktop variable mode"
+        : "capped to desktop value";
+
+      if (typeof finalValue === "number" && finalValue > increase.desktopValue + 0.01) {
+        try {
+          node[increase.field] = increase.desktopValue;
+          finalValue = node[increase.field];
+        } catch (e) {
+          // Report below if the Figma property remains above the ceiling.
+        }
+      }
+
+      if (typeof finalValue === "number" && finalValue <= increase.desktopValue + 0.01) {
+        prevented.push({
+          nodeId: node.id,
+          nodeName: node.name,
+          property: increase.field,
+          desktop: increase.desktopValue,
+          responsiveBefore: increase.responsiveValue,
+          final: finalValue,
+          method,
+        });
+      } else {
+        warnings.push(
+          `${node.name}: ${increase.field} resolved to ${increase.responsiveValue}px, above the ` +
+            `desktop reference of ${increase.desktopValue}px, and could not be capped without ` +
+            "breaking its variable binding. Manual review is required."
+        );
+      }
+    }
+  }
+
+  if (report) {
+    report.spacingIncreasesPrevented = prevented;
+    report.desktopSpacingWarnings = warnings;
+    for (const warning of warnings) report.warnings.push(warning);
+  }
+  return { prevented, warnings };
+}
+
 function parseStyleName(name) {
   const raw = String(name || "").trim();
   const parts = raw.split(/[\/>|]+/).map((p) => p.trim()).filter(Boolean);
@@ -2590,6 +3110,7 @@ function verifyTypographyPreserved(root, index, report) {
   const texts = [];
   const walk = (n, depth) => {
     if (!n || depth > 16 || texts.length > 400) return;
+    if (isAbsolutePositionedLayer(n)) return;
     if (n.type === "TEXT") texts.push(n);
     if (isContainer(n)) for (const c of n.children) walk(c, depth + 1);
   };
@@ -2626,9 +3147,56 @@ function hasIntrinsicSize(node) {
  * desktop appearance clips or strands content the moment text rewraps, which is
  * exactly what happens when a 1440px layout is rendered at 320px.
  */
+/**
+ * Clear height constraints that survive a clone and quietly re-pin a frame.
+ *
+ * `minHeight` and `maxHeight` do not show up in the sizing dropdown, so a frame
+ * can read "Hug contents" and still be stuck at the height it was given on
+ * desktop. Releasing the sizing mode alone does not fix that, so clear them too.
+ */
+function clearHeightConstraints(node, report) {
+  let cleared = false;
+  for (const prop of ["minHeight", "maxHeight"]) {
+    try {
+      if (prop in node && typeof node[prop] === "number") {
+        node[prop] = null;
+        cleared = true;
+      }
+    } catch (e) { /* not writable on this node type */ }
+  }
+  if (cleared && report && typeof report.heightConstraintsCleared === "number") {
+    report.heightConstraintsCleared++;
+  }
+  return cleared;
+}
+
 function releaseFixedHeight(node, report) {
-  if (!isAutoLayout(node)) return false;
   if (hasIntrinsicSize(node)) return false;
+
+  // A frame with no auto layout has no content-driven height to fall back on:
+  // Figma can only hug along a layout axis. Record it instead of leaving a
+  // silently pinned wrapper — the fix is auto layout on that wrapper, which is
+  // a structural change and belongs in the report, not in a silent rewrite.
+  if (!isAutoLayout(node)) {
+    if (
+      report &&
+      Array.isArray(report.fixedHeightBlockers) &&
+      isContainer(node) &&
+      node.children.length > 0 &&
+      node.type !== "GROUP" &&
+      !isComponentLike(node) &&
+      !isInsideInstance(node)
+    ) {
+      report.fixedHeightBlockers.push({
+        name: node.name || "(unnamed)",
+        id: node.id,
+        height: Math.round(node.height || 0),
+      });
+    }
+    return false;
+  }
+
+  clearHeightConstraints(node, report);
 
   // Modern API: one property regardless of layout direction.
   try {
@@ -2672,6 +3240,7 @@ function shouldHugHorizontally(node) {
 function enforceResponsiveSizing(root, report) {
   const walk = (n, depth) => {
     if (!n || depth > 14 || n.removed) return;
+    if (isAbsolutePositionedLayer(n)) return;
 
     const parentIsAutoLayout = n.parent && isAutoLayout(n.parent);
 
@@ -2701,13 +3270,31 @@ function enforceResponsiveSizing(root, report) {
     }
 
     // Text grows with its content rather than clipping when it rewraps.
+    // NONE pins the box; TRUNCATE pins it *and* replaces the overflow with an
+    // ellipsis — both are the "clip the text to fit desktop" failure, and both
+    // become auto height. WIDTH_AND_HEIGHT already grows.
     if (n.type === "TEXT") {
       try {
-        if (n.textAutoResize === "NONE") {
+        if (n.textAutoResize === "NONE" || n.textAutoResize === "TRUNCATE") {
           n.textAutoResize = "HEIGHT";
           report.textAutoHeight++;
         }
       } catch (e) { /* not writable */ }
+      // Critical: even with textAutoResize="HEIGHT", the layoutSizingVertical
+      // can remain "FIXED" which keeps the pixel height locked. Force HUG.
+      if (parentIsAutoLayout) {
+        try {
+          const currentVert = readVerticalSizing(n);
+          if (currentVert !== "HUG") {
+            // Text sizing is reported separately from container-height fixes.
+            // Counting it as a released container height makes the summary
+            // double-count text that was also changed to auto height.
+            if (writeVerticalSizing(n, "HUG")) report.setToHug++;
+          }
+        } catch (e) { /* not writable */ }
+      }
+      // A text node can also be pinned by a max height, which survives cloning.
+      clearHeightConstraints(n, report);
     }
 
     // Height → Hug contents for every container, at every depth.
@@ -2720,8 +3307,38 @@ function enforceResponsiveSizing(root, report) {
   if (isContainer(root)) for (const c of root.children) walk(c, 0);
 }
 
+/**
+ * Restore the responsive root's axis-independent sizing after resize().
+ *
+ * Figma's primary/counter axes depend on layout direction. Setting primary to
+ * AUTO and counter to FIXED is correct for a vertical frame but exactly wrong
+ * for a horizontal one. The responsive contract is expressed in physical
+ * axes instead: viewport width stays FIXED; content-driven height becomes HUG.
+ */
+function configureResponsiveRootSizing(frame, report) {
+  if (!isAutoLayout(frame)) return false;
+
+  clearHeightConstraints(frame, report);
+  const widthSet = writeHorizontalSizing(frame, "FIXED");
+  const heightSet = writeVerticalSizing(frame, "HUG");
+
+  if (!heightSet && report && Array.isArray(report.warnings)) {
+    report.warnings.push(
+      `${frame.name}: could not set the responsive root height to Hug contents.`
+    );
+  }
+  if (!widthSet && report && Array.isArray(report.warnings)) {
+    report.warnings.push(
+      `${frame.name}: could not keep the responsive root width fixed to the viewport.`
+    );
+  }
+
+  return widthSet && heightSet;
+}
+
 /** Turn a horizontal row into a vertical stack, preserving child order. */
 function stackVertical(node) {
+  if (isAbsolutePositionedLayer(node)) return false;
   if (!isContainer(node)) return false;
   if (!isAutoLayout(node)) return false;
   if (node.layoutMode !== "HORIZONTAL") return false;
@@ -2730,6 +3347,7 @@ function stackVertical(node) {
     node.counterAxisAlignItems = "MIN";
   } catch (e) { /* alignment unsupported on this node */ }
   for (const child of node.children) {
+    if (isAbsolutePositionedLayer(child)) continue;
     writeHorizontalSizing(child, "FILL");
   }
   return true;
@@ -2739,6 +3357,7 @@ function stackVertical(node) {
 function textBeforeMedia(node) {
   if (!isContainer(node) || node.children.length !== 2) return false;
   const [first, second] = node.children;
+  if (isAbsolutePositionedLayer(first) || isAbsolutePositionedLayer(second)) return false;
   const firstIsMedia = nodeIsImageLike(first) || countDescendants(first, nodeIsImageLike, 20) > 0;
   const secondIsText = nodeIsTextLike(second);
   if (firstIsMedia && secondIsText) {
@@ -2760,7 +3379,10 @@ function textBeforeMedia(node) {
  */
 function setGridColumns(node, columns, availableWidth, report) {
   if (!isContainer(node)) return false;
-  const kids = node.children.filter((c) => c.visible !== false);
+  if (isAbsolutePositionedLayer(node)) return false;
+  const kids = node.children.filter(
+    (c) => c.visible !== false && !isAbsolutePositionedLayer(c)
+  );
   if (!kids.length) return false;
 
   if (columns === 1) {
@@ -2816,11 +3438,14 @@ function stackFormRows(node) {
   let changed = 0;
   const walk = (n, depth) => {
     if (!n || depth > 8) return;
+    if (isAbsolutePositionedLayer(n)) return;
     if (isContainer(n) && isAutoLayout(n) && n.layoutMode === "HORIZONTAL") {
       const inputs = n.children.filter((c) => nodeIsInputLike(c) || countDescendants(c, nodeIsInputLike, 8) > 0);
       if (inputs.length >= 2) {
         n.layoutMode = "VERTICAL";
-        for (const c of n.children) writeHorizontalSizing(c, "FILL");
+        for (const c of n.children) {
+          if (!isAbsolutePositionedLayer(c)) writeHorizontalSizing(c, "FILL");
+        }
         changed++;
       }
     }
@@ -2834,6 +3459,7 @@ function inputsFillWidth(node) {
   let changed = 0;
   const walk = (n, depth) => {
     if (!n || depth > 10) return;
+    if (isAbsolutePositionedLayer(n)) return;
     if (nodeIsInputLike(n)) {
       if (writeHorizontalSizing(n, "FILL")) changed++;
     }
@@ -2856,6 +3482,7 @@ async function collapseNavigation(node, report) {
   const instances = [];
   const walk = (n, depth) => {
     if (!n || depth > 6) return;
+    if (isAbsolutePositionedLayer(n)) return;
     if (n.type === "INSTANCE") instances.push(n);
     if (isContainer(n)) for (const c of n.children) walk(c, depth + 1);
   };
@@ -2914,6 +3541,7 @@ async function collapseNavigation(node, report) {
   let hidden = 0;
   const hideLinkLists = (n, depth) => {
     if (!n || depth > 5) return;
+    if (isAbsolutePositionedLayer(n)) return;
     if (isContainer(n) && isAutoLayout(n) && n.layoutMode === "HORIZONTAL") {
       const linkish = n.children.filter((c) => {
         const nm = (c.name || "").toLowerCase();
@@ -2937,8 +3565,10 @@ function releaseFixedWidths(node, maxWidth) {
   let changed = 0;
   const walk = (n, depth) => {
     if (!n || depth > 12) return;
+    if (isAbsolutePositionedLayer(n)) return;
     if (isContainer(n) && isAutoLayout(n)) {
       for (const child of n.children) {
+        if (isAbsolutePositionedLayer(child)) continue;
         if (typeof child.width === "number" && child.width > maxWidth) {
           if (writeHorizontalSizing(child, "FILL")) changed++;
         }
@@ -2968,7 +3598,7 @@ function tableHorizontalScroll(node) {
  * Returns a per-frame report describing what was reused, changed and flagged.
  */
 async function generateBreakpoint(source, presetKey, options) {
-  const preset = RESPONSIVE_PRESETS[presetKey];
+  const preset = options.preset || resolveResponsivePreset(presetKey, options.targetWidth);
   const preservation = options.preservation || "strict";
   const factor = preset.width / Math.max(1, source.width);
 
@@ -2979,6 +3609,13 @@ async function generateBreakpoint(source, presetKey, options) {
     frameName: "",
     created: false,
     updated: false,
+    reusedExistingFrame: false,
+    replacedEmptyPlaceholder: false,
+    absoluteLayersPreserved: [],
+    imageAspectRatiosPreserved: 0,
+    desktopSpacingReferenceCount: 0,
+    spacingIncreasesPrevented: [],
+    desktopSpacingWarnings: [],
     sections: [],
     reusedVariants: [],
     // Typography is never altered across breakpoints — only verified.
@@ -2991,6 +3628,9 @@ async function generateBreakpoint(source, presetKey, options) {
     textAutoHeight: 0,
     fixedHeightsReleased: 0,
     fixedWidthsReleased: 0,
+    heightConstraintsCleared: 0,
+    // Containers that cannot hug because they have no auto layout.
+    fixedHeightBlockers: [],
     // Layer hygiene.
     renamed: [],
     removed: [],
@@ -2998,25 +3638,97 @@ async function generateBreakpoint(source, presetKey, options) {
     warnings: [],
   };
 
-  // Clone rather than rebuild: this is what preserves instances, bindings,
-  // content and styling without any explicit effort.
-  const frame = source.clone();
+  // ── Step 1: Clone the desktop source ──
+  // Never modify the original desktop frame. Always work on a duplicate.
+  let responsiveParent = source.parent || figma.currentPage;
+  if (options.targetParentId) {
+    const requestedParent = await getNodeByIdSafe(options.targetParentId);
+    if (requestedParent && "appendChild" in requestedParent) responsiveParent = requestedParent;
+  }
+
+  let frame = findExistingBreakpointFrame(source, preset, responsiveParent);
+  if (frame) {
+    report.updated = true;
+    report.reusedExistingFrame = true;
+    const meaningfulChildren = isContainer(frame)
+      ? frame.children.filter((child) => !child.removed && !isInstrumentation(child))
+      : [];
+
+    // A named but empty tablet/mobile frame is a placement placeholder, not a
+    // responsive design. Refresh it from an exact desktop clone in the same
+    // slot so the result is never rebuilt from scratch.
+    if (isContainer(frame) && meaningfulChildren.length === 0) {
+      const placeholder = frame;
+      const placeholderIndex = isContainer(responsiveParent)
+        ? responsiveParent.children.indexOf(placeholder)
+        : -1;
+      frame = source.clone();
+      try {
+        if (placeholderIndex >= 0 && typeof responsiveParent.insertChild === "function") {
+          responsiveParent.insertChild(placeholderIndex, frame);
+        } else if (frame.parent !== responsiveParent && typeof responsiveParent.appendChild === "function") {
+          responsiveParent.appendChild(frame);
+        }
+        if (typeof placeholder.remove === "function") placeholder.remove();
+        report.replacedEmptyPlaceholder = true;
+      } catch (e) {
+        report.warnings.push(`Could not refresh empty breakpoint placeholder: ${e && e.message}`);
+      }
+    }
+  } else {
+    frame = source.clone();
+    report.created = true;
+  }
+  const desktopSpacingReferences = buildDesktopSpacingReferences(source, frame);
+  report.desktopSpacingReferenceCount = desktopSpacingReferences.size;
   frame.name = buildResponsiveName(source.name, preset);
   report.frameName = frame.name;
   report.frameId = frame.id;
-  report.created = true;
+  report.absoluteLayersPreserved = collectAbsolutePositionedLayers(frame, false).map((layer) => ({
+    id: layer.id,
+    name: layer.name,
+  }));
+  report.imageAspectRatiosPreserved = preserveImageAspectRatios(source, frame);
 
-  // Place it beside the source without disturbing existing layout order.
-  const parent = source.parent || figma.currentPage;
-  if (isContainer(parent)) {
-    try {
-      parent.appendChild(frame);
-    } catch (e) { /* parent refused; clone stays where it landed */ }
+  // ── Step 2: Place the clone in the correct location ──
+  // If targetParentId is given, place inside that specific section/frame.
+  // Otherwise, place beside the source with a gutter.
+  const targetParentId = options.targetParentId;
+  if (targetParentId) {
+    const targetParent = await getNodeByIdSafe(targetParentId);
+    if (targetParent && "appendChild" in targetParent) {
+      try {
+        targetParent.appendChild(frame);
+        report.placedInTarget = targetParent.name;
+      } catch (e) {
+        report.warnings.push(`Could not place in target "${targetParent.name}": ${e && e.message}`);
+      }
+    } else {
+      report.warnings.push(`Target parent "${targetParentId}" not found or cannot hold children.`);
+    }
+  } else {
+    const parent = source.parent || figma.currentPage;
+    if (isContainer(parent)) {
+      try {
+        parent.appendChild(frame);
+      } catch (e) { /* parent refused; clone stays where it landed */ }
+    }
+    if (!isAutoLayout(parent)) {
+      frame.x = source.x + source.width + (options.gutter || 120);
+      frame.y = source.y;
+    }
   }
-  if (!isAutoLayout(parent)) {
-    frame.x = source.x + source.width + (options.gutter || 120);
-    frame.y = source.y;
-  }
+
+  // Canonical organization on the canvas: Desktop, Tablet, Mobile. This also
+  // corrects the append-only placement above when a responsive sibling exists.
+  placeResponsiveFrame(
+    frame,
+    source,
+    presetKey,
+    responsiveParent,
+    options.gutter || 120,
+    report
+  );
 
   // Resize to the target viewport. Height hugs if the frame auto-layouts.
   try {
@@ -3025,10 +3737,18 @@ async function generateBreakpoint(source, presetKey, options) {
     report.warnings.push(`Could not resize frame to ${preset.width}px: ${e && e.message}`);
   }
   if (isAutoLayout(frame)) {
-    try {
-      frame.primaryAxisSizingMode = "AUTO";
-      frame.counterAxisSizingMode = "FIXED";
-    } catch (e) { /* sizing modes unsupported */ }
+    // Width is the viewport and is set deliberately; height follows content.
+    configureResponsiveRootSizing(frame, report);
+  } else {
+    // Without auto layout the clone keeps the source's height verbatim, so the
+    // desktop height becomes the tablet/mobile height and content clips as soon
+    // as it rewraps. Nothing downstream can fix this — the frame needs auto
+    // layout before it can be made responsive.
+    report.warnings.push(
+      `${frame.name} has no Auto Layout, so it kept the source height of ` +
+        `${Math.round(frame.height)}px. Height cannot follow content until the ` +
+        "frame uses Auto Layout — add it on the source frame and regenerate."
+    );
   }
 
   // Apply the container rule for this breakpoint.
@@ -3048,19 +3768,32 @@ async function generateBreakpoint(source, presetKey, options) {
   for (let i = 0; i < total; i++) {
     const child = children[i];
     if (!child || child.removed || isInstrumentation(child)) continue;
+    if (isAbsolutePositionedLayer(child)) {
+      report.sections.push({
+        name: child.name,
+        kind: "absolute",
+        changes: ["kept exactly as desktop; manual designer adjustment"],
+      });
+      continue;
+    }
 
     const analysis = analyzeSection(child, i, total);
-    const behaviors = decideBehaviors(analysis, presetKey, preservation);
+    const behaviors = decideBehaviors(analysis, presetKey, preservation, preset);
     const applied = [];
 
     for (const behavior of behaviors) {
       try {
         if (behavior === "reduce-padding") {
-          applyPaddingScale(child, Math.max(0.5, factor), preset.sidePadding);
+          applyPaddingScale(
+            child,
+            Math.max(0.5, factor),
+            preset.sidePadding,
+            SECTION_SPACING_FALLBACK[presetKey].min
+          );
           applied.push("reduced padding");
         } else if (behavior === "reduce-gap") {
           if (isAutoLayout(child) && typeof child.itemSpacing === "number") {
-            child.itemSpacing = scaleSpacing(child.itemSpacing, Math.max(0.5, factor), 8);
+            child.itemSpacing = Math.min(child.itemSpacing, preset.sidePadding);
             applied.push("reduced gap");
           }
         } else if (behavior === "release-fixed-width") {
@@ -3073,11 +3806,15 @@ async function generateBreakpoint(source, presetKey, options) {
           if (textBeforeMedia(child)) applied.push("moved media below copy");
         } else if (behavior === "media-full-width") {
           for (const c of child.children || []) {
-            if (nodeIsImageLike(c)) writeHorizontalSizing(c, "FILL");
+            if (!isAbsolutePositionedLayer(c) && nodeIsImageLike(c)) {
+              writeHorizontalSizing(c, "FILL");
+            }
           }
           applied.push("media full width");
         } else if (behavior === "equalize-split") {
-          for (const c of child.children || []) writeHorizontalSizing(c, "FILL");
+          for (const c of child.children || []) {
+            if (!isAbsolutePositionedLayer(c)) writeHorizontalSizing(c, "FILL");
+          }
           applied.push("equalised split");
         } else if (behavior.indexOf("columns:") === 0) {
           const cols = parseInt(behavior.split(":")[1], 10);
@@ -3122,8 +3859,10 @@ async function generateBreakpoint(source, presetKey, options) {
           );
         } else if (behavior === "flag-absolute-positioning") {
           report.warnings.push(
-            `${child.name}: contains ${analysis.absoluteChildren.length} absolutely positioned ` +
-              "children, which cannot reflow. Convert to Auto Layout for reliable responsiveness."
+            `${child.name}: kept ${analysis.absoluteChildren.length} absolute-positioned ` +
+              `layer${analysis.absoluteChildren.length === 1 ? "" : "s"} exactly as copied from ` +
+              "desktop. They were not ungrouped, resized, rebound, renamed, reordered, or " +
+              "otherwise adapted. Manual designer adjustment is required."
           );
         }
       } catch (err) {
@@ -3145,6 +3884,51 @@ async function generateBreakpoint(source, presetKey, options) {
   // other viewports, not a stylistic preference.
   enforceResponsiveSizing(frame, report);
 
+  // ── Bind local variables (Layout, Gap, Radius, Responsive Text Container) ──
+  // After responsive sizing is set, bind design-system tokens so breakpoint
+  // modes (Desk/Tab/Mobi) automatically resolve to the correct values.
+  try {
+    const varResult = await bindVariablesToSubtree(frame);
+    if (varResult.bindings.length > 0) {
+      report.variablesBound = varResult.bindings.length;
+      report.variableBindings = varResult.bindings;
+    }
+    if (varResult.collections.length > 0) {
+      report.variableCollections = varResult.collections.map(
+        c => ({ name: c.name, modes: c.modes.map(m => m.name) })
+      );
+    }
+
+    report.absoluteVariableModesPreserved = await preserveAbsoluteVariableModes(
+      frame,
+      varResult.collections
+    );
+
+    // A clone inherits the desktop frame's explicit variable modes. Binding
+    // responsive tokens without changing that mode leaves Tablet/Mobile using
+    // Desktop values even though the bindings themselves look correct.
+    const modeResult = await applyBreakpointVariableModes(
+      frame,
+      preset.width,
+      varResult.collections
+    );
+    report.variableModes = modeResult.applied;
+    for (const warning of modeResult.warnings) report.warnings.push(warning);
+  } catch (e) {
+    report.warnings.push(`Variable binding failed: ${e && e.message}`);
+  }
+
+  // The desktop layout is the hard upper bound for gaps and padding. Run this
+  // after responsive variable modes resolve, because an otherwise valid Tab or
+  // Mobi token can accidentally be larger than its desktop value.
+  try {
+    await enforceDesktopSpacingCeiling(desktopSpacingReferences, report);
+  } catch (e) {
+    report.warnings.push(
+      `Desktop spacing comparison failed: ${e && e.message ? e.message : String(e)}`
+    );
+  }
+
   // Tidy the layer tree. Runs after the layout work so names describe the
   // final structure, and before the typography check so that check sees what
   // actually shipped.
@@ -3155,6 +3939,19 @@ async function generateBreakpoint(source, presetKey, options) {
   // Confirm typography came through untouched. Deliberately read-only: the
   // same local style must appear at every breakpoint.
   verifyTypographyPreserved(frame, options.textStyleIndex, report);
+
+  if (report.fixedHeightBlockers.length) {
+    const sample = report.fixedHeightBlockers
+      .slice(0, 5)
+      .map((b) => `${b.name} (${b.height}px)`)
+      .join(", ");
+    report.warnings.push(
+      `${report.fixedHeightBlockers.length} container(s) keep a fixed height because they ` +
+        `have no Auto Layout: ${sample}${report.fixedHeightBlockers.length > 5 ? ", …" : ""}. ` +
+        "Height cannot hug content on a frame without Auto Layout — add Auto Layout to these " +
+        "wrappers (set_auto_layout) so their height follows what is inside them."
+    );
+  }
 
   if (report.unlinkedText.length) {
     const sample = report.unlinkedText.slice(0, 5).join(", ");
@@ -3170,6 +3967,10 @@ async function generateBreakpoint(source, presetKey, options) {
 
 /** Follow the project's naming convention when we can infer one. */
 function buildResponsiveName(sourceName, preset) {
+  const base = responsiveBaseName(sourceName);
+  const breakpointLabel = preset.key === "tablet" ? "Tab" : preset.label;
+  return `${base} \u2013 ${preset.width}px ${breakpointLabel}`;
+
   const name = (sourceName || "Frame").trim();
   // "Homepage / Desktop / 1440" → "Homepage / Mobile / 320"
   const slashPattern = /^(.*?)\s*\/\s*(desktop|tablet|mobile)\s*\/\s*\d+\s*$/i;
@@ -3200,6 +4001,19 @@ function validateResponsive(node, width, label) {
     if (!n || depth > 12 || inspected > 3000 || n.removed) return;
     if (n.visible === false || isInstrumentation(n)) return;
     inspected++;
+
+    if (isAbsolutePositionedLayer(n)) {
+      issues.push({
+        severity: "warning",
+        type: "absolute-positioned-manual",
+        node: n.name,
+        nodeId: n.id,
+        message:
+          "preserved exactly from desktop and intentionally excluded from responsive QA; " +
+          "manual designer adjustment required",
+      });
+      return;
+    }
 
     const box = n.absoluteBoundingBox;
 
@@ -3275,13 +4089,27 @@ function validateResponsive(node, width, label) {
     }
 
     // A text layer pinned to a fixed height clips the moment it rewraps.
-    if (n.type === "TEXT" && n.textAutoResize === "NONE") {
+    // textAutoResize can say HEIGHT while the Auto Layout axis is still FIXED,
+    // so validation must check both representations of the same constraint.
+    let textLayoutIsFixed = false;
+    if (n.type === "TEXT" && n.parent && isAutoLayout(n.parent)) {
+      try { textLayoutIsFixed = readVerticalSizing(n) === "FIXED"; } catch (e) { /* unavailable */ }
+    }
+    if (
+      n.type === "TEXT" &&
+      (n.textAutoResize === "NONE" || n.textAutoResize === "TRUNCATE" || textLayoutIsFixed)
+    ) {
       issues.push({
         severity: "warning",
         type: "text-fixed-height",
         node: n.name,
         nodeId: n.id,
-        message: "fixed height — set auto height so it grows when it wraps to more lines",
+        message:
+          n.textAutoResize === "TRUNCATE"
+            ? "set to truncate — it clips instead of growing when it wraps to more lines"
+            : n.textAutoResize === "NONE"
+              ? "fixed height — set auto height so it grows when it wraps to more lines"
+              : "Auto Layout vertical sizing is Fixed — set it to Hug so wrapped text can grow",
       });
     }
 
@@ -3309,16 +4137,30 @@ function validateResponsive(node, width, label) {
           message: `fixed width (${Math.round(n.width)}px) — use Fill container or Hug contents instead`,
         });
       }
-      if (isAutoLayout(n)) {
-        const verticalFixed = n.layoutMode === "VERTICAL" && n.primaryAxisSizingMode === "FIXED";
-        const horizontalFixed = n.layoutMode === "HORIZONTAL" && n.counterAxisSizingMode === "FIXED";
-        if (verticalFixed || horizontalFixed) {
+      // Containers only: a rectangle, image or vector is allowed a real height.
+      if (isContainer(n) && readVerticalSizing(n) === "FIXED") {
+        issues.push({
+          severity: "warning",
+          type: "fixed-height",
+          node: n.name,
+          nodeId: n.id,
+          message: isAutoLayout(n)
+            ? `fixed height (${Math.round(n.height)}px) — content cannot grow when it reflows`
+            : `fixed height (${Math.round(n.height)}px) with no Auto Layout — it cannot hug ` +
+              "its content until the frame uses Auto Layout",
+        });
+      }
+
+      // A min/max height pins a frame that otherwise reads as "Hug contents",
+      // so the sizing dropdown looks right while the height stays stuck.
+      for (const prop of ["minHeight", "maxHeight"]) {
+        if (typeof n[prop] === "number") {
           issues.push({
             severity: "warning",
-            type: "fixed-height",
+            type: "height-constraint",
             node: n.name,
             nodeId: n.id,
-            message: `fixed height (${Math.round(n.height)}px) — content cannot grow when it reflows`,
+            message: `${prop} of ${Math.round(n[prop])}px pins the height even where sizing reads as Hug`,
           });
         }
       }
@@ -3339,7 +4181,12 @@ function validateResponsive(node, width, label) {
     // Overlap between siblings in a non-auto-layout container.
     if (isContainer(n) && !isAutoLayout(n) && n.children.length > 1 && n.children.length < 40) {
       const boxes = n.children
-        .filter((c) => c.visible !== false && c.absoluteBoundingBox)
+        .filter(
+          (c) =>
+            c.visible !== false &&
+            !isAbsolutePositionedLayer(c) &&
+            c.absoluteBoundingBox
+        )
         .map((c) => ({ c, b: c.absoluteBoundingBox }));
       for (let i = 0; i < boxes.length; i++) {
         for (let j = i + 1; j < boxes.length; j++) {
@@ -3443,6 +4290,7 @@ function isComponentLike(node) {
 function frameHasLayoutPurpose(node) {
   if (!node || !isContainer(node)) return true;
   if (isComponentLike(node)) return true;
+  if (containsAbsolutePositionedLayer(node)) return true;
 
   if (isAutoLayout(node)) return true;
   if (node.clipsContent) return true;
@@ -3494,6 +4342,7 @@ function isRemovableLayer(node) {
   if (!node || node.removed) return false;
   if (isComponentLike(node)) return false;
   if (isInstrumentation(node)) return false;
+  if (isAbsolutePositionedLayer(node)) return false;
 
   // Text: content is the only question.
   if (node.type === "TEXT") {
@@ -3625,6 +4474,7 @@ function removeUnwantedLayers(root, report) {
   const walk = (node, depth) => {
     if (!node || node.removed || depth > 16) return;
     if (isInstrumentation(node)) return;
+    if (isAbsolutePositionedLayer(node)) return;
     // Never restructure the inside of a component.
     if (node.type === "INSTANCE") return;
 
@@ -3670,6 +4520,7 @@ function collapseRedundantWrappers(root, report) {
   const walk = (node, depth) => {
     if (!node || node.removed || depth > 16) return;
     if (isInstrumentation(node) || node.type === "INSTANCE") return;
+    if (isAbsolutePositionedLayer(node)) return;
     if (isContainer(node)) for (const child of node.children.slice()) walk(child, depth + 1);
 
     if (node === root || !node.parent) return;
@@ -3707,6 +4558,7 @@ function renameLayers(root, sectionKinds, report) {
   const walk = (node, depth, sectionKind) => {
     if (!node || node.removed || depth > 16) return;
     if (isInstrumentation(node)) return;
+    if (isAbsolutePositionedLayer(node)) return;
     // An instance's own name may be improved, but never its children's.
     const descend = node.type !== "INSTANCE";
 
@@ -3729,7 +4581,7 @@ function renameLayers(root, sectionKinds, report) {
       // Number repeated siblings that share a name.
       const byName = {};
       for (const child of node.children) {
-        if (child.removed || isInsideInstance(child)) continue;
+        if (child.removed || isInsideInstance(child) || isAbsolutePositionedLayer(child)) continue;
         const key = child.name;
         if (!byName[key]) byName[key] = [];
         byName[key].push(child);
@@ -3764,6 +4616,7 @@ function flagLayoutGroups(root, report) {
   const walk = (node, depth) => {
     if (!node || node.removed || depth > 14) return;
     if (node.type === "INSTANCE" || isInstrumentation(node)) return;
+    if (isAbsolutePositionedLayer(node)) return;
 
     if (node.type === "GROUP" && node.children && node.children.length > 1) {
       report.warnings.push(
@@ -3783,6 +4636,7 @@ function flagExcessiveNesting(root, report, maxDepth) {
   const walk = (node, depth, trail) => {
     if (!node || node.removed || depth > 18) return;
     if (node.type === "INSTANCE" || isInstrumentation(node)) return;
+    if (isAbsolutePositionedLayer(node)) return;
 
     if (depth >= limit && isContainer(node) && node.children.length === 1) {
       report.warnings.push(
@@ -3915,8 +4769,17 @@ async function analyzeResponsive(params) {
   }
 
   const plans = {};
-  for (const key of ["tablet", "mobile"]) {
-    plans[key] = buildPlan(sections, key, preservation);
+  const planWidths = {};
+  const requestedAnalysisKey = params && params.targetWidth !== undefined
+    ? params.breakpoint || (Array.isArray(params.breakpoints) && params.breakpoints[0]) ||
+      (Number(params.targetWidth) <= 480 ? "mobile" : "tablet")
+    : null;
+  const analysisKeys = requestedAnalysisKey ? [requestedAnalysisKey] : ["tablet", "mobile"];
+  for (const key of analysisKeys) {
+    const preset = resolveResponsivePreset(key, params && params.targetWidth);
+    if (!preset) continue;
+    plans[key] = buildPlan(sections, key, preservation, preset);
+    planWidths[key] = preset.width;
   }
 
   const selfCheck = validateResponsive(node, node.width, `source ${Math.round(node.width)}px`);
@@ -3938,6 +4801,7 @@ async function analyzeResponsive(params) {
     sectionCount: sections.length,
     sections,
     plans,
+    planWidths,
     existingResponsiveFrames: findExistingResponsiveFrames(node),
     sourceIssues: selfCheck,
     layerHygiene: (function () {
@@ -3970,9 +4834,20 @@ async function makeResponsive(params) {
   const opts = params || {};
   const node = await resolveResponsiveTarget(opts);
   const preservation = opts.preservation || "strict";
-  const requested = Array.isArray(opts.breakpoints) && opts.breakpoints.length
-    ? opts.breakpoints
-    : ["tablet", "mobile"];
+  const hasRequestedBreakpoints = Array.isArray(opts.breakpoints) && opts.breakpoints.length;
+  const requested = hasRequestedBreakpoints
+    ? Array.from(new Set(opts.breakpoints))
+    : [opts.targetWidth !== undefined && Number(opts.targetWidth) <= 480 ? "mobile" : "tablet"];
+
+  // Breakpoints are completed and reviewed independently. Processing both in
+  // one command makes it impossible to stop after Tablet QA and get the
+  // designer's approval before Mobile begins.
+  if (requested.length !== 1) {
+    throw new Error(
+      "make_responsive accepts exactly one breakpoint per run. Complete and validate Tablet " +
+        "first, then run Mobile only after the designer confirms it."
+    );
+  }
 
   if (opts.mode === "preview") {
     const analysis = await analyzeResponsive(opts);
@@ -3989,12 +4864,25 @@ async function makeResponsive(params) {
       continue;
     }
     if (key === "desktop") continue; // the source already is the desktop frame
+    const preset = resolveResponsivePreset(key, opts.targetWidth);
+
+    // Resolve target parent: user can pass targetParentId per breakpoint
+    // or a single targetParentId for all breakpoints
+    let targetParentId = null;
+    if (opts.targetParentIds && opts.targetParentIds[key]) {
+      targetParentId = opts.targetParentIds[key];
+    } else if (opts.targetParentId) {
+      targetParentId = opts.targetParentId;
+    }
+
     const report = await generateBreakpoint(node, key, {
+      preset,
       preservation,
       gutter: opts.gutter,
       textStyleIndex,
       cleanLayers: opts.cleanLayers !== false,
       cleanupOptions: opts.cleanupOptions,
+      targetParentId,
     });
     frames.push(report);
   }
@@ -4012,9 +4900,10 @@ async function makeResponsive(params) {
     const generated = await getNodeByIdSafe(frame.frameId);
     if (!generated) continue;
 
-    if (frame.width <= 480) {
-      // A layout that survives 390 but fails at 320 is not responsive.
-      for (const qaWidth of QA_WIDTHS) {
+    if (frame.breakpoint === RESPONSIVE_PRESETS.mobile.label) {
+      // Validate the exact requested width as well as the mobile safety widths.
+      const mobileQaWidths = Array.from(new Set([frame.width, ...QA_WIDTHS]));
+      for (const qaWidth of mobileQaWidths) {
         validations.push(validateResponsive(generated, qaWidth, `${frame.breakpoint} @ ${qaWidth}px`));
       }
     } else {
@@ -4028,7 +4917,14 @@ async function makeResponsive(params) {
     textStylesAvailable: textStyleIndex.total,
     frames,
     validations,
-    qaWidths: QA_WIDTHS,
+    qaWidths: Array.from(
+      new Set([
+        ...QA_WIDTHS,
+        ...frames
+          .filter((frame) => frame.breakpoint === RESPONSIVE_PRESETS.mobile.label)
+          .map((frame) => frame.width),
+      ])
+    ),
   };
 }
 
@@ -5391,7 +6287,9 @@ async function setAutoLayout(params) {
     primaryAxisAlignItems,
     counterAxisAlignItems,
     layoutWrap,
-    strokesIncludedInLayout
+    strokesIncludedInLayout,
+    layoutSizingHorizontal,
+    layoutSizingVertical
   } = params || {};
 
   if (!nodeId) {
@@ -5446,12 +6344,43 @@ async function setAutoLayout(params) {
     if (strokesIncludedInLayout !== undefined) {
       node.strokesIncludedInLayout = strokesIncludedInLayout;
     }
+
+    // Sizing, last: Figma resets these when layoutMode changes.
+    //
+    // Turning auto layout on for a frame that already has a size leaves its
+    // height FIXED at whatever it happened to be, so every frame converted here
+    // used to inherit a hardcoded height that survived into every breakpoint.
+    // Height therefore hugs its content unless the caller asks for something
+    // else; width is left alone, because it is usually the viewport or a Fill
+    // decision made by the parent.
+    if (layoutSizingHorizontal) {
+      if (!writeHorizontalSizing(node, layoutSizingHorizontal)) {
+        throw new Error(
+          `Could not set horizontal sizing to ${layoutSizingHorizontal} on "${node.name}". ` +
+            "FILL requires the node's parent to use Auto Layout."
+        );
+      }
+    }
+    const targetVertical = layoutSizingVertical || "HUG";
+    if (targetVertical !== "FILL" || (node.parent && isAutoLayout(node.parent))) {
+      writeVerticalSizing(node, targetVertical);
+    } else {
+      throw new Error(
+        `Could not set vertical sizing to FILL on "${node.name}". ` +
+          "FILL requires the node's parent to use Auto Layout."
+      );
+    }
+    // A leftover min/max height would keep the frame pinned even now that it
+    // reads as "Hug contents". Only cleared when hug is what was asked for.
+    if (targetVertical === "HUG") clearHeightConstraints(node, null);
   }
 
   return {
     id: node.id,
     name: node.name,
     layoutMode: node.layoutMode,
+    layoutSizingHorizontal: readHorizontalSizing(node),
+    layoutSizingVertical: readVerticalSizing(node),
     paddingTop: node.paddingTop,
     paddingBottom: node.paddingBottom,
     paddingLeft: node.paddingLeft,
@@ -5461,6 +6390,92 @@ async function setAutoLayout(params) {
     counterAxisAlignItems: node.counterAxisAlignItems,
     layoutWrap: node.layoutWrap,
     strokesIncludedInLayout: node.strokesIncludedInLayout
+  };
+}
+
+/**
+ * Set Fill container / Hug contents / Fixed on a node, without resizing it.
+ *
+ * This is the counterpart to resize_node. Without it the only way to influence
+ * a node's size was to give it literal pixel dimensions, which is how fixed
+ * heights ended up all over generated layouts: there was no way to express
+ * "this height follows its content" at all.
+ */
+async function setLayoutSizing(params) {
+  const { nodeId, horizontal, vertical, releaseHeightConstraints } = params || {};
+
+  if (!nodeId) {
+    throw new Error("Missing nodeId parameter");
+  }
+  if (!horizontal && !vertical) {
+    throw new Error("Provide at least one of horizontal or vertical");
+  }
+
+  const node = await getNodeByIdSafe(nodeId);
+  if (!node) {
+    throw new Error(`Node not found with ID: ${nodeId}`);
+  }
+
+  const parentIsAutoLayout = !!(node.parent && isAutoLayout(node.parent));
+  const applied = [];
+
+  // FILL is a statement about the parent's layout, HUG about the node's own.
+  const requireParentAutoLayout = (value, axis) => {
+    if (value === "FILL" && !parentIsAutoLayout) {
+      throw new Error(
+        `Cannot set ${axis} sizing to FILL on "${node.name}": its parent does not use ` +
+          "Auto Layout. Add Auto Layout to the parent first (set_auto_layout)."
+      );
+    }
+  };
+  const requireOwnAutoLayout = (value, axis) => {
+    if (value === "HUG" && !isAutoLayout(node) && node.type !== "TEXT") {
+      throw new Error(
+        `Cannot set ${axis} sizing to HUG on "${node.name}": a frame can only hug its ` +
+          "content along an Auto Layout axis. Add Auto Layout to this node first " +
+          "(set_auto_layout)."
+      );
+    }
+  };
+
+  if (horizontal) {
+    requireParentAutoLayout(horizontal, "horizontal");
+    requireOwnAutoLayout(horizontal, "horizontal");
+    if (!writeHorizontalSizing(node, horizontal)) {
+      throw new Error(`Could not set horizontal sizing on "${node.name}"`);
+    }
+    applied.push(`horizontal → ${horizontal}`);
+  }
+
+  if (vertical) {
+    requireParentAutoLayout(vertical, "vertical");
+    requireOwnAutoLayout(vertical, "vertical");
+    // Text hugs vertically through textAutoResize, not through layout sizing.
+    if (node.type === "TEXT" && vertical === "HUG") {
+      node.textAutoResize = readHorizontalSizing(node) === "FIXED" ? "WIDTH_AND_HEIGHT" : "HEIGHT";
+      applied.push("vertical → HUG (auto height)");
+    } else if (writeVerticalSizing(node, vertical)) {
+      applied.push(`vertical → ${vertical}`);
+    } else {
+      throw new Error(`Could not set vertical sizing on "${node.name}"`);
+    }
+  }
+
+  // A min/max height silently overrides HUG, so clear it unless asked not to.
+  let constraintsCleared = false;
+  if (vertical === "HUG" && releaseHeightConstraints !== false) {
+    constraintsCleared = clearHeightConstraints(node, null);
+  }
+
+  return {
+    id: node.id,
+    name: node.name,
+    applied,
+    constraintsCleared,
+    layoutSizingHorizontal: readHorizontalSizing(node),
+    layoutSizingVertical: node.type === "TEXT" ? node.textAutoResize : readVerticalSizing(node),
+    width: node.width,
+    height: node.height,
   };
 }
 
@@ -8272,47 +9287,347 @@ async function getAnnotation(params) {
 }
 
 // Get all variable collections and their variables
-async function getVariables() {
-  // Check if Variables API is available
+// ─── Token engine: index, strict matching, binding ─────────────────────────
+//
+// The rule this section exists to enforce: when the file already defines a
+// variable for a property, the property is BOUND to that variable. Copying the
+// resolved colour or number instead severs the token connection — the layer
+// then stops following the design system and stops responding to mode changes,
+// which is invisible until someone edits a token and nothing moves.
+//
+// Matching is deliberately strict. `colors/Base/Primary`, `colors/Primary/500`
+// and `colors/Primary/700` are different tokens with related values; a fuzzy
+// match between them silently rewrites the design system's intent. Every
+// unmatched property is reported rather than guessed at.
+
+/** Collapse a token path to a comparable key: "Text size/Body1/font-size" → "text-size-body1-font-size". */
+function normalizeTokenName(name) {
+  return String(name || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+/**
+ * Which variable type a bindable field needs, so a COLOR can never be bound to
+ * itemSpacing and produce an unreadable Figma error.
+ */
+const FIELD_RESOLVED_TYPE = {
+  itemSpacing: "FLOAT", counterAxisSpacing: "FLOAT",
+  paddingTop: "FLOAT", paddingRight: "FLOAT", paddingBottom: "FLOAT", paddingLeft: "FLOAT",
+  width: "FLOAT", height: "FLOAT", minWidth: "FLOAT", maxWidth: "FLOAT",
+  minHeight: "FLOAT", maxHeight: "FLOAT",
+  opacity: "FLOAT", strokeWeight: "FLOAT",
+  strokeTopWeight: "FLOAT", strokeRightWeight: "FLOAT",
+  strokeBottomWeight: "FLOAT", strokeLeftWeight: "FLOAT",
+  cornerRadius: "FLOAT", topLeftRadius: "FLOAT", topRightRadius: "FLOAT",
+  bottomLeftRadius: "FLOAT", bottomRightRadius: "FLOAT",
+  fontSize: "FLOAT", lineHeight: "FLOAT", letterSpacing: "FLOAT",
+  paragraphSpacing: "FLOAT", paragraphIndent: "FLOAT",
+  fontWeight: "FLOAT",
+  fontFamily: "STRING", fontStyle: "STRING", characters: "STRING",
+  visible: "BOOLEAN",
+};
+
+/** Which variable scopes Figma considers appropriate for a bindable field. */
+const FIELD_SCOPES = {
+  itemSpacing: ["GAP"], counterAxisSpacing: ["GAP"],
+  paddingTop: ["GAP"], paddingRight: ["GAP"], paddingBottom: ["GAP"], paddingLeft: ["GAP"],
+  width: ["WIDTH_HEIGHT"], height: ["WIDTH_HEIGHT"],
+  minWidth: ["WIDTH_HEIGHT"], maxWidth: ["WIDTH_HEIGHT"],
+  minHeight: ["WIDTH_HEIGHT"], maxHeight: ["WIDTH_HEIGHT"],
+  opacity: ["OPACITY"],
+  strokeWeight: ["STROKE_FLOAT"],
+  strokeTopWeight: ["STROKE_FLOAT"], strokeRightWeight: ["STROKE_FLOAT"],
+  strokeBottomWeight: ["STROKE_FLOAT"], strokeLeftWeight: ["STROKE_FLOAT"],
+  cornerRadius: ["CORNER_RADIUS"], topLeftRadius: ["CORNER_RADIUS"],
+  topRightRadius: ["CORNER_RADIUS"], bottomLeftRadius: ["CORNER_RADIUS"],
+  bottomRightRadius: ["CORNER_RADIUS"],
+  fontSize: ["FONT_SIZE"], lineHeight: ["LINE_HEIGHT"], letterSpacing: ["LETTER_SPACING"],
+  paragraphSpacing: ["PARAGRAPH_SPACING"], paragraphIndent: ["PARAGRAPH_INDENT"],
+  fontWeight: ["FONT_WEIGHT"], fontFamily: ["FONT_FAMILY"], fontStyle: ["FONT_STYLE"],
+  characters: ["TEXT_CONTENT"],
+};
+
+/** Scopes for the paint- and effect-level pseudo-fields. */
+const PAINT_FIELD_SCOPES = {
+  fills: ["FRAME_FILL", "SHAPE_FILL", "TEXT_FILL"],
+  strokes: ["STROKE_COLOR"],
+  effects: ["EFFECT_COLOR"],
+};
+
+/**
+ * Build the lookup maps once per scan.
+ *
+ * A file this size (hundreds of variables) is scanned repeatedly during a bind
+ * pass; walking the array each time is what makes token binding feel slow
+ * enough that people skip it.
+ */
+async function buildVariableIndex() {
   if (!figma.variables) {
     throw new Error(
       "Variables API is not available. This feature requires Figma with Variables support. " +
-      "Ensure enableProposedApi is true in the plugin manifest."
+        "Ensure enableProposedApi is true in the plugin manifest."
     );
   }
 
   const collections = await figma.variables.getLocalVariableCollectionsAsync();
-  const result = [];
+  const index = {
+    byExactName: Object.create(null),
+    byLowerName: Object.create(null),
+    byNormalizedName: Object.create(null),
+    byId: Object.create(null),
+    collectionById: Object.create(null),
+    all: [],
+  };
 
   for (const collection of collections) {
-    const variables = [];
-    for (const variableId of collection.variableIds) {
-      const variable = await figma.variables.getVariableByIdAsync(variableId);
-      if (variable) {
-        variables.push({
-          id: variable.id,
-          name: variable.name,
-          resolvedType: variable.resolvedType,
-          valuesByMode: variable.valuesByMode
-        });
-      }
-    }
-
-    result.push({
-      id: collection.id,
-      name: collection.name,
-      modes: collection.modes,
-      variableIds: collection.variableIds,
-      variables: variables
-    });
+    index.collectionById[collection.id] = collection;
   }
 
-  return { collections: result };
+  for (const collection of collections) {
+    for (const variableId of collection.variableIds) {
+      const variable = await figma.variables.getVariableByIdAsync(variableId);
+      if (!variable) continue;
+
+      index.byId[variable.id] = variable;
+      index.all.push(variable);
+
+      const push = (map, key) => {
+        if (!map[key]) map[key] = [];
+        map[key].push(variable);
+      };
+      push(index.byExactName, variable.name);
+      push(index.byLowerName, variable.name.toLowerCase());
+      push(index.byNormalizedName, normalizeTokenName(variable.name));
+    }
+  }
+
+  return index;
+}
+
+/** A variable's scopes cover a field when they overlap, or when it is ALL_SCOPES. */
+function isScopeCompatible(variable, allowedScopes) {
+  if (!allowedScopes || !allowedScopes.length) return true;
+  const scopes = variable.scopes || [];
+  if (!scopes.length) return true; // unscoped: usable anywhere
+  if (scopes.indexOf("ALL_SCOPES") !== -1) return true;
+  return allowedScopes.some((scope) => scopes.indexOf(scope) !== -1);
+}
+
+/**
+ * Find the one variable that fits, or explain precisely why nothing does.
+ *
+ * Returns { variable, matchMethod } on success, or { reason } — never a guess.
+ * `reason` is one of not-found / ambiguous / wrong-type / wrong-scope, matching
+ * the vocabulary the report uses, so a caller can tell "this token does not
+ * exist" apart from "this token exists but cannot legally bind here".
+ */
+function findCompatibleVariable(index, options) {
+  const { name, resolvedType, allowedScopes, collectionName } = options || {};
+  if (!name) return { reason: "not-found", detail: "no name given" };
+
+  const failures = { type: 0, scope: 0, collection: 0 };
+  const validate = (variable) => {
+    if (resolvedType && variable.resolvedType !== resolvedType) {
+      failures.type++;
+      return false;
+    }
+    if (!isScopeCompatible(variable, allowedScopes)) {
+      failures.scope++;
+      return false;
+    }
+    if (collectionName) {
+      const collection = index.collectionById[variable.variableCollectionId];
+      if (!collection || collection.name !== collectionName) {
+        failures.collection++;
+        return false;
+      }
+    }
+    return true;
+  };
+
+  // 1. Exact path. 2. Case-insensitive path. 3. Normalized, only when unique.
+  const tiers = [
+    { candidates: index.byExactName[name] || [], method: "exact" },
+    { candidates: index.byLowerName[String(name).toLowerCase()] || [], method: "exact-case-insensitive" },
+    { candidates: index.byNormalizedName[normalizeTokenName(name)] || [], method: "normalized-unique" },
+  ];
+
+  let sawCandidate = false;
+  for (const tier of tiers) {
+    if (!tier.candidates.length) continue;
+    sawCandidate = true;
+    const matches = tier.candidates.filter(validate);
+    if (matches.length === 1) return { variable: matches[0], matchMethod: tier.method };
+    if (matches.length > 1) {
+      return {
+        reason: "ambiguous",
+        detail: `${matches.length} compatible variables share this name`,
+        candidates: matches.map((v) => ({ id: v.id, name: v.name })),
+      };
+    }
+  }
+
+  if (!sawCandidate) return { reason: "not-found", detail: `no variable named "${name}"` };
+  if (failures.type) return { reason: "wrong-type", detail: `exists but is not ${resolvedType}` };
+  if (failures.scope) {
+    return {
+      reason: "wrong-scope",
+      detail: `exists but its scopes do not cover ${(allowedScopes || []).join(", ")}`,
+    };
+  }
+  if (failures.collection) {
+    return { reason: "not-found", detail: `exists but not in collection "${collectionName}"` };
+  }
+  return { reason: "not-found", detail: `no compatible variable named "${name}"` };
+}
+
+/**
+ * Describe an alias without flattening it.
+ *
+ * A value of `→ colors/Base/Gray Main` has to stay an alias; reporting it as
+ * `#525252` is what tempts a caller into binding the primitive, or worse into
+ * pasting the hex. This resolves the chain for display only.
+ */
+function describeVariableValue(index, raw, depth) {
+  if (raw && typeof raw === "object" && raw.type === "VARIABLE_ALIAS") {
+    if (depth > 8) return { alias: true, name: "(alias chain too deep)" };
+    const target = index.byId[raw.id];
+    if (!target) return { alias: true, id: raw.id, name: "(alias target not in this file)" };
+    return { alias: true, id: target.id, name: target.name };
+  }
+  if (raw && typeof raw === "object" && "r" in raw) {
+    return { hex: paintToHex({ type: "SOLID", color: raw }) };
+  }
+  return { value: raw };
+}
+
+/** Serialise a variable for a tool response, aliases intact. */
+function describeVariable(index, variable, options) {
+  const opts = options || {};
+  const collection = index.collectionById[variable.variableCollectionId];
+  const out = {
+    id: variable.id,
+    name: variable.name,
+    resolvedType: variable.resolvedType,
+    scopes: variable.scopes || [],
+    collectionId: variable.variableCollectionId,
+    collectionName: collection ? collection.name : null,
+  };
+  if (variable.hiddenFromPublishing) out.hiddenFromPublishing = true;
+  if (variable.codeSyntax && Object.keys(variable.codeSyntax).length) {
+    out.codeSyntax = variable.codeSyntax;
+  }
+  if (opts.includeValues !== false && collection) {
+    out.valuesByMode = {};
+    for (const mode of collection.modes) {
+      const raw = (variable.valuesByMode || {})[mode.modeId];
+      if (raw === undefined) continue;
+      out.valuesByMode[mode.name] = describeVariableValue(index, raw, 0);
+    }
+  }
+  return out;
+}
+
+async function getVariables(params) {
+  const {
+    name,
+    nameContains,
+    resolvedType,
+    collectionName,
+    scope,
+    includeValues,
+    limit,
+  } = params || {};
+
+  const index = await buildVariableIndex();
+  const max = typeof limit === "number" && limit > 0 ? limit : 200;
+
+  // Unfiltered, a mature token file returns hundreds of variables with every
+  // mode value attached. Filtering here is what keeps a token lookup usable.
+  const needle = nameContains ? normalizeTokenName(nameContains) : null;
+  const matches = index.all.filter((v) => {
+    if (name && v.name !== name && normalizeTokenName(v.name) !== normalizeTokenName(name)) return false;
+    if (needle && normalizeTokenName(v.name).indexOf(needle) === -1) return false;
+    if (resolvedType && v.resolvedType !== resolvedType) return false;
+    if (scope && !isScopeCompatible(v, [scope])) return false;
+    if (collectionName) {
+      const c = index.collectionById[v.variableCollectionId];
+      if (!c || c.name !== collectionName) return false;
+    }
+    return true;
+  });
+
+  const collections = Object.keys(index.collectionById).map((id) => {
+    const c = index.collectionById[id];
+    return {
+      id: c.id,
+      name: c.name,
+      modes: (c.modes || []).map((m) => ({ modeId: m.modeId, name: m.name })),
+      variableCount: c.variableIds.length,
+    };
+  });
+
+  return {
+    collections,
+    totalVariables: index.all.length,
+    matchedVariables: matches.length,
+    returned: Math.min(matches.length, max),
+    truncated: matches.length > max,
+    variables: matches.slice(0, max).map((v) => describeVariable(index, v, { includeValues })),
+  };
+}
+
+/** Strict lookup exposed as its own command, so a caller can check before binding. */
+async function findVariable(params) {
+  const { name, resolvedType, collectionName, field } = params || {};
+  if (!name) throw new Error("Missing name parameter");
+
+  const index = await buildVariableIndex();
+  const allowedScopes = field ? scopesForField(field) : undefined;
+  const wantedType = resolvedType || (field ? typeForField(field) : undefined);
+
+  const result = findCompatibleVariable(index, {
+    name,
+    resolvedType: wantedType,
+    allowedScopes,
+    collectionName,
+  });
+
+  if (result.variable) {
+    return {
+      found: true,
+      matchMethod: result.matchMethod,
+      variable: describeVariable(index, result.variable),
+    };
+  }
+  return {
+    found: false,
+    reason: result.reason,
+    detail: result.detail,
+    candidates: result.candidates,
+  };
+}
+
+/** Field → required type, understanding the paint/effect pseudo-fields. */
+function typeForField(field) {
+  if (/^(fills|strokes|effects)\/\d+\/color$/.test(field)) return "COLOR";
+  return FIELD_RESOLVED_TYPE[field];
+}
+
+/** Field → acceptable scopes, understanding the paint/effect pseudo-fields. */
+function scopesForField(field) {
+  const paint = /^(fills|strokes|effects)\/\d+\/color$/.exec(field);
+  if (paint) return PAINT_FIELD_SCOPES[paint[1]];
+  return FIELD_SCOPES[field];
 }
 
 // Create or update a variable
 async function setVariable(params) {
-  const { collectionId, collectionName, name, resolvedType, value, modeId } = params || {};
+  const { collectionId, collectionName, name, resolvedType, value, modeId, createIfMissing } =
+    params || {};
 
   if (!figma.variables) {
     throw new Error(
@@ -8343,7 +9658,16 @@ async function setVariable(params) {
     const collections = await figma.variables.getLocalVariableCollectionsAsync();
     collection = collections.find(c => c.name === collectionName);
     if (!collection) {
-      // Create new collection
+      // Creating a collection silently is how a design system grows a second,
+      // near-duplicate home for the same tokens.
+      if (!createIfMissing) {
+        throw new Error(
+          `No collection named "${collectionName}". Existing collections: ` +
+            collections.map((c) => c.name).join(", ") +
+            ". Pass createIfMissing: true to add a new collection — but confirm with the " +
+            "designer first, since this expands the design system."
+        );
+      }
       collection = figma.variables.createVariableCollection(collectionName);
     }
   } else {
@@ -8361,6 +9685,13 @@ async function setVariable(params) {
   }
 
   if (!variable) {
+    if (!createIfMissing) {
+      throw new Error(
+        `No variable named "${name}" in "${collection.name}". Reuse an existing token if one ` +
+          "fits, or pass createIfMissing: true to add it — a new token should be the designer's " +
+          "call, not an automatic one."
+      );
+    }
     variable = figma.variables.createVariable(name, collection, resolvedType);
   }
 
@@ -8421,8 +9752,95 @@ async function setVariable(params) {
 }
 
 // Apply a variable binding to a node property
+/**
+ * Bind one variable to one node property.
+ *
+ * Accepts a variable NAME as well as an id: the name is what a token spec
+ * actually gives you, and forcing a caller to list every variable first to
+ * translate a name into an id is the friction that ends with someone pasting a
+ * hex value instead. The name is resolved through the strict matcher, so an
+ * ambiguous or wrong-typed name is refused rather than guessed.
+ */
+async function bindVariableToNode(node, variable, field) {
+  if (!("setBoundVariable" in node)) {
+    throw new Error(`Node type ${node.type} does not support variable bindings`);
+  }
+
+  const paintMatch = /^(fills|strokes|effects)\/(\d+)\/color$/.exec(field);
+  if (!paintMatch) {
+    node.setBoundVariable(field, variable);
+    return;
+  }
+
+  const prop = paintMatch[1];
+  const idx = parseInt(paintMatch[2], 10);
+
+  if (!(prop in node)) {
+    throw new Error(`Node does not have a ${prop} property`);
+  }
+  // A mixed value means the property differs across the node's content; writing
+  // a whole new array would flatten those differences away.
+  if (node[prop] === figma.mixed) {
+    throw new Error(`${prop} is mixed on "${node.name}" — bind on a single-value node instead`);
+  }
+
+  const list = [...node[prop]];
+  if (idx >= list.length) {
+    throw new Error(`${prop} index ${idx} out of range (node has ${list.length})`);
+  }
+
+  if (prop === "effects") {
+    const effect = list[idx];
+    if (!effect || !("color" in effect)) {
+      throw new Error(`effects[${idx}] on "${node.name}" has no colour to bind`);
+    }
+    if (typeof figma.variables.setBoundVariableForEffect !== "function") {
+      throw new Error(
+        "This Figma version cannot bind variables to effect colours. Use an effect style instead."
+      );
+    }
+    list[idx] = figma.variables.setBoundVariableForEffect(
+      Object.assign({}, effect),
+      "color",
+      variable
+    );
+    node.effects = list;
+    return;
+  }
+
+  const paint = list[idx];
+  if (!paint || paint.type !== "SOLID") {
+    throw new Error(
+      `${prop}[${idx}] on "${node.name}" is ${paint ? paint.type : "empty"}, not SOLID — ` +
+        "only a solid paint can carry a colour variable"
+    );
+  }
+  if (typeof figma.variables.setBoundVariableForPaint === "function") {
+    list[idx] = figma.variables.setBoundVariableForPaint(
+      Object.assign({}, paint),
+      "color",
+      variable
+    );
+  } else {
+    // Older API: write the alias onto a copy of the paint by hand. Same result,
+    // but the official helper is preferred because it validates the paint type.
+    const copy = Object.assign({}, paint);
+    copy.boundVariables = Object.assign({}, copy.boundVariables || {});
+    copy.boundVariables.color = { type: "VARIABLE_ALIAS", id: variable.id };
+    list[idx] = copy;
+  }
+  node[prop] = list;
+}
+
 async function applyVariableToNode(params) {
-  const { nodeId, variableId, field } = params || {};
+  const {
+    nodeId,
+    variableId,
+    variableName,
+    field,
+    collectionName,
+    requireScopeMatch,
+  } = params || {};
 
   if (!figma.variables) {
     throw new Error(
@@ -8430,14 +9848,10 @@ async function applyVariableToNode(params) {
     );
   }
 
-  if (!nodeId) {
-    throw new Error("Missing nodeId parameter");
-  }
-  if (!variableId) {
-    throw new Error("Missing variableId parameter");
-  }
-  if (!field) {
-    throw new Error("Missing field parameter");
+  if (!nodeId) throw new Error("Missing nodeId parameter");
+  if (!field) throw new Error("Missing field parameter");
+  if (!variableId && !variableName) {
+    throw new Error("Provide either variableId or variableName");
   }
 
   const node = await getNodeByIdSafe(nodeId);
@@ -8445,50 +9859,387 @@ async function applyVariableToNode(params) {
     throw new Error(`Node not found with ID: ${nodeId}`);
   }
 
-  const variable = await figma.variables.getVariableByIdAsync(variableId);
-  if (!variable) {
-    throw new Error(`Variable not found with ID: ${variableId}`);
-  }
+  const index = await buildVariableIndex();
+  const wantedType = typeForField(field);
+  const allowedScopes = scopesForField(field);
 
-  // Apply the variable binding
-  if (!("setBoundVariable" in node)) {
-    throw new Error(`Node type ${node.type} does not support variable bindings`);
-  }
+  let variable = null;
+  let matchMethod = "id";
 
-  // Handle paint-level bindings (fills/N/color, strokes/N/color)
-  const paintMatch = field.match(/^(fills|strokes)\/(\d+)\/color$/);
-  if (paintMatch) {
-    const paintProp = paintMatch[1];
-    const paintIndex = parseInt(paintMatch[2], 10);
-
-    if (!(paintProp in node)) {
-      throw new Error(`Node does not have ${paintProp} property`);
-    }
-    const paints = [...node[paintProp]];
-    if (paintIndex >= paints.length) {
-      throw new Error(`${paintProp} index ${paintIndex} out of range (node has ${paints.length} ${paintProp})`);
-    }
-    const paint = Object.assign({}, paints[paintIndex]);
-    paint.boundVariables = Object.assign({}, paint.boundVariables || {});
-    paint.boundVariables.color = { type: "VARIABLE_ALIAS", id: variable.id };
-    paints[paintIndex] = paint;
-    node[paintProp] = paints;
+  if (variableId) {
+    variable = index.byId[variableId] || (await figma.variables.getVariableByIdAsync(variableId));
+    if (!variable) throw new Error(`Variable not found with ID: ${variableId}`);
   } else {
-    node.setBoundVariable(field, variable);
+    const result = findCompatibleVariable(index, {
+      name: variableName,
+      resolvedType: wantedType,
+      // Scope is advisory by default: plenty of real files use ALL_SCOPES or
+      // leave scopes unset, and refusing those would push callers back to
+      // hardcoded values. requireScopeMatch makes it a hard gate.
+      allowedScopes: requireScopeMatch ? allowedScopes : undefined,
+      collectionName,
+    });
+    if (!result.variable) {
+      const err = new Error(
+        `No variable bound for ${field}: "${variableName}" — ${result.reason} (${result.detail}). ` +
+          "Apply the exact value manually and report it as not token-connected, rather than " +
+          "binding a similar token."
+      );
+      err.tokenReason = result.reason;
+      err.candidates = result.candidates;
+      throw err;
+    }
+    variable = result.variable;
+    matchMethod = result.matchMethod;
   }
 
+  // Type is a hard gate however the variable was found: binding a COLOR to
+  // itemSpacing throws deep inside Figma with a message that says nothing.
+  if (wantedType && variable.resolvedType !== wantedType) {
+    throw new Error(
+      `"${variable.name}" is ${variable.resolvedType}, but ${field} needs ${wantedType}`
+    );
+  }
+
+  const scopeOk = isScopeCompatible(variable, allowedScopes);
+  if (requireScopeMatch && !scopeOk) {
+    throw new Error(
+      `"${variable.name}" has scopes [${(variable.scopes || []).join(", ")}], which do not cover ` +
+        `${field} (expects ${(allowedScopes || []).join(", ")})`
+    );
+  }
+
+  await bindVariableToNode(node, variable, field);
+
+  const collection = index.collectionById[variable.variableCollectionId];
   return {
     nodeId: node.id,
     nodeName: node.name,
     variableId: variable.id,
     variableName: variable.name,
-    field: field
+    field: field,
+    matchMethod,
+    collectionName: collection ? collection.name : null,
+    resolvedType: variable.resolvedType,
+    scopeMatch: scopeOk,
+    warning: scopeOk
+      ? undefined
+      : `bound anyway: "${variable.name}" is not scoped for ${field}`,
+  };
+}
+
+/**
+ * Bind many properties in one pass, reporting what bound and what did not.
+ *
+ * The report is the point. A silent partial failure is how a layout ends up
+ * half token-connected, and nobody notices until a token changes and only some
+ * of the layers move.
+ */
+async function applyVariableBindings(params) {
+  const { bindings, requireScopeMatch, collectionName } = params || {};
+
+  if (!Array.isArray(bindings) || !bindings.length) {
+    throw new Error("Missing bindings parameter (expected a non-empty array)");
+  }
+
+  const index = await buildVariableIndex();
+  const bound = [];
+  const unbound = [];
+  const errors = [];
+
+  for (const entry of bindings) {
+    const { nodeId, field, variableName, variableId } = entry || {};
+    try {
+      if (!nodeId || !field) throw new Error("each binding needs nodeId and field");
+
+      const node = await getNodeByIdSafe(nodeId);
+      if (!node) throw new Error(`node not found: ${nodeId}`);
+
+      const wantedType = typeForField(field);
+      const allowedScopes = scopesForField(field);
+
+      let variable = null;
+      let matchMethod = "id";
+      if (variableId) {
+        variable = index.byId[variableId];
+        if (!variable) throw new Error(`variable not found: ${variableId}`);
+      } else {
+        const result = findCompatibleVariable(index, {
+          name: variableName,
+          resolvedType: wantedType,
+          allowedScopes: requireScopeMatch ? allowedScopes : undefined,
+          collectionName: entry.collectionName || collectionName,
+        });
+        if (!result.variable) {
+          // Not an error: a token genuinely may not exist. It is recorded so the
+          // value can be applied by hand and flagged as not token-connected.
+          unbound.push({
+            nodeId,
+            nodeName: node.name,
+            property: field,
+            requestedTokenName: variableName,
+            reason: result.reason,
+            detail: result.detail,
+            candidates: result.candidates,
+          });
+          continue;
+        }
+        variable = result.variable;
+        matchMethod = result.matchMethod;
+      }
+
+      if (wantedType && variable.resolvedType !== wantedType) {
+        unbound.push({
+          nodeId,
+          nodeName: node.name,
+          property: field,
+          requestedTokenName: variableName || variableId,
+          reason: "wrong-type",
+          detail: `${variable.name} is ${variable.resolvedType}, ${field} needs ${wantedType}`,
+        });
+        continue;
+      }
+
+      await bindVariableToNode(node, variable, field);
+      const collection = index.collectionById[variable.variableCollectionId];
+      bound.push({
+        nodeId,
+        nodeName: node.name,
+        property: field,
+        variableId: variable.id,
+        variableName: variable.name,
+        collectionName: collection ? collection.name : null,
+        matchMethod,
+      });
+    } catch (e) {
+      errors.push({
+        nodeId: nodeId || null,
+        property: field || null,
+        message: e && e.message ? e.message : String(e),
+      });
+    }
+  }
+
+  return {
+    checked: bindings.length,
+    boundCount: bound.length,
+    unboundCount: unbound.length,
+    errorCount: errors.length,
+    bound,
+    unbound,
+    errors,
+  };
+}
+
+/** Report which of a node's properties carry a variable and which are raw values. */
+async function getNodeVariableBindings(params) {
+  const { nodeId } = params || {};
+  if (!nodeId) throw new Error("Missing nodeId parameter");
+
+  const node = await getNodeByIdSafe(nodeId);
+  if (!node) throw new Error(`Node not found with ID: ${nodeId}`);
+
+  const index = await buildVariableIndex();
+  const describe = (ref) => {
+    if (!ref || !ref.id) return null;
+    const v = index.byId[ref.id];
+    if (!v) return { variableId: ref.id, variableName: "(not in this file)" };
+    const c = index.collectionById[v.variableCollectionId];
+    return {
+      variableId: v.id,
+      variableName: v.name,
+      collectionName: c ? c.name : null,
+      resolvedType: v.resolvedType,
+    };
+  };
+
+  const bound = {};
+  const raw = node.boundVariables || {};
+  for (const key of Object.keys(raw)) {
+    const value = raw[key];
+    if (Array.isArray(value)) {
+      bound[key] = value.map(describe);
+    } else {
+      bound[key] = describe(value);
+    }
+  }
+
+  // Which of the properties this node actually has are still raw values.
+  const unbound = [];
+  const candidateFields = Object.keys(FIELD_RESOLVED_TYPE);
+  for (const f of candidateFields) {
+    if (!(f in node)) continue;
+    if (bound[f]) continue;
+    const current = node[f];
+    if (current === undefined || current === null || current === figma.mixed) continue;
+    unbound.push({ property: f, value: typeof current === "object" ? "(object)" : current });
+  }
+
+  const modes = [];
+  if (node.explicitVariableModes) {
+    for (const collectionId of Object.keys(node.explicitVariableModes)) {
+      const c = index.collectionById[collectionId];
+      const modeId = node.explicitVariableModes[collectionId];
+      const mode = c && (c.modes || []).find((m) => m.modeId === modeId);
+      modes.push({
+        collectionId,
+        collectionName: c ? c.name : null,
+        modeId,
+        modeName: mode ? mode.name : null,
+      });
+    }
+  }
+
+  return {
+    nodeId: node.id,
+    nodeName: node.name,
+    nodeType: node.type,
+    explicitModes: modes,
+    boundProperties: bound,
+    unboundProperties: unbound,
   };
 }
 
 // Switch variable mode on a node for a collection
+/**
+ * Pick the breakpoint mode a frame of this width is designed at.
+ *
+ * The thresholds sit between the reference widths rather than on them, so a
+ * 1024-wide frame reads as desktop and a 375-wide frame reads as mobile. Mode
+ * names describe reference designs, not CSS media-query boundaries.
+ */
+function modeForWidth(collection, width, thresholds) {
+  const t = thresholds || {};
+  const desk = typeof t.desktopMin === "number" ? t.desktopMin : 1024;
+  const tablet = typeof t.tabletMin === "number" ? t.tabletMin : 600;
+
+  const wanted = width >= desk ? ["desk", "desktop", "1440", "1280"]
+    : width >= tablet ? ["tab", "tablet", "768", "1024"]
+    : ["mobi", "mobile", "320", "390"];
+
+  for (const mode of collection.modes || []) {
+    const name = (mode.name || "").toLowerCase().trim();
+    if (wanted.some((w) => name === w || name.indexOf(w) === 0 || /^\d+$/.test(w) && name.includes(w))) {
+      return mode;
+    }
+  }
+  return null;
+}
+
+/**
+ * Apply the target breakpoint mode to collections used by a generated frame.
+ * Non-responsive collections (for example Light/Dark themes) are deliberately
+ * left alone; only collections advertising breakpoint-like modes participate.
+ */
+async function applyBreakpointVariableModes(node, width, collections) {
+  const result = { applied: [], warnings: [] };
+  if (
+    !node ||
+    !("setExplicitVariableModeForCollection" in node) ||
+    !figma.variables ||
+    typeof figma.variables.getVariableCollectionByIdAsync !== "function"
+  ) {
+    return result;
+  }
+
+  for (const summary of collections || []) {
+    const hasResponsiveModes = (summary.modes || []).some((m) =>
+      /\b(desk(?:top)?|tab(?:let)?|mobi(?:le)?|1440|1280|1024|768|390|320)\b/i.test(
+        m.name || ""
+      )
+    );
+    if (!hasResponsiveModes) continue;
+
+    const collection = await figma.variables.getVariableCollectionByIdAsync(summary.id);
+    if (!collection) {
+      result.warnings.push(`Variable collection "${summary.name}" could not be loaded.`);
+      continue;
+    }
+
+    const mode = modeForWidth(collection, width);
+    if (!mode) {
+      result.warnings.push(
+        `Variable collection "${collection.name}" has responsive modes but none matches ` +
+          `${Math.round(width)}px. Its inherited mode was left unchanged.`
+      );
+      continue;
+    }
+
+    try {
+      node.setExplicitVariableModeForCollection(collection, mode.modeId);
+      result.applied.push({
+        collectionId: collection.id,
+        collectionName: collection.name,
+        modeId: mode.modeId,
+        modeName: mode.name,
+      });
+    } catch (error) {
+      result.warnings.push(
+        `Could not apply mode "${mode.name}" from "${collection.name}" to ` +
+          `"${node.name}": ${error && error.message ? error.message : String(error)}`
+      );
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Freeze each protected absolute subtree to the variable modes it resolved
+ * immediately after the desktop clone. The responsive root can then switch to
+ * Tab/Mobi without changing the copied absolute layer's desktop appearance.
+ */
+async function preserveAbsoluteVariableModes(root, collections) {
+  const preserved = [];
+  for (const layer of collectAbsolutePositionedLayers(root, false)) {
+    if (!("setExplicitVariableModeForCollection" in layer)) continue;
+    let resolved = {};
+    try {
+      resolved = layer.resolvedVariableModes || layer.explicitVariableModes || {};
+    } catch (e) {
+      resolved = layer.explicitVariableModes || {};
+    }
+
+    for (const summary of collections || []) {
+      const modeId = resolved[summary.id];
+      if (!modeId) continue;
+      const collection = await figma.variables.getVariableCollectionByIdAsync(summary.id);
+      if (!collection) continue;
+      try {
+        layer.setExplicitVariableModeForCollection(collection, modeId);
+        const mode = (collection.modes || []).find((candidate) => candidate.modeId === modeId);
+        preserved.push({
+          nodeId: layer.id,
+          nodeName: layer.name,
+          collectionId: collection.id,
+          collectionName: collection.name,
+          modeId,
+          modeName: mode ? mode.name : null,
+        });
+      } catch (e) {
+        // The subtree is still left untouched; report only modes we could pin.
+      }
+    }
+  }
+  return preserved;
+}
+
+/** Nearest ancestor frame whose width tells us which breakpoint we are in. */
+function nearestFrameWidth(node) {
+  let current = node;
+  let depth = 0;
+  while (current && depth < 30) {
+    if ((current.type === "FRAME" || current.type === "COMPONENT") && current.width > 0) {
+      return current.width;
+    }
+    current = current.parent;
+    depth++;
+  }
+  return null;
+}
+
 async function switchVariableMode(params) {
-  const { nodeId, collectionId, modeId } = params || {};
+  const { nodeId, collectionId, collectionName, modeId, modeName, thresholds } = params || {};
 
   if (!figma.variables) {
     throw new Error(
@@ -8499,11 +10250,8 @@ async function switchVariableMode(params) {
   if (!nodeId) {
     throw new Error("Missing nodeId parameter");
   }
-  if (!collectionId) {
-    throw new Error("Missing collectionId parameter");
-  }
-  if (!modeId) {
-    throw new Error("Missing modeId parameter");
+  if (!collectionId && !collectionName) {
+    throw new Error("Provide either collectionId or collectionName");
   }
 
   const node = await getNodeByIdSafe(nodeId);
@@ -8515,14 +10263,72 @@ async function switchVariableMode(params) {
     throw new Error(`Node type ${node.type} does not support variable mode switching`);
   }
 
-  const collection = await figma.variables.getVariableCollectionByIdAsync(collectionId);
-  if (!collection) {
-    throw new Error(`Variable collection not found: ${collectionId}`);
+  let collection = null;
+  if (collectionId) {
+    collection = await figma.variables.getVariableCollectionByIdAsync(collectionId);
+    if (!collection) throw new Error(`Variable collection not found: ${collectionId}`);
+  } else {
+    const collections = await figma.variables.getLocalVariableCollectionsAsync();
+    const lower = collectionName.toLowerCase();
+    collection =
+      collections.find((c) => c.name === collectionName) ||
+      collections.find((c) => c.name.toLowerCase() === lower);
+    if (!collection) {
+      throw new Error(
+        `No collection named "${collectionName}". This file has: ` +
+          collections.map((c) => c.name).join(", ")
+      );
+    }
   }
 
-  const mode = collection.modes.find(m => m.modeId === modeId);
-  if (!mode) {
-    throw new Error(`Mode not found with ID: ${modeId} in collection "${collection.name}"`);
+  let mode = null;
+  let selectedBy = "modeId";
+
+  if (modeId) {
+    mode = (collection.modes || []).find((m) => m.modeId === modeId);
+    if (!mode) throw new Error(`Mode not found with ID: ${modeId} in "${collection.name}"`);
+  } else if (modeName && modeName.toLowerCase() !== "auto") {
+    // Mode names carry their reference width in practice — "Desk (1440 px)",
+    // not "Desk" — while everything else in the system, the token docs
+    // included, says Desk / Tab / Mobi. Accept the short name, but only when it
+    // singles out one mode: two modes starting with the same word is a question
+    // for the caller, not something to resolve by picking the first.
+    const modes = collection.modes || [];
+    const lower = modeName.toLowerCase().trim();
+    const prefixed = modes.filter((m) => (m.name || "").toLowerCase().trim().indexOf(lower) === 0);
+
+    mode =
+      modes.find((m) => m.name === modeName) ||
+      modes.find((m) => (m.name || "").toLowerCase().trim() === lower) ||
+      (prefixed.length === 1 ? prefixed[0] : null);
+
+    if (!mode) {
+      throw new Error(
+        prefixed.length > 1
+          ? `"${modeName}" matches ${prefixed.length} modes in "${collection.name}" (` +
+            prefixed.map((m) => m.name).join(", ") +
+            "). Name the mode exactly."
+          : `No mode named "${modeName}" in "${collection.name}". Modes are: ` +
+            modes.map((m) => m.name).join(", ")
+      );
+    }
+    selectedBy = mode.name === modeName ? "modeName" : `modeName (matched "${mode.name}")`;
+  } else {
+    // Auto: infer the breakpoint from the frame this node sits in.
+    const width = nearestFrameWidth(node);
+    if (width === null) {
+      throw new Error(
+        "Could not infer a mode: no ancestor frame has a width. Pass modeName or modeId."
+      );
+    }
+    mode = modeForWidth(collection, width, thresholds);
+    if (!mode) {
+      throw new Error(
+        `No mode in "${collection.name}" matches a ${Math.round(width)}px frame. ` +
+          `Modes are: ${(collection.modes || []).map((m) => m.name).join(", ")}. Pass modeName instead.`
+      );
+    }
+    selectedBy = `auto (${Math.round(width)}px frame)`;
   }
 
   node.setExplicitVariableModeForCollection(collection, mode.modeId);
@@ -8533,7 +10339,82 @@ async function switchVariableMode(params) {
     collectionId: collection.id,
     collectionName: collection.name,
     modeId: mode.modeId,
-    modeName: mode.name
+    modeName: mode.name,
+    selectedBy,
+  };
+}
+
+/**
+ * Import a variable from an enabled team library into this file.
+ *
+ * Without this, a token that lives only in a shared library has no route into
+ * the file except creating a local duplicate — which is how two variables named
+ * the same thing end up drifting apart.
+ */
+async function importLibraryVariable(params) {
+  const { key, name, libraryCollectionKey } = params || {};
+
+  if (!figma.variables) {
+    throw new Error("Variables API is not available.");
+  }
+  if (!key && !name) {
+    throw new Error("Provide either key (the library variable key) or name");
+  }
+
+  if (key) {
+    const imported = await figma.variables.importVariableByKeyAsync(key);
+    const index = await buildVariableIndex();
+    return { imported: true, variable: describeVariable(index, imported) };
+  }
+
+  if (!figma.teamLibrary) {
+    throw new Error(
+      "Team library API is unavailable. Pass the variable key directly, or enable the library " +
+        "for this file."
+    );
+  }
+
+  const collections = await figma.teamLibrary.getAvailableLibraryVariableCollectionsAsync();
+  const searchIn = libraryCollectionKey
+    ? collections.filter((c) => c.key === libraryCollectionKey)
+    : collections;
+
+  if (!searchIn.length) {
+    throw new Error(
+      libraryCollectionKey
+        ? `No enabled library collection with key ${libraryCollectionKey}`
+        : "No library variable collections are enabled for this file"
+    );
+  }
+
+  const normalized = normalizeTokenName(name);
+  const hits = [];
+  for (const collection of searchIn) {
+    const vars = await figma.teamLibrary.getVariablesInLibraryCollectionAsync(collection.key);
+    for (const v of vars) {
+      if (v.name === name || normalizeTokenName(v.name) === normalized) {
+        hits.push({ variable: v, collection });
+      }
+    }
+  }
+
+  if (!hits.length) {
+    throw new Error(`No library variable named "${name}" in the enabled libraries`);
+  }
+  if (hits.length > 1) {
+    throw new Error(
+      `"${name}" matches ${hits.length} library variables (` +
+        hits.map((h) => `${h.collection.name}/${h.variable.name}`).join(", ") +
+        "). Pass libraryCollectionKey to disambiguate."
+    );
+  }
+
+  const imported = await figma.variables.importVariableByKeyAsync(hits[0].variable.key);
+  const index = await buildVariableIndex();
+  return {
+    imported: true,
+    fromLibrary: hits[0].collection.name,
+    variable: describeVariable(index, imported),
   };
 }
 
@@ -9286,6 +11167,480 @@ async function createPaintStyle(params) {
 }
 
 /**
+ * Bind Figma local variables (Layout, Gap, Radius, Responsive Text Container)
+ * to all FRAME/COMPONENT/INSTANCE nodes in a subtree.
+ *
+ * This is a reusable function called by both fixTextSizing and generateBreakpoint
+ * so that variables are bound consistently everywhere.
+ *
+ * Returns { bindings: [...], collections: [...] }
+ */
+async function bindVariablesToSubtree(root) {
+  const result = { bindings: [], collections: [] };
+  if (!figma.variables || !figma.variables.getLocalVariableCollectionsAsync) return result;
+
+  let tokenIndex;
+  try {
+    tokenIndex = await buildVariableIndex();
+  } catch (e) {
+    return result;
+  }
+
+  // Categorize variables by path prefix
+  const layoutVars = {};
+  const gapVars = {};
+  const radiusVars = {};
+  const textContainerVars = {};
+  const seen = Object.create(null);
+
+  for (const v of tokenIndex.all) {
+    const path = (v.name || "").toLowerCase();
+    const bucket = path.indexOf("layout/") === 0 ? layoutVars
+      : path.indexOf("gap/") === 0 ? gapVars
+      : path.indexOf("radius/") === 0 ? radiusVars
+      : path.indexOf("responsive text container/") === 0 ? textContainerVars
+      : null;
+    if (!bucket) continue;
+
+    bucket[v.name] = v;
+    const col = tokenIndex.collectionById[v.variableCollectionId];
+    if (col && !seen[col.id]) {
+      seen[col.id] = true;
+      result.collections.push({ id: col.id, name: col.name, modes: col.modes });
+    }
+  }
+
+  const hasVars = Object.keys(layoutVars).length > 0 ||
+                  Object.keys(textContainerVars).length > 0 ||
+                  Object.keys(gapVars).length > 0 ||
+                  Object.keys(radiusVars).length > 0;
+  if (!hasVars) return result;
+
+  // Resolve one token by exact path
+  const resolveToken = (bucket, candidatePaths, field) => {
+    const wantedType = field ? typeForField(field) : "FLOAT";
+    for (const path of candidatePaths) {
+      const direct = bucket[path];
+      if (direct && direct.resolvedType === wantedType) return direct;
+      const hit = findCompatibleVariable(tokenIndex, { name: path, resolvedType: wantedType });
+      if (hit.variable) return hit.variable;
+    }
+    return null;
+  };
+
+  // Collect all frames
+  const allFrames = [];
+  function collectFrames(node) {
+    if (!node || node.removed) return;
+    if (isAbsolutePositionedLayer(node)) return;
+    if (node.type === "FRAME" || node.type === "COMPONENT" || node.type === "INSTANCE") {
+      allFrames.push(node);
+    }
+    if ("children" in node) {
+      for (const child of node.children) collectFrames(child);
+    }
+  }
+  collectFrames(root);
+
+  const layoutSubGroups = ["Default", "Compact", "Inner", "Full Width", "All Locations"];
+  function guessLayoutGroup(frame) {
+    let node = frame;
+    while (node) {
+      const name = (node.name || "").toLowerCase();
+      for (const group of layoutSubGroups) {
+        if (name.includes(group.toLowerCase())) return group;
+      }
+      node = node.parent;
+    }
+    return "Default";
+  }
+
+  const boundFrameIds = new Set();
+  for (const frame of allFrames) {
+    if (boundFrameIds.has(frame.id)) continue;
+    if (!("setBoundVariable" in frame)) continue;
+    boundFrameIds.add(frame.id);
+
+    try {
+      const bound = frame.boundVariables || {};
+      const occupiedBindings = new Set(Object.keys(bound));
+      const group = guessLayoutGroup(frame);
+      const isAL = isAutoLayout(frame);
+
+      const bind = (field, variable) => {
+        if (!variable) return false;
+        // This pass fills gaps; it must never replace a binding inherited from
+        // the approved source frame, even when our name heuristic finds a
+        // different plausible token.
+        if (occupiedBindings.has(field)) return false;
+        try {
+          frame.setBoundVariable(field, variable);
+          // Track the addition locally so another candidate later in this pass
+          // cannot overwrite the binding we just added.
+          occupiedBindings.add(field);
+          result.bindings.push({
+            nodeId: frame.id,
+            nodeName: frame.name,
+            variable: variable.name,
+            field,
+          });
+          return true;
+        } catch (e) { return false; }
+      };
+
+      // Padding
+      const paddingCandidates = [
+        `Layout/${group}/container-padding`,
+        "Layout/Default/container-padding",
+      ];
+      const paddingVar = resolveToken(layoutVars, paddingCandidates, "paddingLeft");
+      if (paddingVar) {
+        const hasUnboundPadding = !bound.paddingLeft || !bound.paddingRight ||
+                                   !bound.paddingTop || !bound.paddingBottom;
+        if (hasUnboundPadding) {
+          bind("paddingLeft", paddingVar);
+          bind("paddingRight", paddingVar);
+          bind("paddingTop", paddingVar);
+          bind("paddingBottom", paddingVar);
+        }
+      }
+
+      // Section gap
+      const sectionGapCandidates = [
+        `Layout/${group}/section-gap`,
+        "Layout/Default/section-gap",
+      ];
+      const sectionGapVar = resolveToken(layoutVars, sectionGapCandidates, "itemSpacing");
+
+      // Row gap & column gap
+      const rowGapCandidates = [
+        `Layout/${group}/row-gap`,
+        "Layout/Default/row-gap",
+      ];
+      const colGapCandidates = [
+        `Layout/${group}/column-gap`,
+        "Layout/Default/column-gap",
+      ];
+      const rowGapVar = resolveToken(layoutVars, rowGapCandidates, "itemSpacing");
+      const colGapVar = resolveToken(layoutVars, colGapCandidates, "itemSpacing");
+
+      if (isAL && !bound.itemSpacing) {
+        const vertical = frame.layoutMode === "VERTICAL";
+        if (vertical) {
+          const isSectionLevel = frame.parent && (
+            frame.parent.type === "PAGE" ||
+            (frame.parent.name || "").toLowerCase().includes("section") ||
+            frame.parent === root
+          );
+          bind("itemSpacing", isSectionLevel ? (sectionGapVar || rowGapVar) : rowGapVar);
+        } else {
+          bind("itemSpacing", colGapVar);
+        }
+      }
+
+      // Counter axis spacing (for wrap layouts)
+      if (isAL && frame.layoutWrap === "WRAP" && "counterAxisSpacing" in frame && !bound.counterAxisSpacing) {
+        const vertical = frame.layoutMode === "VERTICAL";
+        bind("counterAxisSpacing", vertical ? colGapVar : rowGapVar);
+      }
+
+      // Radius
+      if (!bound.topLeftRadius && Object.keys(radiusVars).length > 0) {
+        let radiusVar = null;
+        const frameName = (frame.name || "").toLowerCase();
+        for (const [vName, v] of Object.entries(radiusVars)) {
+          const vNameLower = vName.toLowerCase();
+          if (frameName.includes("card") && vNameLower.includes("card")) { radiusVar = v; break; }
+          if (frameName.includes("button") && vNameLower.includes("button")) { radiusVar = v; break; }
+          if (frameName.includes("input") && vNameLower.includes("input")) { radiusVar = v; break; }
+        }
+        if (radiusVar) {
+          bind("topLeftRadius", radiusVar);
+          bind("topRightRadius", radiusVar);
+          bind("bottomLeftRadius", radiusVar);
+          bind("bottomRightRadius", radiusVar);
+        }
+      }
+
+      // Responsive Text Container
+      if (Object.keys(textContainerVars).length > 0) {
+        const frameName = (frame.name || "").toLowerCase();
+        const hasTextChild = frame.children && frame.children.some(c => c.type === "TEXT");
+        if (hasTextChild || frameName.includes("text") || frameName.includes("paragraph") ||
+            frameName.includes("content") || frameName.includes("intro")) {
+          for (const [vName, v] of Object.entries(textContainerVars)) {
+            const vNameLower = vName.toLowerCase();
+            if (vNameLower.includes("max-width") || vNameLower.includes("maxwidth")) {
+              if ("maxWidth" in frame && !bound.maxWidth) {
+                bind("maxWidth", v);
+              }
+            }
+            if (vNameLower.includes("width") && !vNameLower.includes("max")) {
+              if (!bound.width) bind("width", v);
+            }
+            if (vNameLower.includes("padding")) {
+              if (!bound.paddingLeft) {
+                bind("paddingLeft", v);
+                bind("paddingRight", v);
+                bind("paddingTop", v);
+                bind("paddingBottom", v);
+              }
+            }
+          }
+        }
+      }
+    } catch (frameBindErr) {
+      // Best-effort
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Fix text sizing across an entire node tree (or the current page / full document).
+ *
+ * Rules applied to every TEXT node:
+ *   - textAutoResize NONE or TRUNCATE (fixed height) → needs fix
+ *   - Single-line heuristic (no newlines AND ≤ 80 chars) → WIDTH_AND_HEIGHT (hug both)
+ *   - Multi-line / paragraph → HEIGHT (auto height) + FILL horizontal if parent uses Auto Layout
+ *   - Already HEIGHT → check horizontal; set FILL if parent is Auto Layout and currently FIXED
+ *   - Already WIDTH_AND_HEIGHT → leave unchanged (already hugging)
+ *
+ * @param {object} params
+ * @param {string} [params.nodeId]   - Scan only this subtree (optional)
+ * @param {string} [params.scope]    - "page" (default), "document", or "selection"
+ */
+async function fixTextSizing(params) {
+  const { nodeId, scope = "page" } = params || {};
+
+  // Resolve the root to scan
+  let root;
+  if (nodeId) {
+    root = await getNodeByIdSafe(nodeId);
+    if (!root) throw new Error(`Node not found: ${nodeId}`);
+  } else if (scope === "document") {
+    root = figma.root;
+  } else if (scope === "selection") {
+    const sel = figma.currentPage.selection;
+    if (!sel || sel.length === 0) throw new Error("Nothing selected — select a node or use scope 'page'");
+    root = { children: sel };
+  } else {
+    root = figma.currentPage;
+  }
+
+  // ── Load local variable collections once ──
+  // Token groups live in the variable NAME PATH, not in the collection name:
+  // a file typically has two collections (primitives, styles) holding
+  // "Layout/Default/container-padding", "Gap/24", "Radius/12" and
+  // "Responsive Text Container/max-width". Grouping by collection name found
+  // nothing in such a file and skipped binding entirely, so group by path.
+  let variableCollections = [];
+  let layoutVars = {};        // path → variable  (Layout/…)
+  let gapVars = {};           // path → variable  (Gap/…)
+  let radiusVars = {};        // path → variable  (Radius/…)
+  let textContainerVars = {}; // path → variable  (Responsive Text Container/…)
+  let tokenIndex = null;
+
+  try {
+    if (figma.variables && figma.variables.getLocalVariableCollectionsAsync) {
+      tokenIndex = await buildVariableIndex();
+      const seen = Object.create(null);
+
+      for (const v of tokenIndex.all) {
+        const path = (v.name || "").toLowerCase();
+        const bucket = path.indexOf("layout/") === 0 ? layoutVars
+          : path.indexOf("gap/") === 0 ? gapVars
+          : path.indexOf("radius/") === 0 ? radiusVars
+          : path.indexOf("responsive text container/") === 0 ? textContainerVars
+          : null;
+        if (!bucket) continue;
+
+        bucket[v.name] = v;
+        const col = tokenIndex.collectionById[v.variableCollectionId];
+        if (col && !seen[col.id]) {
+          seen[col.id] = true;
+          variableCollections.push({ id: col.id, name: col.name, modes: col.modes });
+        }
+      }
+    }
+  } catch (varErr) {
+    // Variables API not available — continue without variable binding
+  }
+
+  const hasVariablesApi = Object.keys(layoutVars).length > 0 ||
+                          Object.keys(textContainerVars).length > 0;
+
+  /**
+   * Resolve one token by exact path, trying the given candidates in order.
+   *
+   * Exact paths only. The previous version took the first variable whose name
+   * merely *contained* "width", which in a real file picks between
+   * `Layout/Compact/width`, `Layout/Default/width` and
+   * `Utilities/Archive card/Width` by object key order — a different token each
+   * run, and never a decision anyone made.
+   */
+  const resolveToken = (bucket, candidatePaths, field) => {
+    if (!tokenIndex) return null;
+    const wantedType = field ? typeForField(field) : "FLOAT";
+    for (const path of candidatePaths) {
+      const direct = bucket[path];
+      if (direct && direct.resolvedType === wantedType) return direct;
+      const hit = findCompatibleVariable(tokenIndex, { name: path, resolvedType: wantedType });
+      if (hit.variable) return hit.variable;
+    }
+    return null;
+  };
+
+  // Recursively collect all TEXT nodes
+  function collectTextNodes(node, results) {
+    if (!node || node.removed) return;
+    if (node.type === "TEXT") {
+      results.push(node);
+    }
+    if ("children" in node) {
+      for (const child of node.children) collectTextNodes(child, results);
+    }
+  }
+
+  const textNodes = [];
+  collectTextNodes(root, textNodes);
+
+  const fixed = [];
+  const skipped = [];
+  const errors = [];
+  const variableBindings = [];
+
+  for (const node of textNodes) {
+    try {
+      const currentResize = node.textAutoResize;
+      const chars = node.characters || "";
+      const parentIsAutoLayout = !!(node.parent && isAutoLayout(node.parent));
+      const currentHoriz = readHorizontalSizing(node);
+
+      // Determine if this text has a constrained width
+      const hasConstrainedWidth = currentHoriz === "FILL" || (
+        currentResize === "NONE" && node.width > 0
+      ) || currentResize === "HEIGHT" || currentResize === "TRUNCATE";
+
+      const hasNewlines = chars.includes("\n");
+      const isLongText = chars.length > 80;
+
+      // ── Target resize mode ──
+      let targetResize;
+      if (hasConstrainedWidth || hasNewlines || isLongText) {
+        targetResize = "HEIGHT";   // auto height — width stays as-is
+      } else {
+        targetResize = "WIDTH_AND_HEIGHT";  // hug both — short single-line label
+      }
+
+      // Should we set horizontal to FILL?
+      const shouldFill = parentIsAutoLayout && currentHoriz !== "FILL" && (
+        hasNewlines || isLongText || currentResize === "NONE" || currentResize === "TRUNCATE"
+      );
+
+      // Also check: vertical sizing must be HUG in auto-layout contexts
+      const needsVertFix = parentIsAutoLayout && readVerticalSizing(node) !== "HUG";
+
+      // Skip nodes that are already correct
+      if (currentResize === targetResize && !shouldFill && !needsVertFix) {
+        skipped.push({ id: node.id, name: node.name, reason: "already correct" });
+        continue;
+      }
+
+      // Load font before mutating
+      try {
+        if (node.fontName && typeof node.fontName === "object" && "family" in node.fontName) {
+          await figma.loadFontAsync(node.fontName);
+        } else if (node.fontName === figma.mixed) {
+          const ranges = node.getStyledTextSegments(["fontName"]);
+          const seen = new Set();
+          for (const seg of ranges) {
+            const key = `${seg.fontName.family}|${seg.fontName.style}`;
+            if (!seen.has(key)) {
+              seen.add(key);
+              await figma.loadFontAsync(seg.fontName);
+            }
+          }
+        }
+      } catch (fontErr) {
+        errors.push({ id: node.id, name: node.name, error: `Font load failed: ${fontErr.message}` });
+        continue;
+      }
+
+      const currentVert = parentIsAutoLayout ? readVerticalSizing(node) : null;
+      const was = { resize: currentResize, horiz: currentHoriz, vert: currentVert };
+
+      // Apply textAutoResize
+      if (currentResize !== targetResize) {
+        node.textAutoResize = targetResize;
+      }
+
+      // ── Critical: set layoutSizingVertical to HUG ──
+      // In auto-layout parents, even with textAutoResize="HEIGHT", the node can
+      // still have layoutSizingVertical="FIXED" which keeps the fixed pixel height.
+      // We must set it to HUG so the text grows with content.
+      if (parentIsAutoLayout && currentVert !== "HUG") {
+        writeVerticalSizing(node, "HUG");
+      }
+
+      // Apply FILL horizontal if appropriate
+      if (shouldFill) {
+        writeHorizontalSizing(node, "FILL");
+      }
+
+      // Variable binding for text node parents is done in the bulk pass below
+
+      fixed.push({
+        id: node.id,
+        name: node.name,
+        was,
+        now: {
+          resize: node.textAutoResize,
+          horiz: readHorizontalSizing(node),
+          vert: parentIsAutoLayout ? readVerticalSizing(node) : null
+        },
+      });
+    } catch (err) {
+      errors.push({ id: node.id, name: node.name, error: err.message });
+    }
+  }
+
+  // ── Bulk variable binding pass ──
+  // Delegates to the shared bindVariablesToSubtree function so the same logic
+  // runs in both fixTextSizing and generateBreakpoint.
+  if (hasVariablesApi) {
+    try {
+      const varResult = await bindVariablesToSubtree(root);
+      variableBindings.push(...varResult.bindings);
+      if (varResult.collections.length > 0 && variableCollections.length === 0) {
+        variableCollections = varResult.collections;
+      }
+    } catch (e) {
+      // Best-effort — don't fail the overall operation
+    }
+  }
+
+  return {
+    success: true,
+    scope: nodeId ? `node:${nodeId}` : scope,
+    total: textNodes.length,
+    fixed: fixed.length,
+    skipped: skipped.length,
+    errorCount: errors.length,
+    changes: fixed,
+    variableBindings: variableBindings.length > 0 ? variableBindings : undefined,
+    variableCollectionsFound: variableCollections.length > 0
+      ? variableCollections.map(c => ({ name: c.name, modes: c.modes.map(m => m.name) }))
+      : undefined,
+    errors,
+    message: `Fixed ${fixed.length} of ${textNodes.length} text nodes. ${errors.length} error(s).` +
+      (variableBindings.length > 0 ? ` Bound ${variableBindings.length} variable(s) to containers.` : "") +
+      (variableCollections.length > 0 ? ` Found collections: ${variableCollections.map(c => c.name).join(", ")}.` : ""),
+  };
+}
+
+/**
  * Create a reusable effect style in Figma
  */
 async function createEffectStyle(params) {
@@ -9313,4 +11668,3 @@ async function createEffectStyle(params) {
     effectCount: style.effects.length,
   };
 }
-

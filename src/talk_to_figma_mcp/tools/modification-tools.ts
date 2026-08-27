@@ -195,25 +195,40 @@ export function registerModificationTools(server: McpServer): void {
   // Resize Node Tool
   server.tool(
     "resize_node",
-    "Resize a node in Figma",
+    "Set literal pixel dimensions on a node. Both width and height are optional — pass only " +
+      "the axis you mean to pin. This writes a FIXED size, so it is the wrong tool for " +
+      "responsive layout: use set_layout_sizing for Fill container / Hug contents. Pinning the " +
+      "height of a container that currently hugs its content is rejected unless allowFixedHeight " +
+      "is set, because a fixed height clips content as soon as text rewraps at another breakpoint.",
     {
       nodeId: z.string().describe("The ID of the node to resize"),
-      width: z.coerce.number().positive().describe("New width"),
-      height: z.coerce.number().positive().describe("New height"),
+      width: z.coerce.number().positive().optional().describe("New width in pixels"),
+      height: z.coerce
+        .number()
+        .positive()
+        .optional()
+        .describe("New height in pixels. Prefer Hug contents for anything content-driven."),
+      allowFixedHeight: coerceBoolean
+        .optional()
+        .describe(
+          "Pin the height even though the node currently sizes to its content. Only for elements " +
+            "with a genuine fixed physical size: icons, avatars, image crops, fixed-spec components."
+        ),
     },
-    async ({ nodeId, width, height }) => {
+    async ({ nodeId, width, height, allowFixedHeight }) => {
       try {
         const result = await sendCommandToFigma("resize_node", {
           nodeId,
           width,
           height,
+          allowFixedHeight,
         });
-        const typedResult = result as { name: string };
+        const typedResult = result as { name: string; width: number; height: number };
         return {
           content: [
             {
               type: "text",
-              text: `Resized node "${typedResult.name}" to width ${width} and height ${height}`,
+              text: `Resized node "${typedResult.name}" to width ${typedResult.width} and height ${typedResult.height}`,
             },
           ],
         };
@@ -308,7 +323,9 @@ export function registerModificationTools(server: McpServer): void {
   // Auto Layout Tool
   server.tool(
     "set_auto_layout",
-    "Configure auto layout properties for a node in Figma",
+    "Configure auto layout on a node. Height is set to Hug contents unless layoutSizingVertical " +
+      "says otherwise: Figma leaves a converted frame's height FIXED at whatever it happened to " +
+      "be, which is how a desktop height ends up baked into every breakpoint.",
     {
       nodeId: z.string().describe("The ID of the node to configure auto layout"),
       layoutMode: z.enum(["HORIZONTAL", "VERTICAL", "NONE"]).describe("Layout direction"),
@@ -320,10 +337,15 @@ export function registerModificationTools(server: McpServer): void {
       primaryAxisAlignItems: z.enum(["MIN", "CENTER", "MAX", "SPACE_BETWEEN"]).optional().describe("Alignment along primary axis"),
       counterAxisAlignItems: z.enum(["MIN", "CENTER", "MAX"]).optional().describe("Alignment along counter axis"),
       layoutWrap: z.enum(["WRAP", "NO_WRAP"]).optional().describe("Whether items wrap to new lines"),
-      strokesIncludedInLayout: coerceBoolean.optional().describe("Whether strokes are included in layout calculations")
+      strokesIncludedInLayout: coerceBoolean.optional().describe("Whether strokes are included in layout calculations"),
+      layoutSizingHorizontal: z.enum(["FILL", "HUG", "FIXED"]).optional()
+        .describe("Width behaviour. FILL requires the parent to use auto layout. Left unchanged if omitted."),
+      layoutSizingVertical: z.enum(["FILL", "HUG", "FIXED"]).optional()
+        .describe("Height behaviour. Defaults to HUG so height follows content — only pass FIXED for an element with a genuine fixed physical size.")
     },
     async ({ nodeId, layoutMode, paddingTop, paddingBottom, paddingLeft, paddingRight,
-             itemSpacing, primaryAxisAlignItems, counterAxisAlignItems, layoutWrap, strokesIncludedInLayout }) => {
+             itemSpacing, primaryAxisAlignItems, counterAxisAlignItems, layoutWrap, strokesIncludedInLayout,
+             layoutSizingHorizontal, layoutSizingVertical }) => {
       try {
         const result = await sendCommandToFigma("set_auto_layout", {
           nodeId,
@@ -336,15 +358,25 @@ export function registerModificationTools(server: McpServer): void {
           primaryAxisAlignItems,
           counterAxisAlignItems,
           layoutWrap,
-          strokesIncludedInLayout
+          strokesIncludedInLayout,
+          layoutSizingHorizontal,
+          layoutSizingVertical
         });
 
-        const typedResult = result as { name: string };
+        const typedResult = result as {
+          name: string;
+          layoutSizingHorizontal?: string;
+          layoutSizingVertical?: string;
+        };
+        const sizing =
+          typedResult.layoutSizingHorizontal || typedResult.layoutSizingVertical
+            ? ` (width: ${typedResult.layoutSizingHorizontal}, height: ${typedResult.layoutSizingVertical})`
+            : "";
         return {
           content: [
             {
               type: "text",
-              text: `Applied auto layout to node "${typedResult.name}" with mode: ${layoutMode}`
+              text: `Applied auto layout to node "${typedResult.name}" with mode: ${layoutMode}${sizing}`
             }
           ]
         };
@@ -356,6 +388,59 @@ export function registerModificationTools(server: McpServer): void {
               text: `Error setting auto layout: ${error instanceof Error ? error.message : String(error)}`
             }
           ]
+        };
+      }
+    }
+  );
+
+  // Layout Sizing Tool — Fill container / Hug contents without touching pixels
+  server.tool(
+    "set_layout_sizing",
+    "Set how a node sizes itself along each axis: FILL (fill container), HUG (hug contents) or " +
+      "FIXED. This is the tool to reach for in responsive work — resize_node writes literal " +
+      "pixels, which pins a layer to one viewport. Use HUG for the height of anything " +
+      "content-driven (sections, containers, cards, text wrappers, content columns) and FILL for " +
+      "the width of anything flexible. FILL needs the parent to use auto layout; HUG needs the " +
+      "node itself to use auto layout (text nodes hug via auto height instead).",
+    {
+      nodeId: z.string().describe("The ID of the node to size"),
+      horizontal: z.enum(["FILL", "HUG", "FIXED"]).optional()
+        .describe("Width behaviour. FILL for flexible containers; HUG for buttons, tags and labels."),
+      vertical: z.enum(["FILL", "HUG", "FIXED"]).optional()
+        .describe("Height behaviour. HUG for anything whose height depends on its content."),
+      releaseHeightConstraints: coerceBoolean.optional()
+        .describe("When setting vertical HUG, also clear minHeight/maxHeight (default true). A leftover min/max height pins the frame even though sizing reads as Hug."),
+    },
+    async ({ nodeId, horizontal, vertical, releaseHeightConstraints }) => {
+      try {
+        const result = await sendCommandToFigma("set_layout_sizing", {
+          nodeId,
+          horizontal,
+          vertical,
+          releaseHeightConstraints,
+        });
+        const typedResult = result as {
+          name: string;
+          applied: string[];
+          constraintsCleared: boolean;
+        };
+        const cleared = typedResult.constraintsCleared ? "; cleared min/max height" : "";
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Set sizing on "${typedResult.name}": ${typedResult.applied.join(", ")}${cleared}`,
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error setting layout sizing: ${error instanceof Error ? error.message : String(error)}`,
+            },
+          ],
         };
       }
     }

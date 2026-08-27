@@ -88,6 +88,10 @@ export const SCOPE_MODIFICATION_COMMANDS = new Set([
   "rotate_node",
   "set_corner_radius",
   "set_auto_layout",
+  "set_layout_sizing",
+  "apply_variable_to_node",
+  "get_node_variable_bindings",
+  "switch_variable_mode",
   "set_effects",
   "set_effect_style_id",
   "set_text_content",
@@ -115,7 +119,6 @@ export const SCOPE_MODIFICATION_COMMANDS = new Set([
   "detach_instance",
   "set_instance_variant",
   "set_variable",
-  "apply_variable_to_node",
 ]);
 
 // ---------------------------------------------------------------------------
