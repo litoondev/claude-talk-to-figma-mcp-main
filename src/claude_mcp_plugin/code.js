@@ -83,10 +83,15 @@ const OVERLAY_FRAME_NAME = "⚡ Claude Live Activity";
 
 const activity = {
   settings: {
-    overlayEnabled: false,   // writes nodes into the document — opt-in
+    overlayEnabled: false,   // writes a status frame into the document — opt-in
     highlightEnabled: true,  // selection sync — free, no document mutation
-    followViewport: false,   // pan the canvas to follow work — can be jarring
-    cursorEnabled: false,    // synthetic multiplayer-style cursor — opt-in
+    // Only scrolls when the target is actually off-screen (see nodesInViewport),
+    // so it restores visibility without yanking the canvas around mid-edit.
+    followViewport: true,
+    // The cursor is a locked frame removed again on plugin close, so it never
+    // outlives the session. Watching the work happen is the whole point of the
+    // bridge, so it is on unless the user turns it off.
+    cursorEnabled: true,
     cursorLabel: "Claude",   // name shown in the cursor's pill
   },
   // Most recent entries, newest last. Bounded so a long session cannot grow
@@ -104,6 +109,16 @@ const activity = {
   // Ghost cursor animation handles.
   cursorAnim: null,
   cursorIdleTimer: null,
+  // In-flight cursor creation, so concurrent moves share one node.
+  cursorPending: null,
+  // Every cursor frame this session created, current page or not.
+  cursorNodes: [],
+  // Newest move wins: a slow lookup must not drag the cursor back to an
+  // element the agent has already finished with.
+  cursorMoveToken: 0,
+  // Session-cached fonts for the cursor label and the overlay.
+  overlayFonts: null,
+  overlayFontsPending: null,
 };
 
 function activityTimestamp(ts) {
@@ -172,9 +187,38 @@ function recordActivity(entry) {
  * element as the agent works on it. That is the cheapest possible "show live
  * movement on the canvas", and unlike the overlay it mutates nothing.
  */
+/** True when every node already sits inside the visible canvas area. */
+function nodesInViewport(nodes) {
+  try {
+    const view = figma.viewport.bounds;
+    if (!view) return true;
+    for (const node of nodes) {
+      const box = node.absoluteBoundingBox;
+      if (!box) continue;
+      const inside =
+        box.x >= view.x &&
+        box.y >= view.y &&
+        box.x + box.width <= view.x + view.width &&
+        box.y + box.height <= view.y + view.height;
+      if (!inside) return false;
+    }
+    return true;
+  } catch (err) {
+    // If the viewport cannot be read, assume visible rather than scrolling blind.
+    return true;
+  }
+}
+
+// Highlights are async and fire-and-forget, so a slow lookup for the *inputs*
+// of a command could otherwise land after the highlight for its *results* and
+// leave the selection pointing at the wrong thing.
+let highlightToken = 0;
+
 async function highlightNodes(nodeIds) {
   if (!activity.settings.highlightEnabled) return;
   if (!nodeIds || !nodeIds.length) return;
+
+  const token = ++highlightToken;
 
   try {
     const nodes = [];
@@ -202,9 +246,14 @@ async function highlightNodes(nodeIds) {
     }
 
     if (!nodes.length) return;
+    // A newer highlight already landed — do not drag the canvas backwards.
+    if (token !== highlightToken) return;
     figma.currentPage.selection = nodes;
 
-    if (activity.settings.followViewport) {
+    // Following the viewport unconditionally is jarring; never following it
+    // means work that happens off-screen is invisible, which is the whole
+    // complaint. Scroll only when the target is not already in view.
+    if (activity.settings.followViewport && !nodesInViewport(nodes)) {
       figma.viewport.scrollAndZoomIntoView(nodes);
     }
   } catch (err) {
@@ -213,9 +262,48 @@ async function highlightNodes(nodeIds) {
   }
 }
 
+/**
+ * Report progress *within* a running command.
+ *
+ * A command is bracketed by one "started" and one "completed" activity event,
+ * which is enough for a single-node edit but not for a chunked one: replacing
+ * text across twenty nodes showed a highlight, then nothing for several
+ * seconds, then a highlight. Calling this per item keeps the selection and the
+ * cursor moving so the work is visibly in progress.
+ */
+function reportActivityStep(nodeIds, label) {
+  const ids = (Array.isArray(nodeIds) ? nodeIds : [nodeIds]).filter(
+    (id) => typeof id === "string" && id
+  );
+  if (!ids.length) return;
+
+  highlightNodes(ids);
+
+  if (activity.settings.cursorEnabled) {
+    // Cosmetic: never let cursor movement delay or fail the command.
+    moveCursorToNode(ids, label || null).catch(() => {});
+  }
+}
+
 // ─── Canvas overlay ────────────────────────────────────────────────────────
 
 async function loadOverlayFonts() {
+  // Resolved once per session. The cursor relabels itself on every move, and
+  // re-probing font availability each time put two awaits in front of every
+  // position update.
+  if (activity.overlayFonts) return activity.overlayFonts;
+  if (activity.overlayFontsPending) return activity.overlayFontsPending;
+
+  activity.overlayFontsPending = (async () => {
+    const fonts = await resolveOverlayFonts();
+    activity.overlayFonts = fonts;
+    activity.overlayFontsPending = null;
+    return fonts;
+  })();
+  return activity.overlayFontsPending;
+}
+
+async function resolveOverlayFonts() {
   const candidates = [
     { family: "Inter", style: "Regular" },
     { family: "Roboto", style: "Regular" },
@@ -463,17 +551,51 @@ async function createCursorNode(fonts) {
 
   container.locked = true;
   container.expanded = false;
+  // Held by reference: findCursorNodes only sees the current page, and the
+  // cursor has to be removable after the user has navigated away from it.
+  activity.cursorNodes.push(container);
   return container;
 }
 
-/** Create the cursor on demand; returns null if fonts are unavailable. */
-async function ensureCursorNode() {
-  let node = findCursorNode();
-  if (node && !node.removed) return node;
+/** Every cursor node on the page — normally one, more only after a stray. */
+function findCursorNodes() {
+  const found = [];
+  for (const child of figma.currentPage.children) {
+    if (!child.removed && child.getPluginData(CURSOR_MARKER_KEY) === "1") found.push(child);
+  }
+  return found;
+}
 
-  const fonts = await loadOverlayFonts();
-  if (!fonts) return null;
-  return await createCursorNode(fonts);
+/**
+ * Create the cursor on demand; returns null if fonts are unavailable.
+ *
+ * Creation must be single-flight. Cursor moves are fired and forgotten from
+ * several places at once — a command emits one on "started" and one on
+ * "completed", and a chunked command emits one per item — so without a shared
+ * in-flight promise the first burst of work raced its way to a stack of cursor
+ * frames at the origin, each animation cancelling the one before it. That is
+ * what made the cursor look like it had stopped tracking.
+ */
+function ensureCursorNode() {
+  const existing = findCursorNode();
+  if (existing && !existing.removed) return Promise.resolve(existing);
+  if (activity.cursorPending) return activity.cursorPending;
+
+  activity.cursorPending = (async () => {
+    const fonts = await loadOverlayFonts();
+    if (!fonts) return null;
+    // Another call may have won the race while fonts were loading.
+    const raced = findCursorNode();
+    if (raced && !raced.removed) return raced;
+    return await createCursorNode(fonts);
+  })()
+    .catch(() => null)
+    .then((node) => {
+      activity.cursorPending = null;
+      return node;
+    });
+
+  return activity.cursorPending;
 }
 
 /** Update the pill text to reflect what the agent is doing right now. */
@@ -490,15 +612,19 @@ async function setCursorLabel(text) {
   const fonts = await loadOverlayFonts();
   if (!fonts) return;
 
+  if (label.characters === text) return; // nothing to redraw
+
   const wasLocked = node.locked;
   node.locked = false;
   try {
-    await figma.loadFontAsync(label.fontName);
+    await loadFontsForTextNode(label);
     label.characters = text;
   } catch (e) {
     // Font vanished mid-session; leave the previous text in place.
   } finally {
-    node.locked = wasLocked;
+    // The move animation toggles `locked` too; only restore it if we still own
+    // the node, so we never leave the cursor unlocked and selectable.
+    if (!node.removed) node.locked = wasLocked;
   }
 }
 
@@ -568,30 +694,38 @@ function animateCursorTo(node, targetX, targetY) {
 async function moveCursorToNode(nodeIds, actionLabel) {
   if (!activity.settings.cursorEnabled) return;
 
+  const token = ++activity.cursorMoveToken;
+
   try {
     const cursor = await ensureCursorNode();
     if (!cursor || cursor.removed) return;
+    // A newer move was requested while this one was still resolving.
+    if (token !== activity.cursorMoveToken) return;
+
+    // Position first, text second. Relabelling has to load a font, and doing
+    // that before the move meant the cursor sat still through the part of the
+    // command the user was watching — it only caught up once the work was done.
+    if (nodeIds && nodeIds.length) {
+      // First target that is resolvable and has geometry on this page wins.
+      for (const id of nodeIds.slice(0, 10)) {
+        const target = await figma.getNodeByIdAsync(id);
+        if (token !== activity.cursorMoveToken) return;
+        if (!target || target.removed) continue;
+        if (target.id === cursor.id) continue;
+
+        const box = target.absoluteBoundingBox;
+        if (!box) continue;
+
+        // Sit just inside the element's top-left, the way a real pointer would
+        // when someone clicks into it.
+        animateCursorTo(cursor, box.x + Math.min(24, box.width * 0.25), box.y + Math.min(24, box.height * 0.25));
+        break;
+      }
+    }
 
     if (actionLabel) {
       const base = activity.settings.cursorLabel || "Claude";
       await setCursorLabel(base + " — " + actionLabel);
-    }
-
-    if (!nodeIds || !nodeIds.length) return;
-
-    // First target that is resolvable and has geometry on this page wins.
-    for (const id of nodeIds.slice(0, 10)) {
-      const target = await figma.getNodeByIdAsync(id);
-      if (!target || target.removed) continue;
-      if (target.id === cursor.id) continue;
-
-      const box = target.absoluteBoundingBox;
-      if (!box) continue;
-
-      // Sit just inside the element's top-left, the way a real pointer would
-      // when someone clicks into it.
-      animateCursorTo(cursor, box.x + Math.min(24, box.width * 0.25), box.y + Math.min(24, box.height * 0.25));
-      break;
     }
 
     scheduleCursorIdle();
@@ -618,10 +752,20 @@ function removeCursorNode() {
     clearTimeout(activity.cursorIdleTimer);
     activity.cursorIdleTimer = null;
   }
-  const node = findCursorNode();
-  if (node && !node.removed) {
-    node.locked = false;
-    node.remove();
+  activity.cursorPending = null;
+  // Remove all of them: older builds could leave strays behind, a stray left
+  // in place would be picked up as "the" cursor on the next run, and a cursor
+  // drawn before a page switch is no longer reachable from the current page.
+  const tracked = activity.cursorNodes.splice(0, activity.cursorNodes.length);
+  const targets = findCursorNodes();
+  for (const node of tracked) {
+    if (node && !node.removed && targets.indexOf(node) === -1) targets.push(node);
+  }
+  for (const node of targets) {
+    try {
+      node.locked = false;
+      node.remove();
+    } catch (e) { /* already gone */ }
   }
 }
 
@@ -642,6 +786,7 @@ async function applyActivitySettings(next) {
 
   try {
     await figma.clientStorage.setAsync("activitySettings", activity.settings);
+    await figma.clientStorage.setAsync("activitySettingsVersion", ACTIVITY_SETTINGS_VERSION);
   } catch (e) { /* storage is best-effort */ }
 
   if (overlayBefore && !activity.settings.overlayEnabled) {
@@ -665,12 +810,34 @@ async function applyActivitySettings(next) {
   return activity.settings;
 }
 
+// Bumped when a default flips, so a stored copy of the *old* defaults cannot
+// quietly reimpose them. Anyone who ran the plugin before the live-feedback
+// defaults changed had `cursorEnabled: false` on disk, which overwrote the new
+// default on every load — the cursor stayed off no matter what the code said.
+const ACTIVITY_SETTINGS_VERSION = 2;
+
 async function loadActivitySettings() {
   try {
     const stored = await figma.clientStorage.getAsync("activitySettings");
+    const storedVersion = await figma.clientStorage.getAsync("activitySettingsVersion");
+
     if (stored && typeof stored === "object") {
-      Object.assign(activity.settings, stored);
+      if (storedVersion === ACTIVITY_SETTINGS_VERSION) {
+        Object.assign(activity.settings, stored);
+      } else {
+        // Migrating: adopt the new visibility defaults, but keep the choices
+        // that were never defaulted differently — the overlay is still opt-in,
+        // and a custom cursor name is the user's, not ours.
+        if (typeof stored.overlayEnabled === "boolean") {
+          activity.settings.overlayEnabled = stored.overlayEnabled;
+        }
+        if (typeof stored.cursorLabel === "string" && stored.cursorLabel.trim()) {
+          activity.settings.cursorLabel = stored.cursorLabel.trim().slice(0, 24);
+        }
+        await figma.clientStorage.setAsync("activitySettings", activity.settings);
+      }
     }
+    await figma.clientStorage.setAsync("activitySettingsVersion", ACTIVITY_SETTINGS_VERSION);
   } catch (e) { /* defaults are fine */ }
   figma.ui.postMessage({ type: "activity-settings", settings: activity.settings });
 }
@@ -882,6 +1049,12 @@ figma.on("run", ({ command }) => {
 // The ghost cursor is ephemeral instrumentation, not part of the design, so it
 // must not outlive the session that drew it. The overlay is deliberately left
 // in place — it is a status record the user chose to add.
+// A cursor drawn on one page would otherwise sit there forever once the user
+// navigates elsewhere. Drop it; the next command draws a fresh one in view.
+figma.on("currentpagechange", () => {
+  try { removeCursorNode(); } catch (e) { /* nothing useful to do */ }
+});
+
 figma.on("close", () => {
   try { removeCursorNode(); } catch (e) { /* nothing useful to do on teardown */ }
 });
@@ -1172,15 +1345,56 @@ async function getDocumentInfo() {
   };
 }
 
+// Walk up from a node to the page, newest ancestor last. Callers need this to
+// answer "which section is this in?" without a second round trip.
+function describeAncestors(node) {
+  const chain = [];
+  let current = node && node.parent;
+  while (current && current.type !== "DOCUMENT") {
+    chain.unshift({ id: current.id, name: current.name, type: current.type });
+    if (current.type === "PAGE") break;
+    current = current.parent;
+  }
+  return chain;
+}
+
 async function getSelection() {
-  return {
-    selectionCount: figma.currentPage.selection.length,
-    selection: figma.currentPage.selection.map((node) => ({
+  const selection = figma.currentPage.selection.map((node) => {
+    const ancestors = describeAncestors(node);
+    // The section the user is actually working in — the node itself if they
+    // selected the section, otherwise the nearest section above it.
+    const enclosingSection =
+      node.type === "SECTION"
+        ? { id: node.id, name: node.name }
+        : (() => {
+            for (let i = ancestors.length - 1; i >= 0; i--) {
+              if (ancestors[i].type === "SECTION") {
+                return { id: ancestors[i].id, name: ancestors[i].name };
+              }
+            }
+            return null;
+          })();
+
+    return {
       id: node.id,
       name: node.name,
       type: node.type,
       visible: node.visible,
-    })),
+      width: "width" in node ? Math.round(node.width) : undefined,
+      height: "height" in node ? Math.round(node.height) : undefined,
+      childCount: "children" in node ? node.children.length : 0,
+      characters: node.type === "TEXT" ? node.characters : undefined,
+      // Full path so the caller can name the target back to the user exactly.
+      path: ancestors.map((a) => a.name).join(" > "),
+      ancestors,
+      enclosingSection,
+    };
+  });
+
+  return {
+    selectionCount: selection.length,
+    page: { id: figma.currentPage.id, name: figma.currentPage.name },
+    selection,
   };
 }
 
@@ -1503,7 +1717,7 @@ async function createText(params) {
     fontSize: textNode.fontSize,
     fontWeight: fontWeight,
     fontColor: fontColor,
-    fontName: textNode.fontName,
+    fontName: safeFontName(textNode),
     fills: textNode.fills,
     parentId: textNode.parent ? textNode.parent.id : undefined,
   };
@@ -5296,6 +5510,104 @@ async function setCornerRadius(params) {
   };
 }
 
+// ── Text node helpers ───────────────────────────────────────────────────────
+// figma.mixed is a Symbol. Handing it to a plugin API call — or letting it into
+// a postMessage payload — throws "Cannot unwrap symbol", which is why writes to
+// multi-style text nodes failed. Load every font the node actually uses.
+// Accepts a TextNode or a TextSublayer (sticky / shape-with-text).
+async function loadFontsForTextNode(target) {
+  if (!target || !("fontName" in target)) return;
+  if (target.fontName !== figma.mixed) {
+    await figma.loadFontAsync({
+      family: target.fontName.family,
+      style: target.fontName.style,
+    });
+    return;
+  }
+  const seen = new Set();
+  for (const segment of target.getStyledTextSegments(["fontName"])) {
+    const key = `${segment.fontName.family}|${segment.fontName.style}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    await figma.loadFontAsync(segment.fontName);
+  }
+}
+
+// Never let figma.mixed reach the socket — a Symbol cannot be cloned.
+function safeFontName(node) {
+  if (!node || !("fontName" in node)) return null;
+  const fontName = node.fontName;
+  if (fontName === figma.mixed) return "mixed";
+  return fontName ? { family: fontName.family, style: fontName.style } : null;
+}
+
+// Assigning node.characters collapses every per-character style — fill, size,
+// weight, spacing — onto the first segment's style. That is why editing a price
+// like "$8.5K one-time" silently repainted the whole string one color. Capture
+// the segments before the write and replay them over the new string.
+const PRESERVED_TEXT_PROPS = [
+  "fontName",
+  "fontSize",
+  "fills",
+  "fillStyleId",
+  "textCase",
+  "textDecoration",
+  "letterSpacing",
+  "lineHeight",
+];
+
+function captureTextSegments(node) {
+  try {
+    const segments = node.getStyledTextSegments(PRESERVED_TEXT_PROPS);
+    // A single segment means uniform styling — Figma preserves that on its own.
+    return segments.length > 1 ? segments : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+async function restoreTextSegments(node, segments, previousLength) {
+  if (!segments || !segments.length || !previousLength) return false;
+  const length = node.characters.length;
+  if (!length) return false;
+
+  // Same length: replay the ranges verbatim. Different length: scale them, so a
+  // "$8.5K one-time" → "$22K one-time" edit keeps the bold amount bold.
+  const map = (index) =>
+    length === previousLength
+      ? Math.min(index, length)
+      : Math.min(Math.round((index / previousLength) * length), length);
+
+  for (const segment of segments) {
+    const start = map(segment.start);
+    // The final segment absorbs any trailing characters the mapping rounds off.
+    const end = segment.end >= previousLength ? length : map(segment.end);
+    if (end <= start) continue;
+    try {
+      await figma.loadFontAsync(segment.fontName);
+      node.setRangeFontName(start, end, segment.fontName);
+      node.setRangeFontSize(start, end, segment.fontSize);
+      node.setRangeTextCase(start, end, segment.textCase);
+      node.setRangeTextDecoration(start, end, segment.textDecoration);
+      node.setRangeLetterSpacing(start, end, segment.letterSpacing);
+      node.setRangeLineHeight(start, end, segment.lineHeight);
+      // A bound fill style outranks raw fills; restoring both would drop the
+      // style link and hard-code the color.
+      if (segment.fillStyleId) {
+        node.setRangeFillStyleId(start, end, segment.fillStyleId);
+      } else if (segment.fills) {
+        node.setRangeFills(start, end, segment.fills);
+      }
+    } catch (err) {
+      console.warn(
+        `Could not restore styling for range ${start}-${end} on "${node.name}":`,
+        err && err.message
+      );
+    }
+  }
+  return true;
+}
+
 async function setTextContent(params) {
   const { nodeId, text } = params || {};
 
@@ -5317,15 +5629,25 @@ async function setTextContent(params) {
   }
 
   try {
-    await figma.loadFontAsync(node.fontName);
+    await loadFontsForTextNode(node);
+
+    const previousLength = node.characters.length;
+    const segments = captureTextSegments(node);
 
     await setCharacters(node, text);
+
+    const stylingPreserved = await restoreTextSegments(
+      node,
+      segments,
+      previousLength
+    );
 
     return {
       id: node.id,
       name: node.name,
       characters: node.characters,
-      fontName: node.fontName,
+      fontName: safeFontName(node),
+      stylingPreserved,
     };
   } catch (error) {
     throw new Error(`Error setting text content: ${error.message}`);
@@ -5900,29 +6222,11 @@ async function processTextNode(node, parentPath, depth) {
       depth: depth,
     };
 
-    // Highlight the node briefly (optional visual feedback)
-    try {
-      const originalFills = JSON.parse(JSON.stringify(node.fills));
-      node.fills = [
-        {
-          type: "SOLID",
-          color: { r: 1, g: 0.5, b: 0 },
-          opacity: 0.3,
-        },
-      ];
-
-      // Brief delay for the highlight to be visible
-      await delay(100);
-
-      try {
-        node.fills = originalFills;
-      } catch (err) {
-        console.error("Error resetting fills:", err);
-      }
-    } catch (highlightErr) {
-      console.error("Error highlighting text node:", highlightErr);
-      // Continue anyway, highlighting is just visual feedback
-    }
+    // Scanning is read-only. The old orange-fill "highlight" repainted every
+    // text node and restored it from a JSON copy — which dropped bound colour
+    // variables and left nodes orange whenever the restore never ran.
+    // Selection highlighting (highlightNodes) gives the same feedback without
+    // touching the document.
 
     return safeTextNode;
   } catch (nodeErr) {
@@ -5974,30 +6278,7 @@ async function findTextNodes(node, parentPath = [], depth = 0, textNodes = []) {
         depth: depth,
       };
 
-      // Only highlight the node if it's not being done via API
-      try {
-        // Safe way to create a temporary highlight without causing serialization issues
-        const originalFills = JSON.parse(JSON.stringify(node.fills));
-        node.fills = [
-          {
-            type: "SOLID",
-            color: { r: 1, g: 0.5, b: 0 },
-            opacity: 0.3,
-          },
-        ];
-
-        // Promise-based delay instead of setTimeout
-        await delay(500);
-
-        try {
-          node.fills = originalFills;
-        } catch (err) {
-          console.error("Error resetting fills:", err);
-        }
-      } catch (highlightErr) {
-        console.error("Error highlighting text node:", highlightErr);
-        // Continue anyway, highlighting is just visual feedback
-      }
+      // Read-only: no fill mutation here. See processTextNode.
 
       textNodes.push(safeTextNode);
     } catch (nodeErr) {
@@ -6146,40 +6427,19 @@ async function setMultipleTextContents(params) {
         console.log(`Original text: "${originalText}"`);
         console.log(`Will translate to: "${replacement.text}"`);
 
-        // Highlight the node before changing text
-        let originalFills;
-        try {
-          // Save original fills for restoration later
-          originalFills = JSON.parse(JSON.stringify(textNode.fills));
-          // Apply highlight color (orange with 30% opacity)
-          textNode.fills = [
-            {
-              type: "SOLID",
-              color: { r: 1, g: 0.5, b: 0 },
-              opacity: 0.3,
-            },
-          ];
-        } catch (highlightErr) {
-          console.error(`Error highlighting text node: ${highlightErr.message}`);
-          // Continue anyway, highlighting is just visual feedback
-        }
+        // Move the selection and cursor onto this node before writing it, so a
+        // long batch reads as continuous progress rather than a frozen canvas.
+        reportActivityStep(replacement.nodeId, "Updating text");
 
-        // Use the existing setTextContent function to handle font loading and text setting
+        // No fill mutation: the previous orange "highlight" was applied before
+        // the write and restored after it, so any failed write (a mixed-font
+        // node, a timeout, a closed plugin) left the text stranded orange —
+        // and the JSON round-trip dropped bound colour variables even when it
+        // succeeded. Text writes now leave colour alone.
         await setTextContent({
           nodeId: replacement.nodeId,
           text: replacement.text
         });
-
-        // Keep highlight for a moment after text change, then restore original fills
-        if (originalFills) {
-          try {
-            // Use delay function for consistent timing
-            await delay(500);
-            textNode.fills = originalFills;
-          } catch (restoreErr) {
-            console.error(`Error restoring fills: ${restoreErr.message}`);
-          }
-        }
 
         console.log(`Successfully replaced text in node: ${replacement.nodeId}`);
         return {
@@ -6502,7 +6762,7 @@ async function setFontName(params) {
     return {
       id: node.id,
       name: node.name,
-      fontName: node.fontName
+      fontName: safeFontName(node)
     };
   } catch (error) {
     throw new Error(`Error setting font name: ${error.message}`);
@@ -6525,7 +6785,7 @@ async function setFontSize(params) {
   }
 
   try {
-    await figma.loadFontAsync(node.fontName);
+    await loadFontsForTextNode(node);
     node.fontSize = fontSize;
     return {
       id: node.id,
@@ -6569,14 +6829,18 @@ async function setFontWeight(params) {
   }
 
   try {
-    const family = node.fontName.family;
+    // A mixed-font node has no single family — fall back to the first segment.
+    const family =
+      node.fontName === figma.mixed
+        ? node.getStyledTextSegments(["fontName"])[0].fontName.family
+        : node.fontName.family;
     const style = getFontStyle(weight);
     await figma.loadFontAsync({ family, style });
     node.fontName = { family, style };
     return {
       id: node.id,
       name: node.name,
-      fontName: node.fontName,
+      fontName: safeFontName(node),
       weight: weight
     };
   } catch (error) {
@@ -6600,7 +6864,7 @@ async function setLetterSpacing(params) {
   }
 
   try {
-    await figma.loadFontAsync(node.fontName);
+    await loadFontsForTextNode(node);
     node.letterSpacing = { value: letterSpacing, unit };
     return {
       id: node.id,
@@ -6628,7 +6892,7 @@ async function setLineHeight(params) {
   }
 
   try {
-    await figma.loadFontAsync(node.fontName);
+    await loadFontsForTextNode(node);
     node.lineHeight = { value: lineHeight, unit };
     return {
       id: node.id,
@@ -6656,7 +6920,7 @@ async function setParagraphSpacing(params) {
   }
 
   try {
-    await figma.loadFontAsync(node.fontName);
+    await loadFontsForTextNode(node);
     node.paragraphSpacing = paragraphSpacing;
     return {
       id: node.id,
@@ -6689,7 +6953,7 @@ async function setTextCase(params) {
   }
 
   try {
-    await figma.loadFontAsync(node.fontName);
+    await loadFontsForTextNode(node);
     node.textCase = textCase;
     return {
       id: node.id,
@@ -6722,7 +6986,7 @@ async function setTextDecoration(params) {
   }
 
   try {
-    await figma.loadFontAsync(node.fontName);
+    await loadFontsForTextNode(node);
     node.textDecoration = textDecoration;
     return {
       id: node.id,
@@ -6765,7 +7029,7 @@ async function setTextAlign(params) {
   }
 
   try {
-    await figma.loadFontAsync(node.fontName);
+    await loadFontsForTextNode(node);
     if (textAlignHorizontal) {
       node.textAlignHorizontal = textAlignHorizontal;
     }
@@ -10596,7 +10860,7 @@ async function createSticky(params) {
       }
     }
     if (text) {
-      await figma.loadFontAsync(sticky.text.fontName);
+      await loadFontsForTextNode(sticky.text);
       sticky.text.characters = text;
     }
   } catch (propErr) {
@@ -10642,7 +10906,7 @@ async function setStickyText(params) {
     throw new Error(`Node ${nodeId} is not a sticky note (type: ${node.type})`);
   }
 
-  await figma.loadFontAsync(node.text.fontName);
+  await loadFontsForTextNode(node.text);
   node.text.characters = text;
 
   return {
@@ -10700,7 +10964,7 @@ async function createShapeWithText(params) {
 
   // Set text via the text sub-layer
   if (text) {
-    await figma.loadFontAsync(shape.text.fontName);
+    await loadFontsForTextNode(shape.text);
     shape.text.characters = text;
   }
 
@@ -11551,7 +11815,7 @@ async function fixTextSizing(params) {
       // Load font before mutating
       try {
         if (node.fontName && typeof node.fontName === "object" && "family" in node.fontName) {
-          await figma.loadFontAsync(node.fontName);
+          await loadFontsForTextNode(node);
         } else if (node.fontName === figma.mixed) {
           const ranges = node.getStyledTextSegments(["fontName"]);
           const seen = new Set();

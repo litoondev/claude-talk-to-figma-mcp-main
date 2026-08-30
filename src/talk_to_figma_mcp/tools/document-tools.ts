@@ -41,7 +41,17 @@ export function registerDocumentTools(server: McpServer): void {
   // Selection Tool
   server.tool(
     "get_selection",
-    "Get information about the current selection in Figma",
+    "Read what the user currently has selected in Figma, with each node's full " +
+      "ancestor path and its enclosing SECTION. " +
+      "CALL THIS FIRST — before asking any clarifying question — whenever the user " +
+      "refers to their selection rather than naming a node: 'the selected section', " +
+      "'this frame', 'these cards', 'update this', 'the one I picked', 'here', " +
+      "'current', or any bare 'it'/'that' pointing at the canvas. " +
+      "The selection is the answer to 'which one?', so do not ask the user to choose " +
+      "between sections, frames, or components while something is selected — read it. " +
+      "Only ask when this returns selectionCount 0, or when the selection genuinely " +
+      "cannot satisfy the request (for example they asked about a section and neither " +
+      "the selected node nor any of its ancestors is one).",
     {},
     async () => {
       try {

@@ -223,11 +223,14 @@ export function registerActivityTools(server: McpServer): void {
       "to anyone else with the file open. 'cursorEnabled' draws a moving cursor with a name " +
       "label that travels to each element as it is worked on — the closest thing to watching " +
       "a human collaborator, and the best option when someone asks to *see* the agent work. " +
+      "It is on by default and removed again when the plugin closes. " +
       "'overlayEnabled' writes a locked status card showing the current action and recent " +
-      "history. Both add nodes to the document and appear in version history, so both are " +
-      "off by default. 'highlightEnabled' selects each node as it changes, which collaborators " +
-      "see as moving selection outlines and which modifies nothing. 'followViewport' pans the " +
-      "canvas to follow each change. Requires the Figma plugin to be connected.",
+      "history; it persists in the document and in version history, so it stays off by " +
+      "default. 'highlightEnabled' selects each node as it changes, which collaborators " +
+      "see as moving selection outlines and which modifies nothing. 'followViewport' scrolls " +
+      "the canvas to work that is off-screen, leaving it alone when the target is already " +
+      "visible. Use this tool to turn the live feedback *off* for a silent run, or to rename " +
+      "the cursor — the visible defaults need no setup. Requires the Figma plugin to be connected.",
     {
       cursorEnabled: z
         .boolean()
@@ -235,8 +238,8 @@ export function registerActivityTools(server: McpServer): void {
         .describe(
           "Draw a synthetic multiplayer-style cursor that moves to each element as it is " +
             "edited, labelled with the action in progress. Visible to every collaborator. " +
-            "Adds a node to the document; removed automatically when the plugin closes. " +
-            "Default off."
+            "Adds a locked node to the document; removed automatically when the plugin " +
+            "closes, so it never outlives the session. Default on."
         ),
       cursorLabel: z
         .string()
@@ -263,8 +266,9 @@ export function registerActivityTools(server: McpServer): void {
         .boolean()
         .optional()
         .describe(
-          "Pan and zoom the canvas to follow each change. Can be disorienting if a " +
-            "human is working in the same file. Default off."
+          "Scroll the canvas to a change that is off-screen, so work is never invisible. " +
+            "Nodes already in view are left alone, so the canvas does not jump around " +
+            "during an edit. Default on; turn off if a human is navigating the same file."
         ),
     },
     async ({ cursorEnabled, cursorLabel, overlayEnabled, highlightEnabled, followViewport }) => {
