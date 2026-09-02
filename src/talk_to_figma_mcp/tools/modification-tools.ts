@@ -1000,10 +1000,19 @@ export function registerModificationTools(server: McpServer): void {
   // Rename Node Tool
   server.tool(
     "rename_node",
-    "Rename a node (frame, component, group, etc.) in Figma",
+    "Rename a node (frame, component, group, etc.) in Figma. " +
+      "MANDATORY: If the user asks to rename layers, groups, or selections without providing explicit names, " +
+      "NEVER ask the user 'What would you like to rename it to?'. Instead, act autonomously: inspect the node " +
+      "and children (using get_nodes_info or export_node_as_image) to deduce professional frontend semantic names " +
+      "(Prefix-DescriptiveName in PascalCase, e.g. Heading-Title, Btn-Primary, Card-Product, Wrapper-Content), " +
+      "and rename immediately. For multiple layers or full groups, batch renames using figma_batch.",
     {
       nodeId: z.string().describe("The ID of the node to rename"),
-      name: z.string().describe("The new name for the node"),
+      name: z
+        .string()
+        .describe(
+          "The new name for the node. Use semantic PascalCase with prefix (e.g. Prefix-DescriptiveName) when choosing autonomously."
+        ),
     },
     async ({ nodeId, name }) => {
       try {

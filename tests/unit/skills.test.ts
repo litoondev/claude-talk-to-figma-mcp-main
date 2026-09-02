@@ -28,6 +28,12 @@ import {
 } from "../../src/talk_to_figma_mcp/skills/health";
 import type { Skill } from "../../src/talk_to_figma_mcp/skills/types";
 
+jest.mock("../../src/talk_to_figma_mcp/utils/websocket", () => ({
+  sendCommandToFigma: jest.fn().mockResolvedValue({ status: "ok" }),
+  joinChannel: jest.fn().mockResolvedValue(undefined),
+  connectToFigma: jest.fn(),
+}));
+
 const TOOLS = new Set([
   "get_selection",
   "get_node_info",
@@ -379,9 +385,61 @@ describe("skill discoverability", () => {
     for (const phrasing of [
       "rename the layer, that i selected",
       "selected full group of layer need to rename",
+      "selected full group of laywer need to rename",
+      "rename layer",
+      "rename the layer",
+      "rename group",
       "clean up these layer names for handoff",
     ]) {
       expect(findSkills(phrasing).map((s: any) => s.id)).toContain("Layer_Rename_v1");
+    }
+  });
+
+  it("instructs the model in server instructions to never ask what to rename layers to", () => {
+    const { SERVER_INSTRUCTIONS } = require("../../src/talk_to_figma_mcp/config/instructions");
+    expect(SERVER_INSTRUCTIONS).toContain("Autonomous Layer Renaming");
+    expect(SERVER_INSTRUCTIONS).toMatch(/NEVER ask the user "What would you like to rename it to\?"/i);
+    expect(SERVER_INSTRUCTIONS).toContain("Prefix-DescriptiveName");
+  });
+
+  it("forbids asking what to rename layers to in rename_node tool description", () => {
+    const { registerModificationTools } = require("../../src/talk_to_figma_mcp/tools/modification-tools");
+    const mockServer = {
+      tool: jest.fn(),
+    };
+    registerModificationTools(mockServer as any);
+    const renameCall = mockServer.tool.mock.calls.find((call: any[]) => call[0] === "rename_node");
+    expect(renameCall).toBeDefined();
+    const description = renameCall[1];
+    expect(description).toMatch(/NEVER ask the user 'What would you like to rename it to\?'/i);
+    expect(description).toContain("Prefix-DescriptiveName");
+  });
+
+  it("instructs the model in get_selection description and response when items are selected", async () => {
+    const { registerDocumentTools } = require("../../src/talk_to_figma_mcp/tools/document-tools");
+    const tools: Record<string, any> = {};
+    const mockServer = {
+      tool: (name: string, desc: string, schema: any, handler: any) => {
+        tools[name] = { desc, handler };
+      },
+    };
+    registerDocumentTools(mockServer as any);
+    expect(tools["get_selection"]).toBeDefined();
+    expect(tools["get_selection"].desc).toMatch(/do NOT ask what to name them/i);
+
+    // Mock sendCommandToFigma to verify response format
+    const ws = require("../../src/talk_to_figma_mcp/utils/websocket");
+    const origSend = ws.sendCommandToFigma;
+    try {
+      ws.sendCommandToFigma = jest.fn().mockResolvedValue({
+        selectionCount: 1,
+        selection: [{ id: "197:0", name: "Group 197", type: "GROUP", childCount: 7 }],
+      });
+      const res = await tools["get_selection"].handler();
+      expect(res.content[0].text).toContain("Workflow Directive");
+      expect(res.content[0].text).toMatch(/NEVER ask the user what to name them/i);
+    } finally {
+      ws.sendCommandToFigma = origSend;
     }
   });
 });

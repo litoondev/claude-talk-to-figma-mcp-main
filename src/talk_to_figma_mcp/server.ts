@@ -25,13 +25,19 @@ import { registerPrompts } from "./prompts";
 // Skill repository — see skills/registry.ts
 import { registerSkillPrompts, runHealthPass } from "./skills/integration";
 
+// System instructions for Claude Desktop
+import { SERVER_INSTRUCTIONS } from "./config/instructions";
+export { SERVER_INSTRUCTIONS };
+
 /**
  * Initialize and start the MCP server
  */
 async function main() {
   try {
-    // Create MCP server instance with configuration
-    const server = new McpServer(SERVER_CONFIG);
+    // Create MCP server instance with configuration and instructions
+    const server = new McpServer(SERVER_CONFIG, {
+      instructions: SERVER_INSTRUCTIONS,
+    });
     
     // Register all tools with the server
     registerTools(server);

@@ -12,6 +12,12 @@ description: >
   "rename". Acts autonomously without asking the user for naming preferences.
 triggers:
   - rename layers
+  - rename layer
+  - rename the layer
+  - rename selected
+  - rename selected layer
+  - rename group
+  - rename the group
   - clean up figma layers
   - organize layer names
   - apply naming conventions

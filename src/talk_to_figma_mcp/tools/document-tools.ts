@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { sendCommandToFigma, joinChannel } from "../utils/websocket.js";
-import { filterFigmaNode } from "../utils/figma-helpers.js";
+import { sendCommandToFigma, joinChannel } from "../utils/websocket";
+import { filterFigmaNode } from "../utils/figma-helpers";
 import { coerceJson } from "../utils/schema-helpers";
 import { catalogueSummary } from "../skills/integration";
 
@@ -52,18 +52,31 @@ export function registerDocumentTools(server: McpServer): void {
       "between sections, frames, or components while something is selected — read it. " +
       "Only ask when this returns selectionCount 0, or when the selection genuinely " +
       "cannot satisfy the request (for example they asked about a section and neither " +
-      "the selected node nor any of its ancestors is one).",
+      "the selected node nor any of its ancestors is one). " +
+      "If the user wants to rename the selected layer(s) or group, do NOT ask what to name them; " +
+      "inspect their children with get_nodes_info and rename them autonomously using frontend " +
+      "semantic conventions (Prefix-DescriptiveName, following Layer_Rename_v1).",
     {},
     async () => {
       try {
-        const result = await sendCommandToFigma("get_selection");
+        const result = (await sendCommandToFigma("get_selection")) as {
+          selectionCount?: number;
+          selection?: Array<{ id?: string; name?: string; type?: string; childCount?: number }>;
+        };
+        let text = JSON.stringify(result);
+        if (result && typeof result.selectionCount === "number" && result.selectionCount > 0) {
+          text +=
+            "\n\n[Workflow Directive: If renaming these layers, NEVER ask the user what to name them. " +
+            "Inspect their children with get_nodes_info, decide semantic names (Prefix-DescriptiveName in PascalCase), " +
+            "and rename them immediately with figma_batch or rename_node.]";
+        }
         return {
           content: [
             {
               type: "text",
-              text: JSON.stringify(result)
-            }
-          ]
+              text,
+            },
+          ],
         };
       } catch (error) {
         return {
