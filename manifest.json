@@ -23,6 +23,13 @@
     ]
   },
   "user_config": {
+    "figma_tool_profile": {
+      "type": "string",
+      "title": "Tool profile",
+      "description": "How many tools to advertise to the model. The tool list is re-sent on every request, so a smaller profile costs fewer tokens per message and leaves more context for the design. 'core' (~48 tools) covers layout, text, colour, variables and the responsive workflow. 'standard' (~87 tools, default) adds everything except FigJam, REST comments and activity tracking. 'full' advertises all 115. Nothing is ever lost: a withheld tool is still callable through figma_batch.",
+      "default": "standard",
+      "required": false
+    },
     "figma_access_token": {
       "type": "string",
       "title": "Figma personal access token",
@@ -38,6 +45,15 @@
       "min": 1,
       "max": 10,
       "required": false
+    },
+    "figma_max_response_chars": {
+      "type": "number",
+      "title": "Maximum tool response size (characters)",
+      "description": "Hard ceiling on how much text one tool call may return. Oversized results are truncated with a note telling the model to narrow the query, so a single deep node read cannot flood the context window. ~24000 characters is roughly 6000 tokens.",
+      "default": 24000,
+      "min": 2000,
+      "max": 200000,
+      "required": false
     }
   },
   "server": {
@@ -51,7 +67,9 @@
       "env": {
         "NODE_ENV": "production",
         "FIGMA_ACCESS_TOKEN": "${user_config.figma_access_token}",
-        "FIGMA_API_CONCURRENCY": "${user_config.figma_api_concurrency}"
+        "FIGMA_API_CONCURRENCY": "${user_config.figma_api_concurrency}",
+        "FIGMA_MCP_PROFILE": "${user_config.figma_tool_profile}",
+        "FIGMA_MCP_MAX_RESPONSE_CHARS": "${user_config.figma_max_response_chars}"
       }
     }
   },

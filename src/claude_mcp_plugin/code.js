@@ -2115,9 +2115,9 @@ async function getDesignSystem(params) {
 // what it *is*. Nothing here rewrites copy, swaps colours, or restyles.
 
 const RESPONSIVE_PRESETS = {
-  desktop: { key: "desktop", label: "Desktop", width: 1440, sidePadding: 72, maxContent: 1240 },
-  tablet: { key: "tablet", label: "Tablet", width: 768, sidePadding: 30, maxContent: 708 },
-  mobile: { key: "mobile", label: "Mobile", width: 320, sidePadding: 16, maxContent: 288 },
+  desktop: { key: "desktop", label: "Desktop", width: 1440, sidePadding: 80, maxContent: 1280 },
+  tablet: { key: "tablet", label: "Tablet", width: 768, sidePadding: 40, maxContent: 688 },
+  mobile: { key: "mobile", label: "Mobile", width: 320, sidePadding: 20, maxContent: 280 },
 };
 
 // 320 is the default mobile *design* frame. Both widths are always used for QA
@@ -2126,9 +2126,9 @@ const QA_WIDTHS = [390, 320];
 
 // Section spacing envelopes, used only when the file defines no spacing tokens.
 const SECTION_SPACING_FALLBACK = {
-  desktop: { min: 96, max: 128 },
-  tablet: { min: 72, max: 96 },
-  mobile: { min: 48, max: 72 },
+  desktop: { min: 80, max: 120 },
+  tablet: { min: 40, max: 60 },
+  mobile: { min: 24, max: 40 },
 };
 
 // Tokens that mark a text style as belonging to a breakpoint, so that
@@ -2491,19 +2491,58 @@ function scaleSpacing(value, factor, floor) {
   return Math.max(floor === undefined ? 0 : floor, Math.round(value * factor));
 }
 
-function applyPaddingScale(node, factor, sidePadding) {
+function hasBoundVar(node, field) {
+  try { return !!(node.boundVariables && node.boundVariables[field]); }
+  catch (_) { return false; }
+}
+
+function applyPaddingScale(node, factor, sidePadding, depth) {
   if (!isAutoLayout(node)) return;
-  // Horizontal padding is pinned to the breakpoint's container rule; vertical
-  // padding scales, because vertical rhythm is proportional but gutters are not.
-  if (typeof sidePadding === "number") {
-    if (node.paddingLeft > 0) node.paddingLeft = Math.min(node.paddingLeft, sidePadding);
-    if (node.paddingRight > 0) node.paddingRight = Math.min(node.paddingRight, sidePadding);
+  depth = depth || 0;
+
+  if (depth === 0) {
+    // Section level: preserve variable-bound padding; only scale unbound values.
+    if (typeof sidePadding === "number") {
+      if (!hasBoundVar(node, "paddingLeft") && node.paddingLeft > 0)
+        node.paddingLeft = Math.min(node.paddingLeft, sidePadding);
+      if (!hasBoundVar(node, "paddingRight") && node.paddingRight > 0)
+        node.paddingRight = Math.min(node.paddingRight, sidePadding);
+    } else {
+      if (!hasBoundVar(node, "paddingLeft"))
+        node.paddingLeft = scaleSpacing(node.paddingLeft, factor, 0);
+      if (!hasBoundVar(node, "paddingRight"))
+        node.paddingRight = scaleSpacing(node.paddingRight, factor, 0);
+    }
+    if (!hasBoundVar(node, "paddingTop"))
+      node.paddingTop = scaleSpacing(node.paddingTop, factor, 0);
+    if (!hasBoundVar(node, "paddingBottom"))
+      node.paddingBottom = scaleSpacing(node.paddingBottom, factor, 0);
   } else {
-    node.paddingLeft = scaleSpacing(node.paddingLeft, factor, 0);
-    node.paddingRight = scaleSpacing(node.paddingRight, factor, 0);
+    // Inner layers: zero out padding to prevent compound/stacked padding.
+    if (!hasBoundVar(node, "paddingLeft")) node.paddingLeft = 0;
+    if (!hasBoundVar(node, "paddingRight")) node.paddingRight = 0;
+    if (!hasBoundVar(node, "paddingTop")) node.paddingTop = 0;
+    if (!hasBoundVar(node, "paddingBottom")) node.paddingBottom = 0;
   }
-  node.paddingTop = scaleSpacing(node.paddingTop, factor, 0);
-  node.paddingBottom = scaleSpacing(node.paddingBottom, factor, 0);
+
+  // Recurse into children so deeply nested frames also get fixed.
+  if (isContainer(node)) {
+    for (const c of node.children) {
+      applyPaddingScale(c, factor, sidePadding, depth + 1);
+    }
+  }
+}
+
+function applyGapScale(node, factor) {
+  if (!isAutoLayout(node)) return;
+  if (typeof node.itemSpacing === "number" && !hasBoundVar(node, "itemSpacing")) {
+    node.itemSpacing = scaleSpacing(node.itemSpacing, factor, 8);
+  }
+  if (isContainer(node)) {
+    for (const c of node.children) {
+      applyGapScale(c, factor);
+    }
+  }
 }
 
 // ─── Typography: resolve against the file's own text styles ────────────────
@@ -2570,6 +2609,115 @@ async function buildTextStyleIndex() {
     index.total++;
   }
   return index;
+}
+
+// ─── Typography Lock ──────────────────────────────────────────────────────
+//
+// Typography MUST be identical across every breakpoint. The snapshot/restore
+// pair guarantees this regardless of any side-effects from layout adaptation,
+// Figma font substitution, or any future code path that might touch text.
+
+function snapshotTextNodes(root) {
+  var snap = [];
+  var walk = function (n, depth) {
+    if (!n || depth > 20) return;
+    if (n.type === "TEXT") {
+      try {
+        snap.push({
+          fontSize: n.fontSize,
+          fontName: n.fontName,
+          lineHeight: n.lineHeight,
+          letterSpacing: n.letterSpacing,
+          textStyleId: n.textStyleId,
+          textDecoration: n.textDecoration,
+          textCase: n.textCase,
+          paragraphSpacing: n.paragraphSpacing,
+          characters: n.characters,
+        });
+      } catch (_) {
+        snap.push(null);
+      }
+    }
+    if (n.children) {
+      for (var i = 0; i < n.children.length; i++) walk(n.children[i], depth + 1);
+    }
+  };
+  walk(root, 0);
+  return snap;
+}
+
+async function restoreTypography(root, snapshot) {
+  var restored = 0;
+  var nodes = [];
+  var collectTexts = function (n, depth) {
+    if (!n || depth > 20 || n.removed) return;
+    if (n.type === "TEXT") nodes.push(n);
+    if (n.children) {
+      for (var i = 0; i < n.children.length; i++) collectTexts(n.children[i], depth + 1);
+    }
+  };
+  collectTexts(root, 0);
+
+  for (var ti = 0; ti < nodes.length && ti < snapshot.length; ti++) {
+    var n = nodes[ti];
+    var s = snapshot[ti];
+    if (!s) continue;
+    try {
+      // Check if any resolved font property drifted from the snapshot.
+      var fontDrifted = false;
+      var sizeDrifted = false;
+      var weightDrifted = false;
+
+      if (s.fontSize !== figma.mixed && n.fontSize !== figma.mixed && n.fontSize !== s.fontSize) {
+        sizeDrifted = true;
+        fontDrifted = true;
+      }
+      if (s.fontName && s.fontName !== figma.mixed && n.fontName !== figma.mixed) {
+        if (!n.fontName || n.fontName.family !== s.fontName.family || n.fontName.style !== s.fontName.style) {
+          weightDrifted = true;
+          fontDrifted = true;
+        }
+      }
+      if (s.lineHeight && s.lineHeight !== figma.mixed && n.lineHeight !== figma.mixed) {
+        var nlh = n.lineHeight, slh = s.lineHeight;
+        if (nlh && slh && (nlh.unit !== slh.unit || nlh.value !== slh.value)) fontDrifted = true;
+      }
+      if (s.letterSpacing && s.letterSpacing !== figma.mixed && n.letterSpacing !== figma.mixed) {
+        var nls = n.letterSpacing, sls = s.letterSpacing;
+        if (nls && sls && (nls.unit !== sls.unit || nls.value !== sls.value)) fontDrifted = true;
+      }
+
+      if (!fontDrifted) continue;
+
+      // Typography drifted — force desktop values back. If the node has a
+      // textStyleId, the style's variable modes caused the drift. We must
+      // detach the style and set raw desktop values to keep typography
+      // identical across breakpoints.
+      if (n.textStyleId && n.textStyleId !== "" && n.textStyleId !== figma.mixed) {
+        n.textStyleId = "";
+      }
+
+      // Load and restore fontName first (required before setting fontSize).
+      if (s.fontName && s.fontName !== figma.mixed) {
+        await figma.loadFontAsync(s.fontName);
+        if (weightDrifted) n.fontName = s.fontName;
+      }
+      if (sizeDrifted && s.fontSize !== figma.mixed) n.fontSize = s.fontSize;
+      if (s.lineHeight && s.lineHeight !== figma.mixed) {
+        var nlh2 = n.lineHeight, slh2 = s.lineHeight;
+        if (nlh2 && slh2 && (nlh2.unit !== slh2.unit || nlh2.value !== slh2.value)) n.lineHeight = s.lineHeight;
+      }
+      if (s.letterSpacing && s.letterSpacing !== figma.mixed) {
+        var nls2 = n.letterSpacing, sls2 = s.letterSpacing;
+        if (nls2 && sls2 && (nls2.unit !== sls2.unit || nls2.value !== sls2.value)) n.letterSpacing = s.letterSpacing;
+      }
+      if (s.textDecoration !== undefined && s.textDecoration !== figma.mixed && n.textDecoration !== s.textDecoration) n.textDecoration = s.textDecoration;
+      if (s.textCase !== undefined && s.textCase !== figma.mixed && n.textCase !== s.textCase) n.textCase = s.textCase;
+      if (typeof s.paragraphSpacing === "number" && n.paragraphSpacing !== s.paragraphSpacing) n.paragraphSpacing = s.paragraphSpacing;
+      restored++;
+    } catch (e) {}
+  }
+  return restored;
 }
 
 /**
@@ -2687,7 +2835,8 @@ function enforceResponsiveSizing(root, report) {
       } else if (n.type === "TEXT") {
         // Text fills the width it is given so it can wrap, UNLESS it sits inside
         // something that hugs — a button label filling its hugging button would
-        // be circular.
+        // be circular. NEVER modify fontSize, fontName, fontWeight, lineHeight,
+        // or letterSpacing — typography is preserved exactly as cloned.
         const parentHugs = shouldHugHorizontally(n.parent);
         if (!parentHugs && readHorizontalSizing(n) === "FIXED") {
           if (writeHorizontalSizing(n, "FILL")) report.setToFill++;
@@ -2981,7 +3130,8 @@ async function generateBreakpoint(source, presetKey, options) {
     updated: false,
     sections: [],
     reusedVariants: [],
-    // Typography is never altered across breakpoints — only verified.
+    // Typography is never altered across breakpoints — locked and verified.
+    typographyRestored: 0,
     preservedTextStyles: 0,
     textStylesInUse: [],
     unlinkedText: [],
@@ -2997,6 +3147,11 @@ async function generateBreakpoint(source, presetKey, options) {
     collapsed: [],
     warnings: [],
   };
+
+  // TYPOGRAPHY LOCK: snapshot every text node's font properties from the
+  // SOURCE (desktop) frame BEFORE cloning. This captures the true desktop
+  // values — cloning might already resolve variable modes differently.
+  const typographySnapshot = snapshotTextNodes(source);
 
   // Clone rather than rebuild: this is what preserves instances, bindings,
   // content and styling without any explicit effort.
@@ -3031,13 +3186,44 @@ async function generateBreakpoint(source, presetKey, options) {
     } catch (e) { /* sizing modes unsupported */ }
   }
 
+  // Ensure clip content is enabled so absolute-positioned children and
+  // overflow do not bleed outside the responsive frame.
+  if ("clipsContent" in frame) frame.clipsContent = true;
+
   // Apply the container rule for this breakpoint.
+  // Preserve variable bindings: if padding is bound to a design-system variable,
+  // the variable's mode system handles the responsive value automatically.
   if (isAutoLayout(frame)) {
-    if (frame.paddingLeft > preset.sidePadding) frame.paddingLeft = preset.sidePadding;
-    if (frame.paddingRight > preset.sidePadding) frame.paddingRight = preset.sidePadding;
+    if (!hasBoundVar(frame, "paddingLeft")) {
+      if (frame.paddingLeft > preset.sidePadding) frame.paddingLeft = preset.sidePadding;
+    }
+    if (!hasBoundVar(frame, "paddingRight")) {
+      if (frame.paddingRight > preset.sidePadding) frame.paddingRight = preset.sidePadding;
+    }
     const spacing = SECTION_SPACING_FALLBACK[presetKey];
-    if (typeof frame.itemSpacing === "number" && frame.itemSpacing > spacing.max) {
+    if (!hasBoundVar(frame, "itemSpacing") && typeof frame.itemSpacing === "number" && frame.itemSpacing > spacing.max) {
       frame.itemSpacing = spacing.max;
+    }
+  } else {
+    // Non-auto-layout root frames (e.g., frames with absolute-positioned decorative
+    // children). The content wrapper child needs its position and width adjusted to
+    // maintain equal padding on both sides at the new viewport width.
+    var contentWrappers = [];
+    if (isContainer(frame)) {
+      for (var ci = 0; ci < frame.children.length; ci++) {
+        var ch = frame.children[ci];
+        if (!ch || ch.removed || !isContainer(ch) || ch.visible === false) continue;
+        if (isInstrumentation(ch)) continue;
+        if (!ch.children || ch.children.length === 0) continue;
+        // A content wrapper is narrower than the parent (has margins)
+        if (ch.width < source.width * 0.95) contentWrappers.push(ch);
+      }
+    }
+    for (var wi = 0; wi < contentWrappers.length; wi++) {
+      var wrapper = contentWrappers[wi];
+      var newPad = preset.sidePadding;
+      wrapper.x = newPad;
+      try { wrapper.resize(preset.width - newPad * 2, wrapper.height); } catch (e) {}
     }
   }
 
@@ -3049,6 +3235,8 @@ async function generateBreakpoint(source, presetKey, options) {
     const child = children[i];
     if (!child || child.removed || isInstrumentation(child)) continue;
 
+    if (isContainer(child) && "clipsContent" in child) child.clipsContent = true;
+
     const analysis = analyzeSection(child, i, total);
     const behaviors = decideBehaviors(analysis, presetKey, preservation);
     const applied = [];
@@ -3059,10 +3247,8 @@ async function generateBreakpoint(source, presetKey, options) {
           applyPaddingScale(child, Math.max(0.5, factor), preset.sidePadding);
           applied.push("reduced padding");
         } else if (behavior === "reduce-gap") {
-          if (isAutoLayout(child) && typeof child.itemSpacing === "number") {
-            child.itemSpacing = scaleSpacing(child.itemSpacing, Math.max(0.5, factor), 8);
-            applied.push("reduced gap");
-          }
+          applyGapScale(child, Math.max(0.5, factor));
+          applied.push("reduced gap");
         } else if (behavior === "release-fixed-width") {
           const n = releaseFixedWidths(child, preset.width - preset.sidePadding * 2);
           report.fixedWidthsReleased += n;
@@ -3150,6 +3336,18 @@ async function generateBreakpoint(source, presetKey, options) {
   // actually shipped.
   if (options.cleanLayers !== false) {
     cleanLayers(frame, options.cleanupOptions, report);
+  }
+
+  // TYPOGRAPHY LOCK: forcibly restore every text node's font properties to
+  // the exact values captured right after cloning. This catches ANY drift —
+  // from layout side-effects, Figma font substitution, or bugs in adaptation.
+  const typographyRestored = await restoreTypography(frame, typographySnapshot);
+  report.typographyRestored = typographyRestored;
+  if (typographyRestored > 0) {
+    report.warnings.push(
+      `Typography lock restored ${typographyRestored} text node(s) whose font properties ` +
+        "drifted during adaptation. All typography now matches the source frame exactly."
+    );
   }
 
   // Confirm typography came through untouched. Deliberately read-only: the
@@ -3411,7 +3609,7 @@ function validateResponsive(node, width, label) {
 // Figma's auto-generated names: "Frame 123", "Group 45", "Rectangle 12",
 // "Text 8", "Component 27", "Vector 16", "Ellipse 3", "Line 2"...
 const GENERIC_NAME_PATTERN =
-  /^(frame|group|rectangle|rect|text|component|vector|ellipse|line|star|polygon|slice|image|instance|union|subtract|intersect|exclude)(\s+\d+)?$/i;
+  /^(frame|group|rectangle|rect|text|component|vector|ellipse|line|star|polygon|slice|image|instance|union|subtract|intersect|exclude|layer|shape|svg)(\s+\d+)?(\s+copy(\s+\d+)?)?$|^copy(\s+\d+)?$/i;
 
 function isGenericName(name) {
   return GENERIC_NAME_PATTERN.test(String(name || "").trim());
@@ -3555,25 +3753,159 @@ function findFirstText(node, budget) {
   return found;
 }
 
+function isIconSized(node) {
+  return typeof node.width === "number" && typeof node.height === "number" &&
+    node.width <= 48 && node.height <= 48 && node.width > 0 && node.height > 0;
+}
+
+function isVectorOrShape(node) {
+  return node.type === "VECTOR" || node.type === "BOOLEAN_OPERATION" ||
+    node.type === "STAR" || node.type === "POLYGON" || node.type === "LINE";
+}
+
+function getVisibleTextChildren(node) {
+  if (!isContainer(node)) return [];
+  return node.children.filter(function (c) {
+    return c.type === "TEXT" && c.visible !== false;
+  });
+}
+
+function getVisibleChildren(node) {
+  if (!isContainer(node)) return [];
+  return node.children.filter(function (c) { return c.visible !== false; });
+}
+
+function isLabelValuePair(kids) {
+  if (kids.length !== 2) return null;
+  var a = kids[0], b = kids[1];
+  if (a.type !== "TEXT" || b.type !== "TEXT") return null;
+  var aText = (a.characters || "").trim();
+  var bText = (b.characters || "").trim();
+  if (!aText || !bText) return null;
+  if (aText.length <= 40 && aText.length <= bText.length) {
+    return { label: a, labelText: aText, description: b, descText: bText };
+  }
+  return null;
+}
+
+function isLabelWithAction(kids) {
+  if (kids.length < 2 || kids.length > 4) return null;
+  var textKid = null;
+  var actionKid = null;
+  for (var i = 0; i < kids.length; i++) {
+    var k = kids[i];
+    if (k.type === "TEXT" && !textKid) { textKid = k; continue; }
+    if (isContainer(k) && !actionKid) { actionKid = k; continue; }
+  }
+  if (!textKid || !actionKid) return null;
+  var text = (textKid.characters || "").trim();
+  if (!text || text.length > 40) return null;
+  return { label: textKid, labelText: text, action: actionKid };
+}
+
+function toTitleCase(str) {
+  return str.replace(/\w\S*/g, function (t) {
+    return t.charAt(0).toUpperCase() + t.substr(1).toLowerCase();
+  });
+}
+
+function inferVectorName(node) {
+  var parent = node.parent;
+  if (!parent || !isContainer(parent)) return "Icon";
+  var parentName = (parent.name || "").toLowerCase();
+  var iconHints = {
+    search: "Search Icon", close: "Close Icon", dismiss: "Close Icon",
+    menu: "Menu Icon", hamburger: "Menu Icon", back: "Back Icon",
+    forward: "Forward Icon", next: "Forward Icon", arrow: "Arrow Icon",
+    chevron: "Chevron Icon", settings: "Settings Icon", gear: "Settings Icon",
+    calendar: "Calendar Icon", notification: "Notification Icon", bell: "Bell Icon",
+    user: "User Icon", profile: "Profile Icon", home: "Home Icon",
+    edit: "Edit Icon", delete: "Delete Icon", trash: "Trash Icon",
+    download: "Download Icon", upload: "Upload Icon", share: "Share Icon",
+    link: "Link Icon", mail: "Mail Icon", email: "Mail Icon",
+    phone: "Phone Icon", location: "Location Icon", filter: "Filter Icon",
+    check: "Check Icon", plus: "Plus Icon", minus: "Minus Icon",
+    info: "Info Icon", star: "Star Icon", heart: "Heart Icon",
+    play: "Play Icon", cart: "Cart Icon", eye: "Eye Icon",
+    lock: "Lock Icon", live: "Live Icon",
+  };
+  for (var key in iconHints) {
+    if (parentName.indexOf(key) !== -1) return iconHints[key];
+  }
+  var siblings = parent.children || [];
+  for (var i = 0; i < siblings.length; i++) {
+    var sib = siblings[i];
+    if (sib === node || sib.type !== "TEXT") continue;
+    var sibText = (sib.characters || "").toLowerCase().trim();
+    for (var k in iconHints) {
+      if (sibText.indexOf(k) !== -1) return iconHints[k];
+    }
+  }
+  if (node.width > node.height * 1.8) return "Arrow Right";
+  if (node.height > node.width * 1.8) return "Arrow Down";
+  return "Icon";
+}
+
+function childrenAreAllSections(kids) {
+  if (kids.length < 2) return false;
+  var containerCount = 0;
+  for (var i = 0; i < kids.length; i++) {
+    if (isContainer(kids[i]) && !isVectorOrShape(kids[i])) containerCount++;
+  }
+  return containerCount >= kids.length * 0.7 && containerCount >= 2;
+}
+
 /**
  * Derive a meaningful name from what a layer actually is.
  * Deterministic, so the same source produces the same names at every
  * breakpoint — which is what keeps the three frames structurally comparable.
+ *
+ * Naming priority: Purpose → Component → Role → State → Variant
+ * Parent names are inferred from child content and hierarchy.
  */
 function inferLayerName(node, context) {
   const ctx = context || {};
 
+  // ── Vector / shape nodes: infer icon name from context ──────────────
+  if (isVectorOrShape(node)) {
+    if (isIconSized(node)) return inferVectorName(node);
+    if (hasVisualPresence(node)) return "Decorative Element";
+    return inferVectorName(node);
+  }
+
+  // ── Text nodes: use content as name ────────────────────────────────
   if (node.type === "TEXT") {
     const chars = shortenForName(node.characters, 30);
     return chars || "Text";
   }
 
+  // ── Named components: preserve existing names ──────────────────────
   if (nodeIsButtonLike(node)) return node.name && !isGenericName(node.name) ? node.name : "Button";
   if (nodeIsInputLike(node)) return node.name && !isGenericName(node.name) ? node.name : "Input Field";
-
   if (nodeIsImageLike(node)) return "Image";
 
-  // A top-level section names itself after its role.
+  // ── Rectangle / shape with visual presence: infer by role ──────────
+  if (node.type === "RECTANGLE") {
+    if (hasVisualPresence(node)) {
+      var parentName = node.parent ? (node.parent.name || "").toLowerCase() : "";
+      if (/card/.test(parentName)) return "Card Background";
+      if (/avatar/.test(parentName)) return "Avatar Background";
+      if (/badge/.test(parentName)) return "Badge Background";
+      if (/button|btn|cta/.test(parentName)) return "Button Background";
+      if (/input|field/.test(parentName)) return "Input Background";
+      if (/modal|dialog/.test(parentName)) return "Overlay Background";
+      if (/divider|separator/.test(parentName)) return "Divider";
+      return "Background";
+    }
+    return "Shape";
+  }
+  if (node.type === "ELLIPSE") {
+    if (isIconSized(node)) return "Dot";
+    if (hasVisualPresence(node)) return "Circle Background";
+    return "Ellipse";
+  }
+
+  // ── Top-level section names itself after its classified role ────────
   if (ctx.sectionKind) {
     const map = {
       navigation: "Navigation",
@@ -3587,27 +3919,80 @@ function inferLayerName(node, context) {
     return map[ctx.sectionKind] || "Section";
   }
 
+  // ── Containers: infer from children ────────────────────────────────
   if (isContainer(node)) {
-    const kids = node.children.filter((c) => c.visible !== false);
+    const kids = getVisibleChildren(node);
     if (kids.length === 0) return "Empty Frame";
 
-    // A container holding one image is an image wrapper.
+    // Single image child → media wrapper
     if (kids.length === 1 && nodeIsImageLike(kids[0])) return "Media";
+    // Single vector icon → icon wrapper
+    if (kids.length === 1 && isVectorOrShape(kids[0]) && isIconSized(kids[0])) return "Icon Container";
 
-    const allText = kids.every((c) => c.type === "TEXT");
+    // ── Label + Description pair pattern ─────────────────────────────
+    // Two text children: short label + longer description → "Label Section"
+    const labelPair = isLabelValuePair(kids);
+    if (labelPair) {
+      var sectionName = toTitleCase(labelPair.labelText);
+      if (sectionName.length > 28) sectionName = shortenForName(sectionName, 24);
+      if (!/section$/i.test(sectionName)) sectionName += " Section";
+      return sectionName;
+    }
+
+    // ── Label + Action pair pattern ──────────────────────────────────
+    // Text + container (e.g., label + button) → "Label Section"
+    const labelAction = isLabelWithAction(kids);
+    if (labelAction) {
+      var actionSectionName = toTitleCase(labelAction.labelText);
+      if (actionSectionName.length > 28) actionSectionName = shortenForName(actionSectionName, 24);
+      if (!/section$/i.test(actionSectionName)) actionSectionName += " Section";
+      return actionSectionName;
+    }
+
+    // All text children
+    const allText = kids.every(function (c) { return c.type === "TEXT"; });
     if (allText) {
+      if (kids.length >= 3) return "Text Section";
       const first = findFirstText(node);
       if (first) return shortenForName(first.characters, 24) + " Group";
       return "Text Content";
     }
 
-    if (kids.every((c) => nodeIsButtonLike(c))) return "CTA Group";
+    // All buttons
+    if (kids.every(function (c) { return nodeIsButtonLike(c); })) return "CTA Group";
 
+    // Container of containers → structural wrapper
+    if (childrenAreAllSections(kids)) {
+      // Check if this looks like a main content area
+      var depth = 0;
+      var p = node.parent;
+      while (p && depth < 10) { depth++; p = p.parent; }
+      if (depth <= 2) return "Main Content";
+      return "Content Area";
+    }
+
+    // Mixed: text + icon → named by text
+    var hasIcon = kids.some(function (c) { return isVectorOrShape(c) && isIconSized(c); });
+    var textKids = getVisibleTextChildren(node);
+    if (hasIcon && textKids.length === 1) {
+      var iconGroupName = shortenForName(textKids[0].characters, 20);
+      if (iconGroupName) return iconGroupName;
+    }
+
+    // Button container: small container inside a section with button-like content
+    var hasButton = kids.some(function (c) { return nodeIsButtonLike(c); });
+    var hasOnlyButtonsAndIcons = kids.every(function (c) {
+      return nodeIsButtonLike(c) || (isVectorOrShape(c) && isIconSized(c)) || c.type === "TEXT";
+    });
+    if (hasButton && hasOnlyButtonsAndIcons && kids.length <= 4) return "Button Container";
+
+    // Generic content container with a leading text
     const first = findFirstText(node);
     if (first) return shortenForName(first.characters, 24) + " Block";
 
-    // Never fall back to a name that is itself generic ("Group", "Frame").
-    if (kids.every((c) => nodeIsImageLike(c))) return "Media Group";
+    // All images
+    if (kids.every(function (c) { return nodeIsImageLike(c); })) return "Media Group";
+
     return isAutoLayout(node) ? "Content" : "Content Group";
   }
 
@@ -3700,14 +4085,110 @@ function collapseRedundantWrappers(root, report) {
 }
 
 /**
+ * Rename children of a container based on its contextual role.
+ *
+ * When a parent is inferred as "X Section" from a label-value pair, rename
+ * the text children to "Label" / "Description". When a parent has a text +
+ * button container, rename the button container to "Button Container".
+ * Duplicate child names (Label, Description) are fine when parent provides
+ * context — this matches the SOP design-system convention.
+ */
+function renameChildrenByContext(node, report) {
+  if (!isContainer(node) || node.type === "INSTANCE") return;
+  if (isInsideInstance(node)) return;
+
+  const kids = getVisibleChildren(node);
+
+  // ── Label + Description pair ───────────────────────────────────────
+  const pair = isLabelValuePair(kids);
+  if (pair) {
+    try {
+      if (isGenericName(pair.label.name) || pair.label.name === pair.label.characters) {
+        const before = pair.label.name;
+        pair.label.name = "Label";
+        if (before !== "Label") report.renamed.push(before + " → Label");
+      }
+    } catch (e) { /* not writable */ }
+    try {
+      if (isGenericName(pair.description.name) || pair.description.name === pair.description.characters) {
+        const before = pair.description.name;
+        pair.description.name = "Description";
+        if (before !== "Description") report.renamed.push(before + " → Description");
+      }
+    } catch (e) { /* not writable */ }
+    return;
+  }
+
+  // ── Label + Action pair ────────────────────────────────────────────
+  const action = isLabelWithAction(kids);
+  if (action) {
+    try {
+      if (isGenericName(action.label.name) || action.label.name === action.label.characters) {
+        const before = action.label.name;
+        action.label.name = "Label";
+        if (before !== "Label") report.renamed.push(before + " → Label");
+      }
+    } catch (e) { /* not writable */ }
+    try {
+      if (isGenericName(action.action.name)) {
+        var actionKids = getVisibleChildren(action.action);
+        var hasBtn = actionKids.some(function (c) { return nodeIsButtonLike(c); });
+        var newActionName = hasBtn ? "Button Container" : "Action Container";
+        var beforeAction = action.action.name;
+        action.action.name = newActionName;
+        if (beforeAction !== newActionName) report.renamed.push(beforeAction + " → " + newActionName);
+      }
+    } catch (e) { /* not writable */ }
+    return;
+  }
+
+  // ── Containers with vector icons + text ────────────────────────────
+  for (var i = 0; i < kids.length; i++) {
+    var kid = kids[i];
+    if (isVectorOrShape(kid) && isIconSized(kid) && isGenericName(kid.name)) {
+      try {
+        var iconName = inferVectorName(kid);
+        var beforeIcon = kid.name;
+        kid.name = iconName;
+        if (beforeIcon !== iconName) report.renamed.push(beforeIcon + " → " + iconName);
+      } catch (e) { /* not writable */ }
+    }
+  }
+
+  // ── Rectangles with visual presence ────────────────────────────────
+  for (var j = 0; j < kids.length; j++) {
+    var child = kids[j];
+    if (child.type === "RECTANGLE" && isGenericName(child.name) && hasVisualPresence(child)) {
+      try {
+        var rectName = "Background";
+        var parentLower = (node.name || "").toLowerCase();
+        if (/card/.test(parentLower)) rectName = "Card Background";
+        else if (/avatar/.test(parentLower)) rectName = "Avatar Background";
+        else if (/badge/.test(parentLower)) rectName = "Badge Background";
+        else if (/button|btn|cta/.test(parentLower)) rectName = "Button Background";
+        else if (/input|field/.test(parentLower)) rectName = "Input Background";
+        var beforeRect = child.name;
+        child.name = rectName;
+        if (beforeRect !== rectName) report.renamed.push(beforeRect + " → " + rectName);
+      } catch (e) { /* not writable */ }
+    }
+  }
+}
+
+/**
  * Give every layer a meaningful name, and number repeated siblings
  * consistently: "Feature Card / 01", "Feature Card / 02", …
+ *
+ * Uses a two-pass approach:
+ * 1. Rename each layer with a generic name using inferLayerName
+ * 2. Apply contextual child renames (Label/Description pairs, icons, etc.)
  */
 function renameLayers(root, sectionKinds, report) {
+  const renamed = new Set();
+
   const walk = (node, depth, sectionKind) => {
     if (!node || node.removed || depth > 16) return;
     if (isInstrumentation(node)) return;
-    // An instance's own name may be improved, but never its children's.
     const descend = node.type !== "INSTANCE";
 
     if (node !== root && !isInsideInstance(node)) {
@@ -3718,9 +4199,15 @@ function renameLayers(root, sectionKinds, report) {
             const before = node.name;
             node.name = suggested;
             report.renamed.push(`${before} → ${suggested}`);
+            renamed.add(node);
           } catch (e) { /* name not writable */ }
         }
       }
+    }
+
+    // Apply contextual child renames after parent has its final name.
+    if (descend && isContainer(node) && !isInsideInstance(node)) {
+      renameChildrenByContext(node, report);
     }
 
     if (descend && isContainer(node)) {
@@ -3737,7 +4224,7 @@ function renameLayers(root, sectionKinds, report) {
       for (const key of Object.keys(byName)) {
         const group = byName[key];
         if (group.length < 3) continue;
-        if (/\s\/\s\d+$/.test(key)) continue; // already numbered
+        if (/\s\/\s\d+$/.test(key)) continue;
         for (let i = 0; i < group.length; i++) {
           const numbered = `${key} / ${String(i + 1).padStart(2, "0")}`;
           try {
@@ -3749,7 +4236,6 @@ function renameLayers(root, sectionKinds, report) {
     }
   };
 
-  // Top-level children carry their section classification into naming.
   if (isContainer(root)) {
     const kids = root.children;
     for (let i = 0; i < kids.length; i++) {
@@ -4727,7 +5213,17 @@ async function cloneNode(params) {
 
 async function scanTextNodes(params) {
   console.log(`Starting to scan text nodes from node ID: ${params.nodeId}`);
-  const { nodeId, useChunking = true, chunkSize = 10, commandId = generateCommandId() } = params || {};
+  const {
+    nodeId,
+    useChunking = true,
+    chunkSize = 10,
+    // Highlighting tints every text node orange and waits for the tint to be
+    // visible — half a second per node. It is cosmetic, it writes to the
+    // document during what should be a read, and on a real page it turns a
+    // one-second scan into a thirty-second one. Off unless explicitly asked for.
+    highlight = false,
+    commandId = generateCommandId(),
+  } = params || {};
 
   const node = await getNodeByIdSafe(nodeId);
 
@@ -4763,7 +5259,7 @@ async function scanTextNodes(params) {
         null
       );
 
-      await findTextNodes(node, [], 0, textNodes);
+      await findTextNodes(node, [], 0, textNodes, highlight);
 
       // Send completed progress update
       sendProgressUpdate(
@@ -4878,7 +5374,7 @@ async function scanTextNodes(params) {
     for (const nodeInfo of chunkNodes) {
       if (nodeInfo.node.type === "TEXT") {
         try {
-          const textNodeInfo = await processTextNode(nodeInfo.node, nodeInfo.parentPath, nodeInfo.depth);
+          const textNodeInfo = await processTextNode(nodeInfo.node, nodeInfo.parentPath, nodeInfo.depth, highlight);
           if (textNodeInfo) {
             chunkTextNodes.push(textNodeInfo);
           }
@@ -4972,7 +5468,7 @@ async function collectNodesToProcess(node, parentPath = [], depth = 0, nodesToPr
 }
 
 // Process a single text node
-async function processTextNode(node, parentPath, depth) {
+async function processTextNode(node, parentPath, depth, highlight = false) {
   if (node.type !== "TEXT") return null;
 
   try {
@@ -5004,8 +5500,9 @@ async function processTextNode(node, parentPath, depth) {
       depth: depth,
     };
 
-    // Highlight the node briefly (optional visual feedback)
-    try {
+    // Highlight the node briefly (optional visual feedback, off by default —
+    // it costs 100ms per node and mutates fills during a read).
+    if (highlight) try {
       const originalFills = JSON.parse(JSON.stringify(node.fills));
       node.fills = [
         {
@@ -5041,7 +5538,7 @@ function delay(ms) {
 }
 
 // Keep the original findTextNodes for backward compatibility
-async function findTextNodes(node, parentPath = [], depth = 0, textNodes = []) {
+async function findTextNodes(node, parentPath = [], depth = 0, textNodes = [], highlight = false) {
   // Skip invisible nodes
   if (node.visible === false) return;
 
@@ -5078,8 +5575,9 @@ async function findTextNodes(node, parentPath = [], depth = 0, textNodes = []) {
         depth: depth,
       };
 
-      // Only highlight the node if it's not being done via API
-      try {
+      // Only highlight the node if it's not being done via API, and only when
+      // the caller asked for it — the delay below costs 500ms per text node.
+      if (highlight) try {
         // Safe way to create a temporary highlight without causing serialization issues
         const originalFills = JSON.parse(JSON.stringify(node.fills));
         node.fills = [
@@ -5113,14 +5611,17 @@ async function findTextNodes(node, parentPath = [], depth = 0, textNodes = []) {
   // Recursively process children of container nodes
   if ("children" in node) {
     for (const child of node.children) {
-      await findTextNodes(child, nodePath, depth + 1, textNodes);
+      await findTextNodes(child, nodePath, depth + 1, textNodes, highlight);
     }
   }
 }
 
 // Replace text in a specific node
 async function setMultipleTextContents(params) {
-  const { nodeId, text } = params || {};
+  // `highlight` tints each node orange and holds the tint for 500ms before
+  // restoring it — half a second of pure waiting per replacement, plus a
+  // second between chunks. Cosmetic, so off unless the caller asks.
+  const { nodeId, text, highlight = false } = params || {};
   const commandId = params.commandId || generateCommandId();
 
   if (!nodeId || !text || !Array.isArray(text)) {
@@ -5250,9 +5751,9 @@ async function setMultipleTextContents(params) {
         console.log(`Original text: "${originalText}"`);
         console.log(`Will translate to: "${replacement.text}"`);
 
-        // Highlight the node before changing text
+        // Highlight the node before changing text (opt-in, see above)
         let originalFills;
-        try {
+        if (highlight) try {
           // Save original fills for restoration later
           originalFills = JSON.parse(JSON.stringify(textNode.fills));
           // Apply highlight color (orange with 30% opacity)
@@ -5333,10 +5834,11 @@ async function setMultipleTextContents(params) {
       }
     );
 
-    // Add a small delay between chunks to avoid overloading Figma
+    // Yield between chunks so Figma's UI stays responsive. A full second is
+    // only needed to let the highlight animation play out; without it, a short
+    // yield is enough and keeps a large replacement job from crawling.
     if (chunkIndex < chunks.length - 1) {
-      console.log('Pausing between chunks to avoid overloading Figma...');
-      await delay(1000); // 1 second delay between chunks
+      await delay(highlight ? 1000 : 20);
     }
   }
 

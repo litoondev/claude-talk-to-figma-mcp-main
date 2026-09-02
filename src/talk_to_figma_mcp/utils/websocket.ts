@@ -4,6 +4,7 @@ import { logger } from "./logger";
 import { serverUrl, defaultPort, WS_URL, reconnectInterval } from "../config/config";
 import { FigmaCommand, FigmaResponse, CommandProgressUpdate, PendingRequest, ProgressMessage } from "../types";
 import { hasScopeState, getScopeState, SCOPE_CREATION_COMMANDS } from "./section-scope";
+import { withReadCache, invalidateCache, isNonMutating, CACHEABLE_READS } from "./cache";
 
 // WebSocket connection and request tracking
 let ws: WebSocket | null = null;
@@ -230,13 +231,13 @@ export function getCurrentChannel(): string | null {
 }
 
 /**
- * Send a command to Figma via WebSocket.
+ * Send a command to Figma via WebSocket, bypassing the read cache.
  * @param command - The command to send
  * @param params - Additional parameters for the command
  * @param timeoutMs - Timeout in milliseconds before failing
  * @returns A promise that resolves with the Figma response
  */
-export function sendCommandToFigma(
+function sendCommandRaw(
   command: FigmaCommand,
   params: unknown = {},
   timeoutMs: number = 300000
@@ -313,4 +314,30 @@ export function sendCommandToFigma(
     logger.debug(`Request details: ${JSON.stringify(request)}`);
     ws.send(JSON.stringify(request));
   });
+}
+
+/**
+ * Send a command to Figma, reusing a recent response when the command is a
+ * cacheable read and invalidating the cache when it is anything else.
+ *
+ * This wraps every tool call, so caching and invalidation stay correct no matter
+ * which tool (or `figma_batch` op) issues the command.
+ */
+export function sendCommandToFigma(
+  command: FigmaCommand,
+  params: unknown = {},
+  timeoutMs: number = 300000
+): Promise<unknown> {
+  if (CACHEABLE_READS[command as string] !== undefined) {
+    return withReadCache(command as string, params, () =>
+      sendCommandRaw(command, params, timeoutMs)
+    );
+  }
+
+  // Anything that is not a known read may have changed the document.
+  if (!isNonMutating(command as string)) {
+    invalidateCache(command as string);
+  }
+
+  return sendCommandRaw(command, params, timeoutMs);
 }

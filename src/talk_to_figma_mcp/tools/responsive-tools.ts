@@ -491,14 +491,19 @@ export function registerResponsiveTools(server: McpServer): void {
   server.tool(
     "clean_layers",
     "Tidy a frame's layer tree so it is legible to the next designer or developer. " +
-      "Renames auto-generated names ('Frame 123', 'Group 45', 'Rectangle 12') to meaningful ones " +
-      "derived from what each layer actually is, numbers repeated siblings consistently " +
-      "('Feature Card / 01'), removes empty and zero-size layers, and collapses wrappers that " +
-      "control no layout. " +
+      "Renames auto-generated names ('Frame 123', 'Group 45', 'Rectangle 12', 'Vector 4', 'Copy 2') " +
+      "to semantic names inferred from each layer's children, parent context, and visual role. " +
+      "For example: a frame holding two text children 'Category' + 'Technology' becomes " +
+      "'Category Section' with children renamed to 'Label' / 'Description'. " +
+      "Vectors and shapes become named icons ('Search Icon', 'Arrow Right') from sibling/parent " +
+      "context. Rectangles with fills become 'Card Background', 'Divider', etc. " +
+      "Numbers repeated siblings consistently ('Feature Card / 01'), removes empty and zero-size " +
+      "layers, and collapses wrappers that control no layout. " +
       "NEVER enters a component instance — an instance's structure and names come from its main " +
-      "component and are not ours to edit — and never touches text styles, font values or copy. " +
+      "component and are not ours to edit — and never touches text styles, font values, copy, " +
+      "position, width, height, auto layout, constraints, spacing, colors, variables, or styles. " +
       "Groups standing in for responsive structure and excessively deep nesting are reported " +
-      "rather than restructured. " +
+      "rather than restructured. Preserves existing meaningful names and design-system conventions. " +
       "Run it on the desktop source before make_responsive so all three breakpoints share the " +
       "same names; generated frames are cleaned automatically.",
     {

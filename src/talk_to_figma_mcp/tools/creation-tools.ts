@@ -2,6 +2,7 @@ import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { sendCommandToFigma } from "../utils/websocket";
 import { coerceJson } from "../utils/schema-helpers";
+import { nodeSummary } from "../utils/respond";
 
 /**
  * Register creation tools to the MCP server
@@ -58,7 +59,7 @@ export function registerCreationTools(server: McpServer): void {
           content: [
             {
               type: "text",
-              text: `Created rectangle "${JSON.stringify(result)}"`,
+              text: `Created rectangle: ${JSON.stringify(nodeSummary(result))}`,
             },
           ],
         };

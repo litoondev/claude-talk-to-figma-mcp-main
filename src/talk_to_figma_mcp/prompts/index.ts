@@ -556,6 +556,78 @@ Remember that text is never just text—it's a core design element that must wor
       };
     }
   );
+
+  server.prompt(
+    "efficient_execution",
+    "Get the same design in far fewer calls: batch writes, read once, keep responses small",
+    (extra) => {
+      return {
+        messages: [
+          {
+            role: "assistant",
+            content: {
+              type: "text",
+              text: `EFFICIENT EXECUTION
+
+Every tool call is a full round trip: the whole conversation is re-read and the
+whole tool list is re-sent. A section built one call at a time costs 30 round
+trips; the same section built well costs two or three. Speed and cost here are
+the same problem, and both are decided by how you sequence calls — not by how
+much you think between them.
+
+BATCH EVERY WRITE
+Use figma_batch whenever you are about to issue two or more commands in a row.
+Ops run in order, and $N.field feeds an earlier result into a later op:
+
+  figma_batch({ops: [
+    {command: "create_frame",    params: {x: 0, y: 0, width: 1440, height: 600,
+                                          name: "Hero", parentId: "<page-id>"}},
+    {command: "set_auto_layout", params: {nodeId: "$0.id", layoutMode: "VERTICAL",
+                                          itemSpacing: 24, paddingTop: 80}},
+    {command: "create_text",     params: {text: "Headline", parentId: "$0.id"}},
+    {command: "set_font_size",   params: {nodeId: "$last.id", fontSize: 56}},
+  ]})
+
+$N.id refers to op N; $last.id refers to the op immediately before. Plan the
+whole section, then send it. Do not send one op and wait to see what happens
+unless the next op genuinely depends on something you cannot predict.
+
+figma_batch also reaches commands the current tool profile does not advertise —
+pass the command name and its normal parameters.
+
+stopOnError defaults to true, which is what you want while building: a failed
+parent makes every child after it meaningless. Set it to false only for
+independent operations, such as recolouring twenty unrelated nodes.
+
+READ ONCE, READ NARROW
+  - get_design_system() once per session. Its result is cached, and re-reading
+    it costs you tokens without telling you anything new.
+  - get_node_info(nodeId, depth) — pass the smallest depth that answers your
+    question. depth 1 is usually enough to find a child; full trees are large
+    and most of what they contain you will never look at.
+  - Do not re-read a node to confirm a write succeeded. A batch reports each
+    op's outcome. Read back only when you need a value you could not predict,
+    such as the height of an auto-layout frame after its contents changed.
+  - scan_text_nodes leaves highlighting off. Only turn it on when a person is
+    watching the canvas — it adds about half a second per node.
+
+WHEN A RESPONSE COMES BACK TRUNCATED
+That is the size guard, not an error. Narrow the query: a smaller depth, a
+specific child node, or the section you actually care about.
+
+SEQUENCE THAT WORKS
+  1. get_design_system() — once.
+  2. get_node_info() on the target, at shallow depth, to locate anchors.
+  3. One figma_batch that builds the structure.
+  4. One figma_batch that styles it.
+  5. Verify once at the end, only if the result depends on measured layout.`,
+            },
+          },
+        ],
+        description: "Get the same design in far fewer calls: batch writes, read once, keep responses small",
+      };
+    }
+  );
 }
 
 // Export individual prompt registration functions

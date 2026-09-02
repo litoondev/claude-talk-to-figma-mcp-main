@@ -61,8 +61,12 @@ export function registerTextTools(server: McpServer): void {
           })
         ))
         .describe("Array of text node IDs and their replacement texts"),
+      highlight: z
+        .boolean()
+        .optional()
+        .describe("Flash each node orange as its text is replaced. Purely visual and adds ~0.5s per node — leave off unless a human is watching."),
     },
-    async ({ nodeId, text }, extra) => {
+    async ({ nodeId, text, highlight }, extra) => {
       try {
         if (!text || text.length === 0) {
           return {
@@ -89,6 +93,7 @@ export function registerTextTools(server: McpServer): void {
         const result = await sendCommandToFigma("set_multiple_text_contents", {
           nodeId,
           text,
+          highlight: highlight ?? false,
         });
 
         // Cast the result to a specific type to work with it safely

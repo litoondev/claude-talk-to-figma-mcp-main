@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { sendCommandToFigma } from "../utils/websocket";
+import { nodeSummary } from "../utils/respond";
 
 /**
  * Register FigJam-specific tools to the MCP server.
@@ -105,7 +106,7 @@ export function registerFigJamTools(server: McpServer): void {
           content: [
             {
               type: "text",
-              text: `Created sticky note: ${JSON.stringify(result)}`,
+              text: `Created sticky note: ${JSON.stringify(nodeSummary(result))}`,
             },
           ],
         };
@@ -142,7 +143,7 @@ export function registerFigJamTools(server: McpServer): void {
           content: [
             {
               type: "text",
-              text: `Updated sticky note text: ${JSON.stringify(result)}`,
+              text: `Updated sticky note text: ${JSON.stringify(nodeSummary(result))}`,
             },
           ],
         };
@@ -216,7 +217,7 @@ export function registerFigJamTools(server: McpServer): void {
           content: [
             {
               type: "text",
-              text: `Created shape with text: ${JSON.stringify(result)}`,
+              text: `Created shape with text: ${JSON.stringify(nodeSummary(result))}`,
             },
           ],
         };
@@ -327,7 +328,7 @@ export function registerFigJamTools(server: McpServer): void {
           content: [
             {
               type: "text",
-              text: `Created connector: ${JSON.stringify(result)}`,
+              text: `Created connector: ${JSON.stringify(nodeSummary(result))}`,
             },
           ],
         };
@@ -385,7 +386,7 @@ export function registerFigJamTools(server: McpServer): void {
           content: [
             {
               type: "text",
-              text: `Created section: ${JSON.stringify(result)}`,
+              text: `Created section: ${JSON.stringify(nodeSummary(result))}`,
             },
           ],
         };

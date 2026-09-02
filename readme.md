@@ -623,6 +623,76 @@ Point the MCP server at it with `--port=3056`.
 
 ---
 
+## ⚡ Speed and cost
+
+A Figma session is expensive for two reasons, and neither is the thinking: the
+tool list is re-sent on every single message, and every write is its own round
+trip. Four things in this plugin attack that directly.
+
+### 1. Batch your writes — `figma_batch`
+
+Building one section normally takes 20–40 separate tool calls, and each one is a
+full round trip. `figma_batch` runs them all in a single call:
+
+```json
+[
+  {"command": "create_frame",    "params": {"x": 0, "y": 0, "width": 1440, "height": 600, "name": "Hero", "parentId": "0:1"}},
+  {"command": "set_auto_layout", "params": {"nodeId": "$0.id", "layoutMode": "VERTICAL", "itemSpacing": 24}},
+  {"command": "create_text",     "params": {"text": "Headline", "parentId": "$0.id"}},
+  {"command": "set_font_size",   "params": {"nodeId": "$last.id", "fontSize": 56}}
+]
+```
+
+Ops run in order. `$0.id` refers to the first op's result and `$last.id` to the
+previous one, so a frame's ID can feed its children without a trip back to the
+model. `stopOnError` defaults to `true`; set it to `false` for independent work
+such as recolouring many unrelated nodes.
+
+Ask the AI to load the **`efficient_execution`** prompt at the start of a session
+and it will batch by default.
+
+### 2. Pick a tool profile
+
+The tool list costs about **25,000 tokens on every message**, whether or not any
+of those tools get used. A profile trims what is advertised:
+
+| Profile | Tools | Tokens per message | |
+|---|---|---|---|
+| `core` | 48 | ~10,400 | Layout, text, colour, variables, responsive, section scope |
+| `standard` | 87 | ~18,600 | Everything except FigJam, REST comments, activity tracking — **default** |
+| `full` | 115 | ~25,900 | Everything advertised, the original behaviour |
+
+Nothing is ever lost. A tool a profile withholds is still callable through
+`figma_batch` by name.
+
+Set it in the extension's settings (**Tool profile**), or with the
+`FIGMA_MCP_PROFILE` environment variable for a manual install.
+
+### 3. Repeated library reads are cached
+
+`get_design_system`, `get_styles`, `get_local_components`, `get_variables`,
+`get_document_info` and `get_pages` are served from a short-lived cache, so the
+"check what already exists before creating" rule stops costing a round trip every
+time it fires. Any command that changes the document clears the cache
+immediately, so you never act on a stale read. Disable with `FIGMA_MCP_CACHE=off`.
+
+### 4. Responses have a ceiling
+
+One deep `get_node_info` on a large page could previously fill the context window
+by itself. Tool responses are now capped (~24,000 characters, roughly 6,000
+tokens) and truncated with a note telling the AI to narrow the query. Adjust with
+the **Maximum tool response size** setting or `FIGMA_MCP_MAX_RESPONSE_CHARS`.
+
+### Also faster
+
+`scan_text_nodes` and `set_multiple_text_contents` used to tint each text node
+orange and wait half a second for the tint to be visible — on a page with 60 text
+nodes that is 30 seconds of pure waiting, and it wrote to the document during
+what should have been a read. The highlighting is now off by default; pass
+`highlight: true` when a person is actually watching the canvas.
+
+---
+
 ## 🆘 Troubleshooting common errors
 
 | What you see | What's actually wrong | Fix |

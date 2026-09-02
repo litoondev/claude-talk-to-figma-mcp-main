@@ -231,8 +231,12 @@ export function registerDocumentTools(server: McpServer): void {
     "Scan all text nodes in the selected Figma node",
     {
       nodeId: z.string().describe("ID of the node to scan"),
+      highlight: z
+        .boolean()
+        .optional()
+        .describe("Tint each text node orange as it is scanned. Purely visual, costs ~0.5s per node, and writes to the document during a read — leave off unless a human is watching."),
     },
-    async ({ nodeId }) => {
+    async ({ nodeId, highlight }) => {
       try {
         // Initial response to indicate we're starting the process
         const initialStatus = {
@@ -244,7 +248,10 @@ export function registerDocumentTools(server: McpServer): void {
         const result = await sendCommandToFigma("scan_text_nodes", {
           nodeId,
           useChunking: true,  // Enable chunking on the plugin side
-          chunkSize: 10       // Process 10 nodes at a time
+          // Larger chunks now that scanning no longer pauses on every node:
+          // fewer chunks means fewer progress round trips and a faster scan.
+          chunkSize: 25,
+          highlight: highlight ?? false
         });
 
         // If the result indicates chunking was used, format the response accordingly
