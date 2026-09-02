@@ -112,9 +112,7 @@ export function registerSkillPrompts(server: McpServer): void {
 export function registerSkillTools(server: McpServer): void {
   server.tool(
     "figma_skill",
-    "Load a Figma workflow skill — a vetted, step-by-step procedure for a recurring design task. " +
-      "Call with no arguments to list what is available; with `name` to load one in full; with `query` to find the ones that fit a request. " +
-      "Check this before improvising a multi-step Figma job: if a skill covers it, following the skill produces a better and more consistent result than working it out from scratch.",
+    skillToolDescription(),
     {
       name: z.string().optional().describe("Skill ID to load in full, e.g. Layer_Rename_v1"),
       query: z.string().optional().describe("Describe the task to find matching skills, e.g. 'clean up messy layer names'"),
@@ -152,6 +150,44 @@ export function registerSkillTools(server: McpServer): void {
       }
     }
   );
+}
+
+/**
+ * The `figma_skill` description, built from the registry at registration time.
+ *
+ * The catalogue has to be IN the description, not behind a call. A model looking
+ * at "rename this layer" reasons that it is a one-liner and calls `rename_node`;
+ * it never occurs to it to go browsing a catalogue first. Naming the skills and
+ * their triggers here is what makes it notice that a procedure already exists —
+ * a few dozen tokens to stop the model improvising a job that was already solved.
+ */
+export function skillToolDescription(): string {
+  const skills = allSkills();
+
+  const preamble =
+    "Load a Figma workflow skill — a vetted, step-by-step procedure for a recurring design task. " +
+    "Call with `name` to load one in full, `query` to search, or no arguments for the catalogue.";
+
+  if (skills.length === 0) return preamble;
+
+  const catalogue = skills
+    .map((skill) => `${skill.id} (${skill.triggers.slice(0, 5).join(", ") || skill.title})`)
+    .join("; ");
+
+  return (
+    `${preamble}\n\n` +
+    `MANDATORY: before doing any Figma work that one of these skills covers, load it and follow it. ` +
+    `Do not improvise a job a skill already defines — the skill encodes decisions (including when NOT to ask the user) ` +
+    `that you would otherwise get wrong.\n\n` +
+    `Available: ${catalogue}`
+  );
+}
+
+/** One line per skill, for callers that want to show the catalogue inline. */
+export function catalogueSummary(): string {
+  const skills = allSkills();
+  if (skills.length === 0) return "";
+  return skills.map((skill) => `${skill.id} — ${skill.triggers.slice(0, 5).join(", ") || skill.title}`).join("\n");
 }
 
 /** Record a failure against a skill so the health pass can report it. */

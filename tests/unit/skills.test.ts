@@ -346,3 +346,42 @@ describe("auto-repair switch", () => {
     expect(enabledWith(value)).toBe(false);
   });
 });
+
+describe("skill discoverability", () => {
+  // Regression guard for the failure this was written after: a session where
+  // the user asked to rename a selected layer and the model asked "what would
+  // you like to call it?" — the exact thing Layer_Rename_v1 forbids. The skill
+  // was registered and the matcher found it; the model simply never looked,
+  // because for a task that seems like a one-liner it has no reason to browse a
+  // catalogue. So the catalogue has to reach the model without being asked for.
+  const { skillToolDescription, catalogueSummary } = require("../../src/talk_to_figma_mcp/skills/integration");
+
+  it("names every skill and its triggers in the tool description", () => {
+    const description = skillToolDescription();
+    expect(description).toContain("Layer_Rename_v1");
+    expect(description).toContain("rename layers");
+  });
+
+  it("tells the model to follow a skill rather than improvise", () => {
+    expect(skillToolDescription()).toMatch(/MANDATORY|before doing any Figma work/i);
+  });
+
+  it("produces a catalogue line per skill for join_channel to announce", () => {
+    const summary = catalogueSummary();
+    expect(summary).toContain("Layer_Rename_v1");
+    expect(summary.split("\n").length).toBe(
+      require("../../src/talk_to_figma_mcp/skills/registry").allSkills().length
+    );
+  });
+
+  it("matches the phrasing a user actually types, not just the exact trigger", () => {
+    const { findSkills } = require("../../src/talk_to_figma_mcp/skills/registry");
+    for (const phrasing of [
+      "rename the layer, that i selected",
+      "selected full group of layer need to rename",
+      "clean up these layer names for handoff",
+    ]) {
+      expect(findSkills(phrasing).map((s: any) => s.id)).toContain("Layer_Rename_v1");
+    }
+  });
+});

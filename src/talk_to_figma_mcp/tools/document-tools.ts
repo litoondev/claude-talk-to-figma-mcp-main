@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { sendCommandToFigma, joinChannel } from "../utils/websocket.js";
 import { filterFigmaNode } from "../utils/figma-helpers.js";
 import { coerceJson } from "../utils/schema-helpers";
+import { catalogueSummary } from "../skills/integration";
 
 /**
  * Register document-related tools to the MCP server
@@ -341,11 +342,22 @@ export function registerDocumentTools(server: McpServer): void {
         // Use joinChannel instead of sendCommandToFigma to ensure currentChannel is updated
         await joinChannel(channel);
 
+        // Every Figma session starts here, which makes this the one place
+        // guaranteed to put the skill catalogue in context before any work
+        // begins. Without it a skill is only found by a model that thought to
+        // go looking — and for a task that looks simple, it never does.
+        const catalogue = catalogueSummary();
+        const text = catalogue
+          ? `Successfully joined channel: ${channel}\n\n` +
+            `Skills available for this session — load one with figma_skill({name}) BEFORE ` +
+            `starting any task it covers, and follow it rather than improvising:\n${catalogue}`
+          : `Successfully joined channel: ${channel}`;
+
         return {
           content: [
             {
               type: "text",
-              text: `Successfully joined channel: ${channel}`,
+              text,
             },
           ],
         };
