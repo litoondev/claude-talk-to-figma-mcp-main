@@ -22,6 +22,9 @@ import { registerTools } from "./tools";
 // Import prompts registration function from prompts/index.ts
 import { registerPrompts } from "./prompts";
 
+// Skill repository — see skills/registry.ts
+import { registerSkillPrompts, runHealthPass } from "./skills/integration";
+
 /**
  * Initialize and start the MCP server
  */
@@ -35,6 +38,13 @@ async function main() {
     
     // Register all prompts with the server
     registerPrompts(server);
+
+    // Skills load after tools so the health pass can check every skill against
+    // the tool set this profile actually registered, repairing what it can
+    // before any skill is advertised.
+    const repairs = runHealthPass();
+    for (const note of repairs) logger.info(`Skill repaired: ${note}`);
+    registerSkillPrompts(server);
     
     // Try to connect to Figma socket server
     try {

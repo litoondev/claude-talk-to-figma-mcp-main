@@ -26,6 +26,8 @@ export type ProfileName = "core" | "standard" | "full";
 export const CORE_TOOLS: readonly string[] = [
   // batching — the single biggest cost lever, always present
   "figma_batch",
+  // skill catalogue — how a vetted procedure gets loaded instead of improvised
+  "figma_skill",
   // connection + scope
   "join_channel",
   "check_figma_connection",

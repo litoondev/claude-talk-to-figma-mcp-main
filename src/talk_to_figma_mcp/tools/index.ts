@@ -19,6 +19,7 @@ import { registerBatchTools } from "./batch-tools";
 import { getProfile, makeToolFilter } from "../config/profiles";
 import { logger } from "../utils/logger";
 import { capResponse } from "../utils/respond";
+import { registerSkillTools, setAvailableTools } from "../skills/integration";
 
 /**
  * Register all Figma tools to the MCP server.
@@ -38,6 +39,7 @@ export function registerTools(server: McpServer): void {
   // Temporarily intercept `tool` so a registration for an out-of-profile tool
   // becomes a no-op. Restored before returning so nothing else is affected.
   const originalTool = server.tool.bind(server);
+  const registeredNames: string[] = [];
   let registered = 0;
   let skipped = 0;
 
@@ -48,6 +50,7 @@ export function registerTools(server: McpServer): void {
       return undefined;
     }
     registered++;
+    if (typeof name === "string") registeredNames.push(name);
 
     // Wrap the handler so every tool result passes through the response size
     // cap. Doing it here means a new tool inherits the ceiling for free.
@@ -93,9 +96,15 @@ export function registerTools(server: McpServer): void {
     registerSectionScopeTools(server);
     // Live activity tracking — see tools/activity-tools.ts
     registerActivityTools(server);
+    // Skill catalogue lookup — see skills/integration.ts
+    registerSkillTools(server);
   } finally {
     (server as any).tool = originalTool;
   }
+
+  // Skills are validated against the tools that actually exist under this
+  // profile, so a skill is never judged against a tool set the user is not running.
+  setAvailableTools(registeredNames);
 
   logger.info(
     `Tool profile "${profile}": ${registered} tools registered, ${skipped} withheld ` +

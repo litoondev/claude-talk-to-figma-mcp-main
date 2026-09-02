@@ -719,6 +719,96 @@ works in larger chunks, and the one-second pause between text-replacement chunks
 
 ---
 
+## 🧩 Skills
+
+A **skill** is a vetted, step-by-step procedure for a recurring design job —
+"rename every layer semantically", "audit contrast", "build a pricing section".
+Written once, it produces the same quality every time instead of the AI working
+the job out from scratch and landing somewhere different each run.
+
+Skills live in [`skills/`](skills/) as Markdown files and are compiled into the
+extension at build time.
+
+### Using one
+
+Two ways, both serving the same skill:
+
+- **Prompt picker** — every skill is registered as an MCP prompt under its ID
+  (`Layer_Rename_v1`), so it appears in Claude's prompt list.
+- **`figma_skill` tool** — how the AI reaches one on its own mid-conversation:
+
+  ```
+  figma_skill()                                    → the catalogue
+  figma_skill({query: "messy layer names"})        → best matches
+  figma_skill({name: "Layer_Rename_v1"})           → full instructions
+  ```
+
+### Writing one
+
+Drop a Markdown file into your skills directory — `~/.figma-mcp/skills` by
+default, or wherever `FIGMA_MCP_SKILLS_DIR` points. It is live on the next
+restart; no rebuild. A file placed there with the same ID as a built-in
+overrides it, so you can adapt a shipped skill without forking anything.
+
+```markdown
+---
+id: Audit_Contrast_v1
+title: Contrast Auditor
+description: >
+  Checks text colour contrast across a frame and reports failures.
+triggers:
+  - check contrast
+  - accessibility audit
+uses:
+  - get_node_info
+  - export_node_as_image
+---
+
+# Contrast Auditor
+
+1. Call `export_node_as_image` on the frame...
+```
+
+### Naming: `Category_Action_vN`
+
+The ID is not decoration — the registry reads it. `Layer_Rename_v1` and
+`Layer_Rename_v2` are the same skill at two versions, so the older one is
+retired automatically; `Layer_Clean_v1` is a different skill in the same
+category. Category and Action are PascalCase, the version is `v` plus a whole
+number. A file that breaks the convention is rejected at startup with the reason
+printed in the log, and the rest keep working.
+
+### What the system checks
+
+| Check | What happens |
+|---|---|
+| **Naming** | Malformed IDs are rejected with an actionable reason — never silently ignored |
+| **Duplication** | A near-copy of an existing skill (≥82% content match) is blocked. Overlapping triggers are registered but flagged, since two skills claiming one phrase make selection a coin toss |
+| **Versioning** | Older versions of a family are superseded automatically and stop being advertised |
+| **Tool references** | Every tool a skill names is checked against the tools actually registered under your profile |
+
+### Self-repair, and its limits
+
+Skills are often written against a *different* Figma MCP server, then name a
+tool that does not exist here — `get_screenshot` instead of
+`export_node_as_image`. The AI dutifully calls it and the step fails.
+
+At startup, every skill is checked against the live tool set. When a name has a
+known one-for-one equivalent, the skill is rewritten with the correct name and
+saved as the **next version** (`Audit_Contrast_v1` → `Audit_Contrast_v2`). The
+original stays on disk as the record of what changed. Turn this off with
+`FIGMA_MCP_SKILL_AUTOREPAIR=off` to review repairs instead of applying them.
+
+**What it will not do:** repair a skill whose *instructions* are wrong — prose
+that produces bad designs, a missing step, a wrong order. Nothing here evaluates
+meaning, and a system that rewrites guidance it cannot judge would do more harm
+than the bug. Those failures are recorded against the skill and reported for a
+person to read. Substitutions are limited to a curated table of genuine
+equivalents; a tool with no real counterpart is reported, never swapped for
+something that behaves differently.
+
+---
+
 ## 🆘 Troubleshooting common errors
 
 | What you see | What's actually wrong | Fix |

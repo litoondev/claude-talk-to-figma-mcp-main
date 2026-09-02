@@ -12,6 +12,8 @@ node_modules/@anthropic-ai/dxt
 tests/
 
 # Documentation
+# NOTE: skills/*.md are NOT needed here — scripts/build-skills.js compiles them
+# into dist/ before packaging, so the extension ships them inside the bundle.
 *.md
 README*
 CHANGELOG*

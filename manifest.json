@@ -54,6 +54,19 @@
       "min": 2000,
       "max": 200000,
       "required": false
+    },
+    "figma_skills_dir": {
+      "type": "directory",
+      "title": "Skills folder",
+      "description": "Folder to load your own skill files (.md) from. Skills are step-by-step procedures for recurring design jobs; a file here with the same ID as a built-in overrides it. Leave blank to use ~/.figma-mcp/skills.",
+      "required": false
+    },
+    "figma_skill_autorepair": {
+      "type": "boolean",
+      "title": "Repair skills automatically",
+      "description": "When a skill names a tool this plugin does not have but a known equivalent exists, rewrite the skill with the correct name and save it as the next version. Only one-for-one tool substitutions are ever applied — a skill's instructions are never rewritten. Turn off to have repairs reported instead.",
+      "default": true,
+      "required": false
     }
   },
   "server": {
@@ -69,7 +82,9 @@
         "FIGMA_ACCESS_TOKEN": "${user_config.figma_access_token}",
         "FIGMA_API_CONCURRENCY": "${user_config.figma_api_concurrency}",
         "FIGMA_MCP_PROFILE": "${user_config.figma_tool_profile}",
-        "FIGMA_MCP_MAX_RESPONSE_CHARS": "${user_config.figma_max_response_chars}"
+        "FIGMA_MCP_MAX_RESPONSE_CHARS": "${user_config.figma_max_response_chars}",
+        "FIGMA_MCP_SKILLS_DIR": "${user_config.figma_skills_dir}",
+        "FIGMA_MCP_SKILL_AUTOREPAIR": "${user_config.figma_skill_autorepair}"
       }
     }
   },

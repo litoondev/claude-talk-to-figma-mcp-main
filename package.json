@@ -16,15 +16,16 @@
     "readme.md",
     "LICENSE",
     "TESTING.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "skills"
   ],
   "type": "module",
   "scripts": {
     "start": "bun run dist/talk_to_figma_mcp/server.js",
     "socket": "bun run dist/socket.js",
     "setup": "./scripts/setup.sh",
-    "build": "tsup && chmod +x dist/talk_to_figma_mcp/server.js dist/socket.js",
-    "build:win": "tsup",
+    "build": "npm run build:skills && tsup && chmod +x dist/talk_to_figma_mcp/server.js dist/socket.js",
+    "build:win": "npm run build:skills && tsup",
     "build:watch": "tsup --watch",
     "dev": "bun run build:watch",
     "pack": "dxt pack",
@@ -35,7 +36,8 @@
     "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
-    "test:integration": "node scripts/test-integration.js"
+    "test:integration": "node scripts/test-integration.js",
+    "build:skills": "node scripts/build-skills.js"
   },
   "devDependencies": {
     "@anthropic-ai/dxt": "^0.2.0",
