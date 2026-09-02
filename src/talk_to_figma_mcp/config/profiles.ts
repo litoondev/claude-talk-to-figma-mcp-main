@@ -1,17 +1,17 @@
 /**
  * Tool profiles.
  *
- * The full tool set is 114 tools ≈ 25k tokens of JSON schema, and that schema is
+ * The full tool set is 121 tools ≈ 30k tokens of JSON schema, and that schema is
  * re-sent on *every* model request for the whole session. Most sessions use a
  * fraction of it. A profile trims the advertised set to what the work actually
  * needs, which cuts per-request cost and leaves more of the context window for
  * the design itself.
  *
  * Select with the FIGMA_MCP_PROFILE environment variable:
- *   core     — ~40 tools (~9k tokens). Layout, text, colour, variables, responsive.
- *   standard — ~85 tools (~19k tokens). Everything except FigJam, REST comments
+ *   core     — ~54 tools (~14k tokens). Layout, text, colour, variables, responsive.
+ *   standard — ~93 tools (~22k tokens). Everything except FigJam, REST comments
  *              and activity tracking. **Default.**
- *   full     — all 114 tools (~25k tokens). The previous behaviour.
+ *   full     — all 121 tools (~30k tokens). The previous behaviour.
  *
  * A profile only changes what is advertised, never what the plugin can do:
  * anything omitted is still reachable through `figma_batch`.
@@ -54,6 +54,8 @@ export const CORE_TOOLS: readonly string[] = [
   "insert_child",
   "create_component_instance",
   // modification
+  "set_layout_sizing",
+  "fix_text_sizing",
   "set_fill_color",
   "set_stroke_color",
   "move_node",
@@ -74,7 +76,11 @@ export const CORE_TOOLS: readonly string[] = [
   "set_text_align",
   // variables
   "get_variables",
+  "find_variable",
   "apply_variable_to_node",
+  "apply_variable_bindings",
+  "get_node_variable_bindings",
+  "import_library_variable",
   // responsive
   "analyze_responsive",
   "make_responsive",

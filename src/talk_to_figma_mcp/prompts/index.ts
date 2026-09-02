@@ -60,10 +60,40 @@ under OBSERVED CONVENTIONS over round numbers you would otherwise pick.
 BIND, DO NOT HARDCODE
   - Colour     → apply_variable_to_node() with an existing colour variable,
                  or set_fill_color() with an existing style's value.
+  - Spacing,   → apply_variable_to_node() with the existing spacing, gap,
+    gap,          radius or size token: itemSpacing, paddingLeft, cornerRadius,
+    radius,       maxWidth and the rest are all bindable fields.
+    size
   - Type       → set_text_style_id() with an existing text style.
   - Effects    → set_effect_style_id() with an existing effect style.
   - Components → create_component_instance() with an existing key;
                  set_instance_variant() to select the right variant.
+
+When a variable exists for a value, BIND the variable. Do not read the token's
+resolved number or hex and type that in — a copied value looks identical and is
+not connected: it stops following the design system, and it stops responding to
+the Desk / Tab / Mobi mode of the frame it sits in.
+
+  find_variable()              resolve a token path strictly, before binding
+  apply_variable_to_node()     bind one property, by token path
+  apply_variable_bindings()    bind many at once, with a bound/unbound report
+  get_node_variable_bindings() verify afterwards; find raw values that should
+                               have been bound
+  switch_variable_mode()       set Desk / Tab / Mobi on a frame, or let it infer
+                               the breakpoint from the frame's width
+  import_library_variable()    pull a token in from an enabled team library
+                               rather than making a local duplicate
+
+Matching is exact. colors/Base/Primary, colors/Primary/500 and colors/Primary/700
+are different tokens with related values — never substitute one for another
+because the numbers look close. Bind the SEMANTIC token, not the primitive it
+aliases: colors/Gray/500 → colors/Base/Gray Main → #525252 means you bind
+colors/Gray/500.
+
+If no token matches, apply the exact value manually and say which properties are
+not token-connected. Never invent a token, and never widen the system to make
+one fit — set_variable() refuses to create anything unless you pass
+createIfMissing, which is the designer's call, not yours.
 
 PRESERVE SYSTEM CONSISTENCY WHEN EDITING
   - Preserve established components; do not rebuild them by hand.
@@ -90,7 +120,7 @@ Create new last.`,
     }
   );
 
-  // Responsive Website — adapt layout across breakpoints, never the typography
+  // Responsive Website — preserve the design system while adapting layout
   server.prompt(
     "responsive_website_strategy",
     "Adapt an existing design across breakpoints without redesigning it",
@@ -112,21 +142,83 @@ components or variants only when the existing system cannot support the required
 responsive behaviour. Always validate mobile layouts at both 390px and 320px.
 
 CORE RULE
-Same typography style + Auto Layout + Fill container + Hug contents.
-Never solve a responsive problem by changing font size, switching text style, or
-adding a fixed height.
+Existing typography/colour variables + Auto Layout + Fill container + Hug contents.
+Solve layout and wrapping first. Never invent type values, detach style/variable
+bindings, enlarge body copy at Tablet size, or add a fixed height.
 
 WORKFLOW
   1. get_design_system()   — what the file already defines
   2. analyze_responsive()  — per-section plan; changes nothing
-  3. clean_layers()        — tidy the DESKTOP source first, so all three
-                             breakpoints end up with matching layer names
-  4. make_responsive()     — generate 768px and 320px (cleans them automatically)
-  5. validate_responsive() — QA at 390px and 320px
-  6. Report the summary and every manual-review item
+  3. clean_layers()        — tidy only when layer cleanup is in the requested scope
+  4. make_responsive()     — generate the requested breakpoint only
+  5. validate_responsive() — validate that breakpoint
+  6. Report the summary and every manual-review item, then stop
+
+FRAME ORGANIZATION — ALWAYS
+Never build a tablet or mobile layout from scratch. For a new breakpoint, follow
+this exact order: Desktop frame -> Duplicate exactly -> Move beside Desktop ->
+Rename for the breakpoint -> Resize -> Apply responsive changes inside the copy.
+Keep the copy in the same section/page area whenever possible. Arrange siblings
+left to right as Desktop, Tablet, Mobile. Use clear names such as "Single Work –
+768px Tab" and "Single Work – 320px Mobile". The original desktop frame must
+remain completely unchanged.
+
+If the designer supplies an exact width, pass it as targetWidth and use it
+everywhere: frame width, name, layout calculation and validation. For example,
+834px Tablet becomes "Single Work – 834px Tab" and 390px Mobile becomes
+"Single Work – 390px Mobile". Never replace a requested width with a default.
+
+Before duplicating, inspect the desktop frame's siblings. If a matching tablet,
+mobile, Tab, 768px, 320px, or similarly named frame for the same design already
+exists, update that frame instead of creating a duplicate elsewhere. If that
+existing frame is an empty placeholder, refresh its slot from an exact desktop
+clone before adapting it.
+
+ABSOLUTE-POSITIONED LAYERS — COPY AND LEAVE UNTOUCHED
+An absolute-positioned layer is designer-controlled and is an immutable subtree
+during responsive generation. Copy it with the desktop frame exactly as it is.
+Do not ungroup it. Do not restructure, detach, rebuild, convert, resize, rebind,
+rename, reorder, or change its positioning behaviour. Do not modify anything
+inside it. Exclude the whole subtree from automatic layout changes, Fill/Hug
+enforcement, variable rebinding, layer cleanup and responsive QA fixes.
+
+Even if the copied layer overflows or does not fit the tablet/mobile frame, leave
+it unchanged and report it for manual designer adjustment. Never recommend
+converting that existing absolute layer to Auto Layout as part of responsive
+generation.
+
+DESKTOP SPACING IS THE REFERENCE AND THE CEILING
+Before responsive changes, inspect and preserve the desktop spacing relationship
+between sections, layers, text blocks, buttons, images and other elements.
+Tablet/mobile gaps and padding may stay equal to desktop or become smaller as the
+viewport narrows. They must never become larger without an explicit,
+designer-approved reason.
+
+Examples:
+  Desktop 20px -> Tablet 20px  allowed
+  Desktop 20px -> Tablet 16px  allowed
+  Desktop 20px -> Tablet 12px  allowed
+  Desktop 20px -> Tablet 40px  forbidden
+
+Use the desktop value as a per-layer ceiling for item spacing, row/column gaps
+and all four padding sides. Run the comparison after breakpoint variable modes
+resolve, because a Tab/Mobi token can otherwise make spacing larger even when
+the direct layout transform only reduced it. Preserve token bindings: if a
+responsive variable mode exceeds desktop, keep that node on the desktop mode
+for the relevant spacing collection rather than detaching or hardcoding the
+token. Preserve the desktop hierarchy and visual relationships; never introduce
+extra whitespace randomly.
 
 BREAKPOINTS
 Default design frames are 1440 (source), 768 (tablet) and 320 (mobile).
+The designer's exact requested width always overrides 768/320. Use targetWidth
+with the requested Tablet or Mobile behaviour; when no category is supplied,
+widths at or below 480px infer Mobile and larger widths infer Tablet.
+Process one breakpoint at a time. A Tablet request without a width changes only
+768px; a Mobile request without a width changes only 320px. If the designer
+requests Tablet and Mobile, finish
+and validate Tablet first, report it, then ask for confirmation before beginning
+Mobile. Never generate or modify both in one make_responsive call.
 Do not create 1280, 1024, 480 or 390 design frames by default. Intermediate
 widths are handled by Auto Layout, fill/hug sizing, wrapping, min/max widths and
 component variants — not by more frames. Add a width only when the user asks,
@@ -134,30 +226,25 @@ the project already uses it, or a problem cannot be validated without it.
 390px and 320px are both QA widths. A layout that works at 390 but breaks at 320
 is not responsive.
 
-TYPOGRAPHY — IDENTICAL AT EVERY BREAKPOINT
-Desktop, Tablet and Mobile use the SAME local text style. Responsive design
-changes the layout, not the typography.
+TYPOGRAPHY — KEEP IT CONNECTED TO THE DESIGN SYSTEM
+Keep the exact desktop text style/variable whenever it remains readable. Body
+copy should normally stay close to its desktop size, especially at Tablet; never
+enlarge it merely because the frame is 768px. Reduce spacing and improve column
+width before allowing excessive wrapping.
 
-  If desktop uses "Subtitle Alt", then tablet uses "Subtitle Alt" and mobile
-  uses "Subtitle Alt". Full stop.
+When an oversized heading still does not fit after layout adaptation, use an
+existing smaller Tablet/Mobile text style or typography variable from the same
+family. Never invent a breakpoint size, detach a text layer, or manually override
+font family, size, weight, line height or letter spacing. If no relevant token or
+style exists, keep the desktop style and flag it for designer review.
 
-Never do any of these:
-  - switch to "Subtitle Alt / Tablet", "Subtitle Alt / Mobile" or any
-    breakpoint-specific variant
-  - switch to a different style with a smaller font size
-  - create a new text style for a breakpoint
-  - detach a layer from its local style
-  - override font family, size, weight, line height or letter spacing by hand
-
-Inspect the source desktop layer, reuse its linked local style, leave it as is.
-
-WHEN TEXT DOES NOT FIT — never reduce the font size
-Solve it with layout, in this order:
+WHEN TEXT DOES NOT FIT — solve layout first
+Use this order before considering an existing responsive typography token:
   1. Fill container            5. Responsive stacking
   2. Hug contents              6. Reduced container width
   3. Natural text wrapping     7. Existing local spacing values
   4. Auto Layout               8. Row layout → column layout
-The typography itself stays unchanged.
+Multiline text uses Fill width + Auto height. Single-line labels may Hug contents.
 
 AUTO LAYOUT & SIZING — no fixed width, no fixed height
 The default for a normal responsive container is:
@@ -184,14 +271,27 @@ Only intrinsically-sized elements keep explicit dimensions: icons, avatars,
 brand-specified logos, small decorative elements, and controls the design system
 sizes explicitly.
 
-Preserve correct existing Auto Layout; do not flatten it. Avoid absolute
-positioning unless the visual treatment genuinely requires it.
+Express all of this with set_layout_sizing(nodeId, horizontal, vertical), which
+sets Fill / Hug / Fixed without touching pixel values. resize_node writes a
+literal size and pins the layer to one viewport — it is for intrinsically-sized
+elements only, and it refuses to pin the height of a container that currently
+hugs its content. set_auto_layout sets height to Hug by default, because Figma
+otherwise leaves a converted frame's height fixed at whatever it happened to be.
+
+A frame cannot hug without Auto Layout: Figma has no content-driven height to
+fall back on. If make_responsive reports a container as "still fixed height",
+give that wrapper Auto Layout rather than resizing it.
+
+Preserve correct existing Auto Layout; do not flatten it. Do not introduce new
+absolute positioning. Existing absolute-positioned layers follow the immutable
+copy-and-leave-untouched rule above.
 
 RESPONSIVE BEHAVIOUR, NOT SCALING
 Never scale a section proportionally like an image. Decide behaviour per section:
   Navigation  desktop bar → existing mobile variant → hamburger; never a shrunk
               desktop nav. Validate logo, CTA and hamburger do not overlap at 320.
-  Hero        768: keep side-by-side, equalise the split.
+  Hero        768: keep side-by-side only while both columns remain readable;
+              stack when the narrow column would create excessive wrapping.
               320: stack, copy above media unless the design says otherwise.
   Card grid   4 per row → 2 on tablet → 1 on mobile. Do not force narrow cards.
   Forms       multi-field rows stack; inputs fill width; keep label/input pairs
@@ -200,7 +300,20 @@ Never scale a section proportionally like an image. Decide behaviour per section
               text to fit.
   Footer      multi-column → 2 on tablet → 1 on mobile.
   Generic     reduce padding and gaps, release fixed dimensions, allow wrapping,
-              stack when a horizontal row cannot fit.
+              stack when a horizontal row cannot fit. At 768, evaluate two
+              columns instead of automatically treating Tablet as Mobile.
+
+IMAGES
+Preserve every image's aspect ratio, crop intent, focal point, subject visibility,
+corner radius and relationship to nearby text. Never stretch, remove or replace
+an image during responsive work. At Tablet, scale proportionally and stack a
+text/image split only when either column becomes unreadable. At Mobile, normal
+content images use Fill width with Auto/aspect-controlled height; intentional
+fixed crops keep their crop behaviour and focal position.
+
+MOBILE TOUCH TARGETS
+Interactive controls at Mobile should provide at least a 44×44px tap area unless
+an existing component/token defines a larger target.
 
 CONTAINERS (fallback only — an existing project container system wins)
   1440: max content 1200–1280, side padding 64–80
@@ -274,10 +387,10 @@ the section for manual review. A clearly flagged fallback is a correct outcome;
 a confident wrong guess is not.
 
 DEFINITION OF DONE
-All three frames complete (1440 · 768 · 320) · local components reused, none
-detached, variants intact · every breakpoint on the SAME local text styles as
-desktop · colour styles and variables preserved · no duplicate components · all
-major layers meaningfully named, consistent across breakpoints · no "Frame 123"
+The requested exact-width frame is complete and the desktop source is unchanged ·
+local components reused, none detached, variants intact · typography remains
+linked to existing styles/variables · colour styles and variables preserved · no
+duplicate components · all major layers meaningfully named · no "Frame 123"
 names left · empty, duplicate and hidden-unused layers removed · redundant
 wrappers and excessive nesting reduced · responsive groups on Auto Layout · no
 fixed height on any section, card, container or text layer · text on auto height ·

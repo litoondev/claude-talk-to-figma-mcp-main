@@ -79,6 +79,30 @@ interface FrameReport {
   frameId: string | null;
   frameName: string;
   created: boolean;
+  updated: boolean;
+  reusedExistingFrame?: boolean;
+  replacedEmptyPlaceholder?: boolean;
+  absoluteLayersPreserved?: Array<{ id: string; name: string }>;
+  imageAspectRatiosPreserved?: number;
+  absoluteVariableModesPreserved?: Array<{
+    nodeId: string;
+    nodeName: string;
+    collectionId: string;
+    collectionName: string;
+    modeId: string;
+    modeName: string | null;
+  }>;
+  desktopSpacingReferenceCount?: number;
+  spacingIncreasesPrevented?: Array<{
+    nodeId: string;
+    nodeName: string;
+    property: string;
+    desktop: number;
+    responsiveBefore: number;
+    final: number;
+    method: string;
+  }>;
+  desktopSpacingWarnings?: string[];
   sections: Array<{ name: string; kind: string; changes: string[] }>;
   reusedVariants: string[];
   preservedTextStyles: number;
@@ -89,6 +113,14 @@ interface FrameReport {
   textAutoHeight: number;
   fixedHeightsReleased: number;
   fixedWidthsReleased: number;
+  heightConstraintsCleared: number;
+  fixedHeightBlockers: Array<{ name: string; id: string; height: number }>;
+  variableModes?: Array<{
+    collectionId: string;
+    collectionName: string;
+    modeId: string;
+    modeName: string;
+  }>;
   renamed: string[];
   removed: string[];
   collapsed: string[];
@@ -138,7 +170,7 @@ function describeBehavior(behavior: string): string {
     "keep-horizontal": "keep horizontal",
     "table-horizontal-scroll": "table scrolls horizontally",
     "flag-manual-review": "FLAG for manual review",
-    "flag-absolute-positioning": "FLAG absolute positioning",
+    "flag-absolute-positioning": "preserve absolute layers unchanged; FLAG for manual adjustment",
   };
   return map[behavior] ?? behavior;
 }
@@ -150,9 +182,10 @@ export function registerResponsiveTools(server: McpServer): void {
     "Inspect a desktop frame, page or section and report how it should behave responsively — " +
       "WITHOUT modifying anything. Classifies each section (navigation, hero, card grid, form, " +
       "table, footer), reports auto-layout readiness, fixed widths and absolutely positioned " +
-      "children that cannot reflow, finds existing tablet/mobile frames so they can be updated " +
-      "rather than duplicated, and returns the planned responsive behaviour per section for " +
-      "tablet and mobile. Run this before make_responsive to review the plan, or on its own to " +
+      "layers that must be copied unchanged and left for manual designer adjustment, finds " +
+      "existing tablet/mobile frames so they can be updated " +
+      "rather than duplicated, and returns planned responsive behaviour per section for the " +
+      "768/320 defaults or an exact targetWidth. Run this before make_responsive to review the plan, or on its own to " +
       "audit an existing design for responsive problems.",
     {
       nodeId: z
@@ -167,17 +200,30 @@ export function registerResponsiveTools(server: McpServer): void {
             "possible; 'balanced' allows minor restructuring; 'flexible' allows larger layout " +
             "restructuring. Typography is never altered in any mode."
         ),
+      breakpoint: z
+        .enum(["tablet", "mobile"])
+        .optional()
+        .describe("Breakpoint behavior to analyze when targetWidth is supplied."),
+      targetWidth: z
+        .number()
+        .positive()
+        .max(100000)
+        .optional()
+        .describe("Exact responsive width to analyze instead of the 768/320 defaults."),
     },
-    async ({ nodeId, preservation }) => {
+    async ({ nodeId, preservation, breakpoint, targetWidth }) => {
       try {
         const r = (await sendCommandToFigma("analyze_responsive", {
           nodeId,
           preservation: preservation ?? "strict",
+          breakpoint,
+          targetWidth,
         })) as {
           source: Record<string, unknown>;
           sectionCount: number;
           sections: SectionAnalysis[];
           plans: Record<string, PlanEntry[]>;
+          planWidths?: Record<string, number>;
           existingResponsiveFrames: Array<{ id: string; name: string; width: number }>;
           sourceIssues: ValidationResult;
           readiness: {
@@ -243,10 +289,16 @@ export function registerResponsiveTools(server: McpServer): void {
             );
           }
           if (tabletPlan) {
-            lines.push(`      768:  ${tabletPlan.behaviors.map(describeBehavior).join(" · ")}`);
+            lines.push(
+              `      ${r.planWidths?.tablet ?? 768}:  ` +
+                tabletPlan.behaviors.map(describeBehavior).join(" · ")
+            );
           }
           if (mobilePlan) {
-            lines.push(`      320:  ${mobilePlan.behaviors.map(describeBehavior).join(" · ")}`);
+            lines.push(
+              `      ${r.planWidths?.mobile ?? 320}:  ` +
+                mobilePlan.behaviors.map(describeBehavior).join(" · ")
+            );
           }
         }
 
@@ -258,7 +310,8 @@ export function registerResponsiveTools(server: McpServer): void {
 
         lines.push("\n── NEXT ───────────────────────────────────────────────");
         lines.push(
-          "  Run make_responsive to generate 768px and 320px frames from this plan.\n" +
+          "  Run make_responsive for the requested breakpoint only. Complete and validate " +
+            "Tablet before asking whether to proceed to Mobile.\n" +
             "  Nothing has been modified by this analysis."
         );
 
@@ -275,19 +328,34 @@ export function registerResponsiveTools(server: McpServer): void {
   // ── 2. make_responsive ──────────────────────────────────────────────────
   server.tool(
     "make_responsive",
-    "Generate responsive tablet (768px) and mobile (320px) versions of a desktop frame, page or " +
-      "section. Works by CLONING the source and adapting the clone's layout — so component " +
-      "instances stay connected, variable and style bindings survive, copy is never rewritten, " +
-      "and the original desktop frame is never modified. " +
-      "Sections are adapted by behaviour, not by scaling: grids drop columns, heroes stack with " +
-      "copy above media, form rows go single-column, navigation switches to an existing mobile " +
-      "variant, wide tables scroll rather than shrink. " +
-      "TYPOGRAPHY IS NEVER CHANGED — every breakpoint keeps the exact same local text style as " +
-      "the desktop source. No style switching, no size, weight, line-height or letter-spacing " +
-      "edits. Text that does not fit is solved with Fill container, Hug contents, wrapping and " +
-      "stacking. Containers are set to Fill width / Hug height so nothing carries a fixed size. " +
-      "Every generated mobile frame is validated at BOTH 390px and 320px. Anything that cannot " +
-      "be adapted safely is left alone and reported as needing manual review. " +
+    "Generate one responsive breakpoint from a desktop frame: Tablet (default 768px) or " +
+      "Mobile (default 320px). When targetWidth is supplied, that exact width overrides the " +
+      "default and is used for the frame name, resize, layout adaptation, and QA. " +
+      "WORKFLOW: Desktop -> Duplicate -> Move beside desktop -> Rename for breakpoint -> " +
+      "Resize -> Adapt the copied frame only. If a matching breakpoint frame already exists " +
+      "beside the desktop, update it instead of creating another frame. Empty breakpoint " +
+      "placeholders are refreshed from an exact desktop clone. " +
+      "The original desktop frame is NEVER modified. Component instances stay connected, " +
+      "variable and style bindings survive, copy is never rewritten. " +
+      "Any absolute-positioned layer is copied exactly with desktop and treated as an immutable " +
+      "subtree: never ungrouped, resized, rebound, renamed, reordered, converted, or adapted. " +
+      "It is reported for manual designer adjustment even when it overflows the breakpoint. " +
+      "DESKTOP SPACING IS THE CEILING: inspect desktop gaps and padding first. Tablet/mobile " +
+      "spacing may stay equal or become smaller, but must never increase without an explicit " +
+      "designer reason. A final comparison prevents accidental increases, including increases " +
+      "caused by responsive variable modes, without detaching spacing tokens. " +
+      "IMPORTANT: Always duplicate the desktop first and place the copy in the target Tab/Mobile " +
+      "section — never do responsive work on the desktop frame and then move it. " +
+      "Use targetParentId to place the generated frame inside a specific section/frame, or " +
+      "targetParentIds to specify different parents per breakpoint. " +
+      "Sections are adapted by behaviour: grids drop columns, heroes stack, forms go single-column. " +
+      "Typography stays linked to the design system. The automatic pass preserves the exact " +
+      "desktop style and never writes manual font values; if QA still finds an oversized heading, " +
+      "use only an existing smaller responsive style/token from the same family. " +
+      "Containers use Fill width / Hug height. Text uses auto height + Fill width. " +
+      "Every mobile frame is validated at BOTH 390px and 320px. " +
+      "Run exactly one breakpoint at a time. If both are requested, finish and validate Tablet, " +
+      "then ask the designer before running Mobile. " +
       "Call get_design_system and analyze_responsive first.",
     {
       nodeId: z
@@ -296,10 +364,22 @@ export function registerResponsiveTools(server: McpServer): void {
         .describe("Source frame to make responsive. Defaults to the current Figma selection."),
       breakpoints: z
         .array(z.enum(["tablet", "mobile"]))
+        .min(1)
+        .max(1)
         .optional()
         .describe(
-          "Which frames to generate. Default ['tablet','mobile'] → 768px and 320px. " +
-            "Intermediate widths are handled by auto layout rather than extra frames."
+          "The single breakpoint to generate. Default ['tablet']. Complete and validate Tablet " +
+            "before running Mobile in a separate call. When omitted with targetWidth, widths at " +
+            "or below 480px infer Mobile; larger widths infer Tablet."
+        ),
+      targetWidth: z
+        .number()
+        .positive()
+        .max(100000)
+        .optional()
+        .describe(
+          "Exact responsive frame width in pixels. Overrides the 768px Tablet or 320px Mobile " +
+            "default. Examples: 834 with breakpoints:['tablet']; 390 with breakpoints:['mobile']."
         ),
       preservation: z
         .enum(["strict", "balanced", "flexible"])
@@ -326,16 +406,34 @@ export function registerResponsiveTools(server: McpServer): void {
         .number()
         .optional()
         .describe("Horizontal gap between the source frame and generated frames. Default 120px."),
+      targetParentId: z
+        .string()
+        .optional()
+        .describe(
+          "ID of the frame/section where the generated responsive frame should be placed. " +
+            "By default the clone stays beside the desktop in the same section/page area. " +
+            "Set this only when the existing responsive slot is inside another specific parent."
+        ),
+      targetParentIds: z
+        .record(z.string())
+        .optional()
+        .describe(
+          "Per-breakpoint target parents, e.g. { tablet: '123:456', mobile: '789:012' }. " +
+            "Overrides targetParentId for specific breakpoints."
+        ),
     },
-    async ({ nodeId, breakpoints, preservation, mode, cleanLayers, gutter }) => {
+    async ({ nodeId, breakpoints, targetWidth, preservation, mode, cleanLayers, gutter, targetParentId, targetParentIds }) => {
       try {
         const r = (await sendCommandToFigma("make_responsive", {
           nodeId,
-          breakpoints: breakpoints ?? ["tablet", "mobile"],
+          breakpoints,
+          targetWidth,
           preservation: preservation ?? "strict",
           mode: mode ?? "create",
           cleanLayers: cleanLayers !== false,
           gutter,
+          targetParentId,
+          targetParentIds,
         })) as {
           mode?: string;
           previewOnly?: boolean;
@@ -365,14 +463,18 @@ export function registerResponsiveTools(server: McpServer): void {
         lines.push(`Responsive update complete — source "${r.source.name}" (${r.source.width}px)`);
         lines.push(`Preservation mode: ${r.preservation}`);
 
-        // Created
-        lines.push("\nCreated:");
+        lines.push("\nResponsive frames:");
         for (const f of r.frames) {
           if (f.error) {
             lines.push(`  ✕ ${f.breakpoint}: ${f.error}`);
             continue;
           }
-          lines.push(`  - ${f.frameName} (${f.width}px)`);
+          const action = f.updated
+            ? f.replacedEmptyPlaceholder
+              ? "refreshed existing empty slot from desktop"
+              : "updated existing frame"
+            : "duplicated from desktop";
+          lines.push(`  - ${f.frameName} (${f.width}px) — ${action}`);
         }
 
         // Reused — the point of the whole exercise
@@ -386,17 +488,18 @@ export function registerResponsiveTools(server: McpServer): void {
         const stylesInUse = r.frames.flatMap((f) => f.textStylesInUse ?? []);
         const preservedType = r.frames.reduce((n, f) => n + (f.preservedTextStyles ?? 0), 0);
 
-        lines.push("\nTypography — unchanged across all breakpoints:");
+        lines.push("\nTypography — existing style/variable links preserved:");
         if (preservedType > 0) {
           lines.push(
-            `  ${preservedType} text layers kept their original local style, identical to desktop.`
+            `  ${preservedType} text layers kept their original linked local style.`
           );
         }
         if (stylesInUse.length) {
           lines.push(`  Styles in use: ${Array.from(new Set(stylesInUse)).join(", ")}`);
         }
         lines.push(
-          "  No style was switched, no size, weight, line height or letter spacing was altered."
+          "  No manual font values were introduced; responsive variable modes may resolve " +
+            "existing typography tokens for the requested width."
         );
 
         // Sizing — fill/hug replacing fixed dimensions.
@@ -404,12 +507,81 @@ export function registerResponsiveTools(server: McpServer): void {
         const toHug = r.frames.reduce((n, f) => n + (f.setToHug ?? 0), 0);
         const heights = r.frames.reduce((n, f) => n + (f.fixedHeightsReleased ?? 0), 0);
         const autoH = r.frames.reduce((n, f) => n + (f.textAutoHeight ?? 0), 0);
-        if (toFill || toHug || heights || autoH) {
+        const constraints = r.frames.reduce((n, f) => n + (f.heightConstraintsCleared ?? 0), 0);
+        const imageRatios = r.frames.reduce(
+          (n, f) => n + (f.imageAspectRatiosPreserved ?? 0),
+          0
+        );
+        if (toFill || toHug || heights || autoH || constraints || imageRatios) {
           lines.push("\nResponsive sizing (fixed dimensions removed):");
           if (toFill) lines.push(`  ${toFill} elements → Fill container`);
           if (toHug) lines.push(`  ${toHug} elements → Hug contents`);
           if (heights) lines.push(`  ${heights} fixed heights released`);
           if (autoH) lines.push(`  ${autoH} text layers → auto height`);
+          if (constraints) lines.push(`  ${constraints} min/max height constraints cleared`);
+          if (imageRatios) lines.push(`  ${imageRatios} image/crop aspect ratios preserved`);
+        }
+
+        const variableModes = r.frames.flatMap((f) => f.variableModes ?? []);
+        if (variableModes.length) {
+          lines.push("\nResponsive variable modes:");
+          for (const mode of variableModes) {
+            lines.push(`  ${mode.collectionName} → ${mode.modeName}`);
+          }
+        }
+
+        const spacingReferences = r.frames.reduce(
+          (count, frame) => count + (frame.desktopSpacingReferenceCount ?? 0),
+          0
+        );
+        const preventedSpacing = r.frames.flatMap(
+          (frame) => frame.spacingIncreasesPrevented ?? []
+        );
+        if (spacingReferences) {
+          lines.push("\nDesktop spacing comparison:");
+          lines.push(
+            `  Checked ${spacingReferences} responsive containers against their desktop gaps and padding.`
+          );
+          if (preventedSpacing.length) {
+            for (const change of preventedSpacing.slice(0, 20)) {
+              lines.push(
+                `  - ${change.nodeName}: ${change.property} ${change.responsiveBefore}px → ` +
+                  `${change.final}px (desktop ceiling ${change.desktop}px; ${change.method})`
+              );
+            }
+            if (preventedSpacing.length > 20) {
+              lines.push(`  …and ${preventedSpacing.length - 20} more spacing corrections`);
+            }
+          } else {
+            lines.push("  No tablet/mobile gap or padding exceeded its desktop reference.");
+          }
+        }
+
+        const absoluteLayers = r.frames.flatMap((f) =>
+          (f.absoluteLayersPreserved ?? []).map((layer) => ({
+            ...layer,
+            frame: f.frameName,
+          }))
+        );
+        if (absoluteLayers.length) {
+          lines.push("\nAbsolute-positioned layers preserved exactly from desktop:");
+          for (const layer of absoluteLayers) {
+            lines.push(`  - ${layer.name} (${layer.id}) in ${layer.frame} — manual adjustment`);
+          }
+          lines.push(
+            "  These layers and their descendants were not ungrouped, resized, rebound, " +
+              "renamed, reordered, converted, or included in automatic responsive fixes."
+          );
+        }
+
+        // Containers that cannot hug until someone adds auto layout to them.
+        const blockers = r.frames.flatMap((f) => f.fixedHeightBlockers ?? []);
+        if (blockers.length) {
+          lines.push("\nStill fixed height — these need Auto Layout before they can hug:");
+          for (const b of blockers.slice(0, 15)) {
+            lines.push(`  ${b.name} (${b.height}px, ${b.id})`);
+          }
+          if (blockers.length > 15) lines.push(`  …and ${blockers.length - 15} more`);
         }
 
         // Responsive changes, per frame
@@ -504,8 +676,8 @@ export function registerResponsiveTools(server: McpServer): void {
       "position, width, height, auto layout, constraints, spacing, colors, variables, or styles. " +
       "Groups standing in for responsive structure and excessively deep nesting are reported " +
       "rather than restructured. Preserves existing meaningful names and design-system conventions. " +
-      "Run it on the desktop source before make_responsive so all three breakpoints share the " +
-      "same names; generated frames are cleaned automatically.",
+      "Use it only when layer cleanup is part of the requested scope. Generated responsive " +
+      "frames are cleaned automatically without changing the approved desktop source.",
     {
       nodeId: z
         .string()

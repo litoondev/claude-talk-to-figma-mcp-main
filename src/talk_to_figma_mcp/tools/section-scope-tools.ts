@@ -111,8 +111,10 @@ export function registerSectionScopeTools(server: McpServer): void {
       "Triggers: user selects a section in Figma, says 'work only in this section', " +
       "'focus on [section name]', 'don't touch anything outside this section', " +
       "or shares a Figma URL containing a node-id for a section. " +
-      "If the user selects a section before asking you to do work, call get_selection first, " +
-      "then pass the selected node's ID here to lock scope.",
+      "When the user refers to 'the selected section', 'this section', or 'the section I picked', " +
+      "call this with no arguments — it reads the live Figma selection and resolves the enclosing " +
+      "section even when the user selected a frame or card inside it. Never ask the user to pick " +
+      "a section from a list while something is selected in Figma.",
     {
       sectionIdOrUrl: z
         .string()
@@ -124,6 +126,7 @@ export function registerSectionScopeTools(server: McpServer): void {
     },
     async ({ sectionIdOrUrl }) => {
       let resolvedId: string | null = null;
+      let resolvedFrom: string | null = null;
 
       // Resolve the node ID from whatever the caller provided
       if (!sectionIdOrUrl) {
@@ -156,7 +159,9 @@ export function registerSectionScopeTools(server: McpServer): void {
                 text: JSON.stringify({
                   error: "no_selection",
                   message: "Nothing is selected in Figma.",
-                  hint: "Select a SECTION node in Figma first, or pass sectionIdOrUrl explicitly.",
+                  hint:
+                    "Ask the user to select the section (or anything inside it) and say when " +
+                    "they have, or pass sectionIdOrUrl explicitly. Do not guess a section.",
                 }),
               },
             ],
@@ -178,7 +183,17 @@ export function registerSectionScopeTools(server: McpServer): void {
             isError: true,
           };
         }
-        resolvedId = nodes[0].id;
+        // The user rarely clicks the section band itself — they click a frame or
+        // card inside it. Treat the nearest enclosing SECTION as the target
+        // rather than bouncing the request back as a question.
+        const selected = nodes[0];
+        resolvedId =
+          selected.type === "SECTION"
+            ? selected.id
+            : selected.enclosingSection?.id ?? selected.id;
+        if (resolvedId !== selected.id) {
+          resolvedFrom = `the section containing the selected ${selected.type.toLowerCase()} "${selected.name}"`;
+        }
       } else {
         // Try to parse as URL first, then fall back to bare node ID
         resolvedId = parseNodeIdFromUrl(sectionIdOrUrl) ?? sectionIdOrUrl.trim();
@@ -214,7 +229,10 @@ export function registerSectionScopeTools(server: McpServer): void {
               text: JSON.stringify({
                 error: "not_a_section",
                 message: `Node "${resolvedId}" is a ${nodeType || "unknown type"}, not a SECTION.`,
-                hint: "Only SECTION nodes can be used as a scope target. Select or reference a section.",
+                hint:
+                  "Only SECTION nodes can be used as a scope target. If the node sits inside a " +
+                  "section, pass that section's ID — or select the node in Figma and call this " +
+                  "with no argument, which resolves the enclosing section automatically.",
                 nodeInfo: { id: (nodeInfo as any)?.id, name: (nodeInfo as any)?.name, type: nodeType },
               }),
             },
@@ -237,7 +255,9 @@ export function registerSectionScopeTools(server: McpServer): void {
             type: "text",
             text: JSON.stringify({
               success: true,
-              message: `Section scope set to "${sectionName}" (${resolvedId}).`,
+              message: resolvedFrom
+                ? `Section scope set to "${sectionName}" (${resolvedId}) — resolved from ${resolvedFrom}. Confirm this is the intended section if the user's wording was ambiguous.`
+                : `Section scope set to "${sectionName}" (${resolvedId}).`,
               rules: [
                 "All creation commands (create_rectangle, create_frame, create_text, etc.) will " +
                   "automatically place new nodes inside this section.",

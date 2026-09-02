@@ -484,6 +484,25 @@ Nothing is ever scaled proportionally like an image.
 Default design frames are **1440 → 768 → 320**. Intermediate widths are handled
 by Auto Layout, fill/hug sizing and wrapping rather than by more frames.
 
+An exact designer-specified width always overrides the defaults. Pass
+`targetWidth` with the breakpoint behaviour: an 834px Tablet is named and built
+at 834px, while a 390px Mobile is named and built at 390px. Existing 768px or
+320px frames are kept separate and are not overwritten by a different width.
+
+Breakpoints are processed separately. Generate and validate Tablet first; begin
+Mobile only in a later run after the designer confirms it.
+
+Absolute-positioned layers are copied with the desktop frame and left completely
+unchanged. The responsive engine does not ungroup, restructure, detach, rebuild,
+convert, resize, rebind, rename, reorder, or optimize those subtrees. They are
+reported for manual designer adjustment even when they do not fit the new width.
+
+Desktop spacing is the maximum reference for responsive output. Tablet and
+mobile gaps and padding may stay the same or decrease, but they are never allowed
+to increase accidentally. The final responsive pass compares each matched
+container with desktop after variable modes resolve and caps increases while
+preserving variable bindings.
+
 **QA runs at both 390px and 320px.** A layout that survives 390 and breaks at
 320 is not responsive.
 
@@ -492,23 +511,28 @@ by Auto Layout, fill/hug sizing and wrapping rather than by more frames.
 | Tool | Does |
 |---|---|
 | `analyze_responsive` | Classifies sections, reports the plan, finds existing responsive frames. **Changes nothing.** |
-| `make_responsive` | Generates 768 and 320 frames, validates them, returns a change summary |
+| `make_responsive` | Reuses an exact-width matching frame or duplicates desktop beside it, then renames, resizes, adapts, and validates one requested breakpoint (default 768/320, or exact `targetWidth`) |
 | `validate_responsive` | QA at any widths — overflow, off-canvas, overlap, tiny text, small tap targets |
 
 ### Preservation modes
 
 - **`strict`** (default) — layout flow only; typography untouched
-- **`balanced`** — additionally scales *unbound* typography
+- **`balanced`** — allows minor layout restructuring; typography remains untouched
 - **`flexible`** — allows larger restructuring
 
-Text bound to a text style is **never** overridden in any mode. Overriding the
-design system to fix a layout is backwards.
+The automatic pass preserves linked text styles in every mode. If layout changes
+still leave an oversized heading unreadable, use only an existing responsive
+style/token from the same family; never invent or manually override type values.
 
 ### Using it
 
 > "Analyze this page for responsive issues"
 
 > "Make this responsive"
+
+> "Make a Tablet version at 834px"
+
+> "Make a Mobile version at 390px"
 
 > "Check the mobile frame at 320"
 
@@ -688,8 +712,10 @@ the **Maximum tool response size** setting or `FIGMA_MCP_MAX_RESPONSE_CHARS`.
 `scan_text_nodes` and `set_multiple_text_contents` used to tint each text node
 orange and wait half a second for the tint to be visible — on a page with 60 text
 nodes that is 30 seconds of pure waiting, and it wrote to the document during
-what should have been a read. The highlighting is now off by default; pass
-`highlight: true` when a person is actually watching the canvas.
+what should have been a read. That highlighting is gone; live progress now comes
+from moving the selection instead, which touches nothing. `scan_text_nodes` also
+works in larger chunks, and the one-second pause between text-replacement chunks
+(which only existed to let the tint animate) is down to a short yield.
 
 ---
 

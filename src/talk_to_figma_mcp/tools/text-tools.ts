@@ -61,12 +61,8 @@ export function registerTextTools(server: McpServer): void {
           })
         ))
         .describe("Array of text node IDs and their replacement texts"),
-      highlight: z
-        .boolean()
-        .optional()
-        .describe("Flash each node orange as its text is replaced. Purely visual and adds ~0.5s per node — leave off unless a human is watching."),
     },
-    async ({ nodeId, text, highlight }, extra) => {
+    async ({ nodeId, text }, extra) => {
       try {
         if (!text || text.length === 0) {
           return {
@@ -93,7 +89,6 @@ export function registerTextTools(server: McpServer): void {
         const result = await sendCommandToFigma("set_multiple_text_contents", {
           nodeId,
           text,
-          highlight: highlight ?? false,
         });
 
         // Cast the result to a specific type to work with it safely
@@ -566,6 +561,62 @@ export function registerTextTools(server: McpServer): void {
               text: `Error loading font: ${error instanceof Error ? error.message : String(error)}`
             }
           ]
+        };
+      }
+    }
+  );
+
+  // Fix Text Sizing Tool
+  server.tool(
+    "fix_text_sizing",
+    "Scan all TEXT nodes in the current page (or a specific subtree) and enforce correct sizing rules: " +
+      "single-line text gets WIDTH_AND_HEIGHT (hug both axes); multi-line paragraphs get HEIGHT (auto height) " +
+      "plus FILL horizontal when inside an Auto Layout parent. Never sets a fixed pixel height on any text node. " +
+      "Run this after importing content or after any responsive work to ensure text grows naturally.",
+    {
+      nodeId: z.string().optional().describe(
+        "Scan only this subtree. Omit to scan the whole current page."
+      ),
+      scope: z.enum(["page", "document", "selection"]).optional().describe(
+        "Scope: 'page' (default) = current page, 'document' = all pages, 'selection' = selected nodes only."
+      ),
+    },
+    async ({ nodeId, scope }) => {
+      try {
+        const result = await sendCommandToFigma("fix_text_sizing", { nodeId, scope });
+        const r = result as {
+          success: boolean;
+          scope: string;
+          total: number;
+          fixed: number;
+          skipped: number;
+          errorCount: number;
+          message: string;
+          changes: Array<{ id: string; name: string; was: object; now: object }>;
+          errors: Array<{ id: string; name: string; error: string }>;
+        };
+        const lines: string[] = [
+          r.message,
+          `Scope: ${r.scope} | Total text nodes: ${r.total} | Fixed: ${r.fixed} | Skipped: ${r.skipped} | Errors: ${r.errorCount}`,
+        ];
+        if (r.changes.length > 0) {
+          lines.push("\nFixed nodes:");
+          for (const c of r.changes.slice(0, 30)) {
+            lines.push(`  • "${c.name}" (${c.id}): ${JSON.stringify(c.was)} → ${JSON.stringify(c.now)}`);
+          }
+          if (r.changes.length > 30) lines.push(`  … and ${r.changes.length - 30} more`);
+        }
+        if (r.errors.length > 0) {
+          lines.push("\nErrors:");
+          for (const e of r.errors) lines.push(`  ✕ "${e.name}" (${e.id}): ${e.error}`);
+        }
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      } catch (error) {
+        return {
+          content: [{
+            type: "text",
+            text: `Error fixing text sizing: ${error instanceof Error ? error.message : String(error)}`,
+          }],
         };
       }
     }
