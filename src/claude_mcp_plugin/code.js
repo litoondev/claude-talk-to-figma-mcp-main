@@ -977,6 +977,17 @@ figma.ui.onmessage = async (msg) => {
     case "close-plugin":
       figma.closePlugin();
       break;
+    case "set-file-key": {
+      if (msg.fileKey) {
+        const parsed = parseFigmaFileKey(msg.fileKey);
+        if (parsed) {
+          storedCustomFileKey = parsed;
+          figma.clientStorage.setAsync("mcp_custom_file_key", parsed).catch(() => {});
+          figma.notify(`Figma file key set: ${parsed}`);
+        }
+      }
+      break;
+    }
     case "execute-command": {
       // Execute commands received from UI (which gets them from WebSocket).
       // Every command is bracketed by activity events so the panel, the canvas
@@ -1221,6 +1232,10 @@ async function handleCommand(command, params) {
       return await getPages();
     case "get_file_key":
       return await getFileKey();
+    case "set_file_key":
+      return await setFileKey(params);
+    case "execute_code":
+      return await executeCode(params);
     case "set_current_page":
       return await setCurrentPage(params);
     case "rename_node":
@@ -1274,6 +1289,10 @@ async function handleCommand(command, params) {
       return await getVariables(params);
     case "set_variable":
       return await setVariable(params);
+    case "rename_variable":
+      return await renameVariable(params);
+    case "rename_variables":
+      return await renameVariables(params);
     case "apply_variable_to_node":
       return await applyVariableToNode(params);
     case "switch_variable_mode":
@@ -8922,6 +8941,51 @@ async function getPages() {
   };
 }
 
+let storedCustomFileKey = null;
+
+function parseFigmaFileKey(input) {
+  if (!input || typeof input !== "string") return null;
+  const trimmed = input.trim();
+  const urlMatch = trimmed.match(/figma\.com\/(?:design|file|board)\/([a-zA-Z0-9_-]+)/i);
+  if (urlMatch) return urlMatch[1];
+  if (/^[a-zA-Z0-9_-]{8,128}$/.test(trimmed)) return trimmed;
+  return trimmed;
+}
+
+async function initStoredFileKey() {
+  try {
+    const saved = await figma.clientStorage.getAsync("mcp_custom_file_key");
+    if (saved && typeof saved === "string") {
+      storedCustomFileKey = saved;
+    }
+  } catch (e) {}
+}
+initStoredFileKey();
+
+// Set or update custom file key / URL
+async function setFileKey(params) {
+  const { fileKey, url } = params || {};
+  const raw = fileKey || url;
+  if (!raw) {
+    throw new Error("Missing fileKey or url parameter");
+  }
+  const parsed = parseFigmaFileKey(raw);
+  if (!parsed) {
+    throw new Error("Invalid file key or Figma URL format");
+  }
+  storedCustomFileKey = parsed;
+  try {
+    await figma.clientStorage.setAsync("mcp_custom_file_key", parsed);
+  } catch (e) {}
+
+  return {
+    success: true,
+    fileKey: storedCustomFileKey,
+    source: "custom",
+    fileName: figma.root && figma.root.name ? figma.root.name : null,
+  };
+}
+
 // Return the key of the file this plugin is currently running in.
 //
 // This is what lets the REST-based comment tools work without the user pasting
@@ -8930,18 +8994,21 @@ async function getPages() {
 //
 // `figma.fileKey` is gated behind the private plugin API — it is populated when
 // the plugin runs with `enablePrivatePluginApi: true` (as this one does) or as a
-// local development / organisation plugin. On a public plugin build it is
-// undefined, so callers must handle that case rather than assume a value.
+// local development / organisation plugin. When unavailable, it falls back to
+// customFileKey configured via set_file_key or plugin UI.
 async function getFileKey() {
-  const fileKey = typeof figma.fileKey === "string" ? figma.fileKey : null;
+  const nativeKey = typeof figma.fileKey === "string" ? figma.fileKey : null;
+  const effectiveKey = nativeKey || storedCustomFileKey || null;
 
   return {
-    fileKey: fileKey,
+    fileKey: effectiveKey,
+    nativeFileKey: nativeKey,
+    customFileKey: storedCustomFileKey,
     // figma.root is the DocumentNode; its name is the file name.
     fileName: figma.root && figma.root.name ? figma.root.name : null,
     pageName: figma.currentPage ? figma.currentPage.name : null,
     pageId: figma.currentPage ? figma.currentPage.id : null,
-    available: fileKey !== null,
+    available: effectiveKey !== null,
   };
 }
 
@@ -10319,10 +10386,14 @@ async function getVariables(params) {
     scope,
     includeValues,
     limit,
+    offset,
   } = params || {};
 
   const index = await buildVariableIndex();
-  const max = typeof limit === "number" && limit > 0 ? limit : 200;
+  const parsedLimit = typeof limit === "string" ? parseInt(limit, 10) : limit;
+  const parsedOffset = typeof offset === "string" ? parseInt(offset, 10) : offset;
+  const start = typeof parsedOffset === "number" && !isNaN(parsedOffset) && parsedOffset >= 0 ? Math.floor(parsedOffset) : 0;
+  const max = parsedLimit === 0 ? Infinity : typeof parsedLimit === "number" && !isNaN(parsedLimit) && parsedLimit > 0 ? Math.floor(parsedLimit) : 200;
 
   // Unfiltered, a mature token file returns hundreds of variables with every
   // mode value attached. Filtering here is what keeps a token lookup usable.
@@ -10349,13 +10420,20 @@ async function getVariables(params) {
     };
   });
 
+  const paged = max === Infinity ? matches.slice(start) : matches.slice(start, start + max);
+  const truncated = max !== Infinity && start + paged.length < matches.length;
+  const nextOffset = truncated ? start + paged.length : null;
+
   return {
     collections,
     totalVariables: index.all.length,
     matchedVariables: matches.length,
-    returned: Math.min(matches.length, max),
-    truncated: matches.length > max,
-    variables: matches.slice(0, max).map((v) => describeVariable(index, v, { includeValues })),
+    offset: start,
+    limit: max === Infinity ? 0 : max,
+    returned: paged.length,
+    truncated,
+    nextOffset,
+    variables: paged.map((v) => describeVariable(index, v, { includeValues })),
   };
 }
 
@@ -10405,7 +10483,7 @@ function scopesForField(field) {
 
 // Create or update a variable
 async function setVariable(params) {
-  const { collectionId, collectionName, name, resolvedType, value, modeId, createIfMissing } =
+  const { collectionId, collectionName, name, newName, resolvedType, value, modeId, createIfMissing } =
     params || {};
 
   if (!figma.variables) {
@@ -10417,6 +10495,17 @@ async function setVariable(params) {
   if (!name) {
     throw new Error("Missing name parameter");
   }
+
+  // If newName is provided and value is not supplied, treat as rename
+  if (newName && (value === undefined || value === null)) {
+    return await renameVariable({
+      name,
+      newName,
+      collectionId,
+      collectionName,
+    });
+  }
+
   if (!resolvedType) {
     throw new Error("Missing resolvedType parameter");
   }
@@ -10474,6 +10563,11 @@ async function setVariable(params) {
     variable = figma.variables.createVariable(name, collection, resolvedType);
   }
 
+  // If newName is provided and differs, rename variable
+  if (newName && newName !== variable.name) {
+    variable.name = newName;
+  }
+
   // Determine mode
   const targetModeId = modeId || collection.modes[0].modeId;
 
@@ -10528,6 +10622,278 @@ async function setVariable(params) {
     resolvedType: variable.resolvedType,
     value: finalValue
   };
+}
+
+// Rename a single variable
+async function renameVariable(params) {
+  const { variableId, name, oldName, newName, collectionId, collectionName } = params || {};
+
+  if (!figma.variables) {
+    throw new Error(
+      "Variables API is not available. This feature requires Figma with Variables support."
+    );
+  }
+
+  const targetNewName = typeof newName === "string" ? newName.trim() : "";
+  if (!targetNewName) {
+    throw new Error("Missing or invalid newName parameter");
+  }
+
+  const lookupName = (name || oldName || "").trim();
+  if (!variableId && !lookupName) {
+    throw new Error("Either variableId or name (current variable name) must be provided");
+  }
+
+  let variable = null;
+
+  if (variableId) {
+    variable = await figma.variables.getVariableByIdAsync(variableId);
+    if (!variable) {
+      throw new Error(`Variable not found with ID: ${variableId}`);
+    }
+  } else {
+    const collections = await figma.variables.getLocalVariableCollectionsAsync();
+    let targetCollections = collections;
+
+    if (collectionId) {
+      targetCollections = collections.filter(c => c.id === collectionId);
+      if (!targetCollections.length) {
+        throw new Error(`Variable collection not found with ID: ${collectionId}`);
+      }
+    } else if (collectionName) {
+      targetCollections = collections.filter(c => c.name === collectionName);
+      if (!targetCollections.length) {
+        throw new Error(`Variable collection not found with name: "${collectionName}"`);
+      }
+    }
+
+    // Exact match first
+    for (const col of targetCollections) {
+      for (const varId of col.variableIds) {
+        const v = await figma.variables.getVariableByIdAsync(varId);
+        if (v && v.name === lookupName) {
+          variable = v;
+          break;
+        }
+      }
+      if (variable) break;
+    }
+
+    // Case-insensitive match fallback
+    if (!variable) {
+      for (const col of targetCollections) {
+        for (const varId of col.variableIds) {
+          const v = await figma.variables.getVariableByIdAsync(varId);
+          if (v && v.name.toLowerCase() === lookupName.toLowerCase()) {
+            variable = v;
+            break;
+          }
+        }
+        if (variable) break;
+      }
+    }
+
+    if (!variable) {
+      const scopeMsg = collectionName ? ` in collection "${collectionName}"` : "";
+      throw new Error(`Variable "${lookupName}" not found${scopeMsg}`);
+    }
+  }
+
+  const previousName = variable.name;
+  variable.name = targetNewName;
+
+  let colName = null;
+  if (variable.variableCollectionId) {
+    const col = await figma.variables.getVariableCollectionByIdAsync(variable.variableCollectionId);
+    if (col) colName = col.name;
+  }
+
+  return {
+    success: true,
+    variableId: variable.id,
+    oldName: previousName,
+    newName: variable.name,
+    collectionId: variable.variableCollectionId,
+    collectionName: colName,
+    resolvedType: variable.resolvedType,
+  };
+}
+
+// Bulk rename variables (by explicit list or by find & replace pattern)
+async function renameVariables(params) {
+  const { renames, find, replace, collectionId, collectionName, useRegex, caseSensitive } = params || {};
+
+  if (!figma.variables) {
+    throw new Error(
+      "Variables API is not available. This feature requires Figma with Variables support."
+    );
+  }
+
+  const renamed = [];
+  const errors = [];
+
+  // Pattern-based batch rename (e.g. find "Pages/", replace "Layout/Section/")
+  if (typeof find === "string" && typeof replace === "string") {
+    const collections = await figma.variables.getLocalVariableCollectionsAsync();
+    let targetCollections = collections;
+
+    if (collectionId) {
+      targetCollections = collections.filter(c => c.id === collectionId);
+    } else if (collectionName) {
+      targetCollections = collections.filter(c => c.name === collectionName);
+      if (!targetCollections.length) {
+        throw new Error(`Variable collection not found with name: "${collectionName}"`);
+      }
+    }
+
+    let regex;
+    try {
+      const flags = caseSensitive === false ? "gi" : "g";
+      if (useRegex) {
+        regex = new RegExp(find, flags);
+      } else {
+        const escaped = find.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        regex = new RegExp(escaped, flags);
+      }
+    } catch (e) {
+      throw new Error(`Invalid regex pattern in find parameter: ${e.message}`);
+    }
+
+    for (const col of targetCollections) {
+      for (const varId of col.variableIds) {
+        try {
+          const v = await figma.variables.getVariableByIdAsync(varId);
+          if (!v) continue;
+          if (regex.test(v.name)) {
+            regex.lastIndex = 0;
+            const prevName = v.name;
+            const nextName = v.name.replace(regex, replace);
+            if (prevName !== nextName) {
+              v.name = nextName;
+              renamed.push({
+                variableId: v.id,
+                oldName: prevName,
+                newName: v.name,
+                collectionId: col.id,
+                collectionName: col.name,
+                resolvedType: v.resolvedType,
+              });
+            }
+          }
+        } catch (err) {
+          errors.push({
+            variableId: varId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
+
+    return {
+      success: true,
+      totalMatched: renamed.length + errors.length,
+      renamedCount: renamed.length,
+      errorCount: errors.length,
+      pattern: { find, replace },
+      renamed,
+      errors,
+    };
+  }
+
+  // Explicit list-based batch rename
+  if (Array.isArray(renames)) {
+    for (let i = 0; i < renames.length; i++) {
+      const item = renames[i];
+      try {
+        const itemResult = await renameVariable({
+          variableId: item.variableId,
+          name: item.name,
+          oldName: item.oldName,
+          newName: item.newName,
+          collectionId: item.collectionId || collectionId,
+          collectionName: item.collectionName || collectionName,
+        });
+        renamed.push(itemResult);
+      } catch (err) {
+        errors.push({
+          index: i,
+          item,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    return {
+      success: true,
+      totalRequested: renames.length,
+      renamedCount: renamed.length,
+      errorCount: errors.length,
+      renamed,
+      errors,
+    };
+  }
+
+  throw new Error(
+    "Either 'renames' array or 'find' and 'replace' string parameters must be provided"
+  );
+}
+
+function safeSerializePluginValue(val, depth = 0, seen = new Set()) {
+  if (depth > 6) return "[Depth limit reached]";
+  if (val === null || val === undefined) return val;
+  const type = typeof val;
+  if (type === "string" || type === "number" || type === "boolean") return val;
+  if (type === "function") return `[Function ${val.name || "anonymous"}]`;
+  if (type === "symbol" || type === "bigint") return val.toString();
+
+  if (seen.has(val)) return "[Circular]";
+  seen.add(val);
+
+  if (Array.isArray(val)) {
+    return val.map(item => safeSerializePluginValue(item, depth + 1, seen));
+  }
+
+  // Handle Figma Node or Figma Variable
+  if (val.id !== undefined && val.type !== undefined) {
+    const nodeSummary = { id: val.id, type: val.type };
+    if (val.name !== undefined) nodeSummary.name = val.name;
+    if (typeof val.x === "number") nodeSummary.x = val.x;
+    if (typeof val.y === "number") nodeSummary.y = val.y;
+    if (typeof val.width === "number") nodeSummary.width = val.width;
+    if (typeof val.height === "number") nodeSummary.height = val.height;
+    return nodeSummary;
+  }
+
+  const out = {};
+  for (const key of Object.keys(val)) {
+    try {
+      out[key] = safeSerializePluginValue(val[key], depth + 1, seen);
+    } catch (e) {
+      out[key] = "[Unserializable property]";
+    }
+  }
+  return out;
+}
+
+// Execute arbitrary JavaScript code inside the plugin sandbox
+async function executeCode(params) {
+  const { code } = params || {};
+  if (!code || typeof code !== "string") {
+    throw new Error("Missing code parameter (must be a JavaScript string)");
+  }
+
+  try {
+    const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+    const runner = new AsyncFunction("figma", "params", code);
+    const rawResult = await runner(figma, params.params || params);
+
+    return {
+      success: true,
+      result: safeSerializePluginValue(rawResult),
+    };
+  } catch (error) {
+    throw new Error(`execute_code failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 // Apply a variable binding to a node property

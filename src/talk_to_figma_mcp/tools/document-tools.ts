@@ -620,4 +620,100 @@ export function registerDocumentTools(server: McpServer): void {
       }
     }
   );
+
+  // Get File Key Tool
+  server.tool(
+    "get_file_key",
+    "Get the Figma file key and file metadata for the current document",
+    {},
+    async () => {
+      try {
+        const result = await sendCommandToFigma("get_file_key");
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error getting file key: ${error instanceof Error ? error.message : String(error)}`,
+            },
+          ],
+        };
+      }
+    }
+  );
+
+  // Set File Key Tool
+  server.tool(
+    "set_file_key",
+    "Configure or update the Figma file key or file URL for the active session. This sets the fallback " +
+      "file key used by REST API tools (such as comments) when figma.fileKey is unavailable or null in the plugin.",
+    {
+      fileKey: z.string().optional().describe("Figma file key (the segment after /design/ or /file/ in the URL)"),
+      url: z.string().optional().describe("Full Figma file URL (e.g. 'https://www.figma.com/design/XXXX/My-File')"),
+    },
+    async (args) => {
+      try {
+        const result = await sendCommandToFigma("set_file_key", args);
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error setting file key: ${error instanceof Error ? error.message : String(error)}`,
+            },
+          ],
+        };
+      }
+    }
+  );
+
+  // Execute Code Tool
+  server.tool(
+    "execute_code",
+    "Execute arbitrary JavaScript code directly inside the Figma Plugin environment. 'figma' and 'params' " +
+      "are in scope. Supports async/await. Returns the evaluated result. Use when an operation is not covered " +
+      "by existing tools or when performing custom batch operations.",
+    {
+      code: z.string().describe("JavaScript code to execute in Figma plugin context"),
+      params: z.any().optional().describe("Optional parameters object accessible via 'params' inside the script"),
+    },
+    async (args) => {
+      try {
+        const result = await sendCommandToFigma("execute_code", args);
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error executing code in Figma: ${error instanceof Error ? error.message : String(error)}`,
+            },
+          ],
+        };
+      }
+    }
+  );
 }

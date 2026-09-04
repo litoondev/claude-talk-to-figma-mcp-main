@@ -287,7 +287,17 @@ export function createMockFigma(options: MockFigmaOptions = {}) {
       getLocalVariableCollectionsAsync: async () => collections,
       getVariableCollectionByIdAsync: async (id: string) =>
         collections.find((c) => c.id === id) ?? null,
-      getVariableByIdAsync: async (id: string) => byId.get(id) ?? null,
+      getVariableByIdAsync: async (id: string) => {
+        const v = byId.get(id);
+        if (!v) return null;
+        if (typeof (v as any).setValueForMode !== "function") {
+          (v as any).setValueForMode = function (modeId: string, val: unknown) {
+            this.valuesByMode = this.valuesByMode || {};
+            this.valuesByMode[modeId] = val;
+          };
+        }
+        return v;
+      },
       setBoundVariableForPaint: (paint: any, field: string, variable: MockVariable) => ({
         ...paint,
         boundVariables: {

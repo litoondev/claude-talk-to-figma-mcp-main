@@ -21,6 +21,8 @@ Complete reference of the tools Claude can use to interact with Figma.
 | `delete_page` | Delete page | Remove a specific page |
 | `rename_page` | Rename page | Change a page's name |
 | `set_current_page` | Switch page | Go to a specific page |
+| `get_file_key` | Query file key | Get file key and availability |
+| `set_file_key` | Configure file key | Set file key or Figma URL fallback |
 
 ## Image tools
 
@@ -95,7 +97,27 @@ Complete reference of the tools Claude can use to interact with Figma.
 | `get_local_components` | Project components | Design system audit |
 | `get_remote_components` | Team libraries | Access shared components |
 | `create_component_instance` | Use components | Consistent UI elements |
-| `set_instance_variant` | Change variant properties | Switch button states |
+## Variable and token tools
+
+| Command | Purpose | Usage example |
+|---------|---------|---------------|
+| `get_variables` | List variables and collections | Audit design tokens, pagination, filters |
+| `find_variable` | Resolve variable strictly | Find variable without guessing |
+| `set_variable` | Create, update value, or rename | Update token value or rename with newName |
+| `rename_variable` | Rename a variable | Rename token by name or variableId |
+| `rename_variables` | Bulk rename variables | Batch rename list or find/replace pattern |
+| `apply_variable_to_node` | Bind variable to node property | Connect fill, stroke, gap, radius to token |
+| `apply_variable_bindings` | Batch bind token properties | Connect full section to design system |
+| `get_node_variable_bindings` | Inspect variable bindings | Verify tokens bound to node |
+| `switch_variable_mode` | Switch mode breakpoint | Set Desk, Tab, or Mobi mode |
+| `import_library_variable` | Import team library variable | Use shared team token locally |
+
+## Scripting and developer tools
+
+| Command | Purpose | Usage example |
+|---------|---------|---------------|
+| `execute_code` | Run JavaScript in Figma sandbox | Custom batch ops or emergency scripts |
+| `figma_batch` | Run multiple commands in 1 call | Fast multi-operation batching |
 
 ## FigJam tools
 

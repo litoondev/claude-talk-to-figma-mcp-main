@@ -7,6 +7,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-09-03
+
+### Added
+- **🏷️ Direct Variable Renaming (`rename_variable` & `rename_variables`)**:
+  - Implemented `rename_variable` to rename variables directly in the document via the official Figma Plugin API (`variable.name = newName`), with support for lookup by `variableId` or `name` (with case-insensitive fallback) and optional collection filtering.
+  - Implemented `rename_variables` for bulk variable renaming, supporting both explicit arrays of renames and pattern-based find & replace (e.g. `find: "Pages/", replace: "Layout/Section/"`).
+  - Enhanced `set_variable` to support `newName`, enabling seamless variable renaming even when `value` is omitted, eliminating the `Missing value parameter` error on rename attempts.
+- **⚡ Execute Code Tool (`execute_code`)**:
+  - Direct Plugin API JavaScript execution sandbox (`execute_code`), allowing Claude and agents to run arbitrary asynchronous JavaScript scripts directly in Figma with `figma` and `params` in scope, with cyclic-safe object serialization.
+- **🔗 File Key Persistence & Fallback (`set_file_key`, `get_file_key`, and UI input)**:
+  - Added `set_file_key` command/tool to configure or override the Figma file key or file URL. Full Figma URLs (e.g. `https://www.figma.com/design/:fileKey/...`) are parsed automatically.
+  - Stored in `figma.clientStorage` and in-memory cache, so `getFileKey()` falls back to this key whenever native `figma.fileKey` is unavailable or null.
+  - Added an interactive "File URL or Key" input field directly inside the Figma plugin UI (`ui.html`).
+
 ## [1.2.0] - 2026-08-16
 
 ### Added

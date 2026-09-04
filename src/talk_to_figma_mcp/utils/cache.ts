@@ -57,6 +57,7 @@ export const NON_MUTATING_COMMANDS: ReadonlySet<string> = new Set([
   "get_section_scope",
   "verify_node_in_scope",
   "export_node_as_image",
+  "get_file_key",
   "join",
   "ping",
 ]);

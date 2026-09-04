@@ -24,8 +24,8 @@ export function registerVariableTools(server: McpServer): void {
     "List variable collections and variables in the current Figma file, with their type, scopes, " +
       "collection and per-mode values. Aliases are reported as aliases (the token they point at), " +
       "never flattened to a raw value — bind the semantic token, not the primitive it resolves to. " +
-      "A mature token file holds hundreds of variables, so filter with nameContains / resolvedType " +
-      "/ collectionName rather than listing everything.",
+      "Supports pagination via 'offset' and 'limit' (or set limit: 0 to return all), as well as " +
+      "filtering with nameContains / resolvedType / collectionName.",
     {
       name: z.string().optional().describe("Exact variable path, e.g. 'colors/Base/Primary'"),
       nameContains: z.string().optional().describe("Substring of the token path, matched loosely for discovery only (e.g. 'container-padding')"),
@@ -33,7 +33,8 @@ export function registerVariableTools(server: McpServer): void {
       collectionName: z.string().optional().describe("Only variables in this collection"),
       scope: z.string().optional().describe("Only variables usable in this scope (e.g. GAP, TEXT_FILL, CORNER_RADIUS)"),
       includeValues: coerceBoolean.optional().describe("Include per-mode values (default true). Set false for a compact name listing."),
-      limit: z.coerce.number().int().positive().optional().describe("Maximum variables to return (default 200)"),
+      offset: z.coerce.number().int().min(0).optional().describe("Starting index for pagination (0-based, default 0). Use with limit to page through large token sets (e.g. offset: 200 to fetch variables 201-400)."),
+      limit: z.coerce.number().int().min(0).optional().describe("Maximum variables to return per page (default 200). Pass a larger number (e.g. 1000) or 0 to fetch all matching variables without truncation."),
     },
     async (args) => {
       try {
@@ -90,22 +91,40 @@ export function registerVariableTools(server: McpServer): void {
   // Set Variable Tool
   server.tool(
     "set_variable",
-    "Update the value of an existing variable, or create one when createIfMissing is set. Creating " +
-      "a token or a collection expands the design system, so it is refused by default: reuse an " +
-      "existing token where one fits, and ask the designer before adding a new one.",
+    "Update the value or name of an existing variable, or create one when createIfMissing is set. " +
+      "Supports renaming when newName is provided. Creating a token or a collection expands the " +
+      "design system, so it is refused by default: reuse an existing token where one fits, and ask " +
+      "the designer before adding a new one.",
     {
       collectionId: z.string().optional().describe("ID of an existing variable collection"),
       collectionName: z.string().optional().describe("Name of the collection (used if collectionId not provided)"),
       name: z.string().describe("Variable name"),
-      resolvedType: RESOLVED_TYPE.describe("Variable type"),
-      value: z.any().describe("Variable value. COLOR: {r,g,b,a} (0-1). FLOAT: number. STRING: string. BOOLEAN: boolean."),
+      newName: z.string().optional().describe("New variable name if renaming"),
+      resolvedType: RESOLVED_TYPE.optional().describe("Variable type (required when creating or setting value)"),
+      value: z.any().optional().describe("Variable value. COLOR: {r,g,b,a} (0-1). FLOAT: number. STRING: string. BOOLEAN: boolean. Optional if only renaming with newName."),
       modeId: z.string().optional().describe("Mode ID to set the value for (uses default mode if omitted)"),
       createIfMissing: coerceBoolean.optional().describe("Allow creating the variable or collection when it does not exist. Off by default — confirm with the designer first."),
     },
     async (args) => {
       try {
         const result = await sendCommandToFigma("set_variable", args);
-        const typedResult = result as { variableId: string; variableName: string; collectionName: string };
+        const typedResult = result as {
+          variableId: string;
+          variableName?: string;
+          collectionName?: string;
+          oldName?: string;
+          newName?: string;
+        };
+        if (typedResult.oldName && typedResult.newName) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Renamed variable "${typedResult.oldName}" to "${typedResult.newName}" (ID: ${typedResult.variableId})`,
+              },
+            ],
+          };
+        }
         return {
           content: [
             {
@@ -120,6 +139,93 @@ export function registerVariableTools(server: McpServer): void {
             {
               type: "text",
               text: `Error setting variable: ${error instanceof Error ? error.message : String(error)}`,
+            },
+          ],
+        };
+      }
+    }
+  );
+
+  // Rename Variable Tool
+  server.tool(
+    "rename_variable",
+    "Rename an existing Figma variable (design token). Look up the variable by variableId, or by " +
+      "exact/case-insensitive name. Optionally restrict lookup to a specific collection.",
+    {
+      newName: z.string().describe("The new name/path for the variable (e.g. 'Layout/Section/container-padding')"),
+      name: z.string().optional().describe("Current variable name/path (e.g. 'Pages/container-padding')"),
+      variableId: z.string().optional().describe("Variable ID, if already resolved"),
+      collectionName: z.string().optional().describe("Collection name to restrict lookup (e.g. 'styles')"),
+      collectionId: z.string().optional().describe("Collection ID to restrict lookup"),
+    },
+    async (args) => {
+      try {
+        const result = await sendCommandToFigma("rename_variable", args);
+        const typed = result as {
+          variableId: string;
+          oldName: string;
+          newName: string;
+          collectionName?: string | null;
+        };
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Renamed variable from "${typed.oldName}" to "${typed.newName}" (ID: ${typed.variableId}${typed.collectionName ? `, collection: "${typed.collectionName}"` : ""})`,
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error renaming variable: ${error instanceof Error ? error.message : String(error)}`,
+            },
+          ],
+        };
+      }
+    }
+  );
+
+  // Batch Rename Variables Tool
+  server.tool(
+    "rename_variables",
+    "Bulk rename multiple variables in one pass. Either pass a 'renames' list of [{name, newName}], " +
+      "OR provide 'find' and 'replace' strings (e.g. find: 'Pages/', replace: 'Layout/Section/') to rename " +
+      "all matching tokens in one call across a collection or the entire file.",
+    {
+      renames: coerceJson(
+        z.array(
+          z.object({
+            newName: z.string().describe("New name/path for the variable"),
+            name: z.string().optional().describe("Current name/path"),
+            variableId: z.string().optional().describe("Variable ID if known"),
+            collectionName: z.string().optional().describe("Collection name"),
+          })
+        )
+      )
+        .optional()
+        .describe("Array of variables to rename"),
+      find: z.string().optional().describe("Substring or prefix to find in variable names (e.g. 'Pages/')"),
+      replace: z.string().optional().describe("Replacement string for matching variable names (e.g. 'Layout/Section/')"),
+      collectionName: z.string().optional().describe("Restrict batch rename to this collection (e.g. 'styles')"),
+      collectionId: z.string().optional().describe("Restrict batch rename to this collection ID"),
+      useRegex: coerceBoolean.optional().describe("Treat 'find' as a regular expression (default false)"),
+      caseSensitive: coerceBoolean.optional().describe("Case-sensitive pattern matching (default true)"),
+    },
+    async (args) => {
+      try {
+        const result = await sendCommandToFigma("rename_variables", args);
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error batch renaming variables: ${error instanceof Error ? error.message : String(error)}`,
             },
           ],
         };

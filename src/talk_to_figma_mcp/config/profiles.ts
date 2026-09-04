@@ -78,6 +78,9 @@ export const CORE_TOOLS: readonly string[] = [
   "set_text_align",
   // variables
   "get_variables",
+  "set_variable",
+  "rename_variable",
+  "rename_variables",
   "find_variable",
   "apply_variable_to_node",
   "apply_variable_bindings",

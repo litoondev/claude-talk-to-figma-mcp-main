@@ -422,6 +422,17 @@
               <input type="checkbox" id="opt-follow"> Follow viewport
             </label>
           </div>
+
+          <div class="mcp-plugin__file-key" style="margin-top: 8px; display: flex; flex-direction: column; gap: 4px; font-size: 10px;">
+            <div style="display: flex; align-items: center; justify-content: space-between;">
+              <span style="opacity: 0.7; font-weight: 500;">Figma File URL or Key (for REST fallback):</span>
+              <span id="file-key-status" style="font-size: 9px; opacity: 0.5;">Auto</span>
+            </div>
+            <div style="display: flex; gap: 6px;">
+              <input id="input-file-key" type="text" placeholder="Paste figma.com/design/... URL or key" style="flex: 1; padding: 4px 6px; border-radius: 4px; border: 1px solid rgba(120,120,120,0.3); background: transparent; color: inherit; font-size: 10px;" />
+              <button id="btn-set-file-key" type="button" style="padding: 4px 8px; border-radius: 4px; border: 1px solid #732392; background: #732392; color: #fff; font-size: 10px; cursor: pointer;">Save</button>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -491,6 +502,23 @@
           ["optCursor", "optHighlight", "optOverlay", "optFollow"].forEach((key) => {
             this.ui[key].addEventListener("change", () => this.pushActivitySettings());
           });
+
+          // File key controls
+          const setFileKeyBtn = document.getElementById("btn-set-file-key");
+          const fileKeyInput = document.getElementById("input-file-key");
+          const fileKeyStatus = document.getElementById("file-key-status");
+          if (setFileKeyBtn && fileKeyInput) {
+            setFileKeyBtn.addEventListener("click", () => {
+              const val = fileKeyInput.value.trim();
+              if (val) {
+                parent.postMessage({ pluginMessage: { type: "set-file-key", fileKey: val } }, "*");
+                if (fileKeyStatus) {
+                  fileKeyStatus.innerText = "Saved!";
+                  setTimeout(() => { fileKeyStatus.innerText = "Configured"; }, 2500);
+                }
+              }
+            });
+          }
 
           // Keeps the "working · 4s" elapsed counter ticking between events.
           this.activity.elapsedTimer = setInterval(() => this.renderActivityChip(), 1000);

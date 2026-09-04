@@ -324,7 +324,35 @@ describe("get_variables filtering", () => {
     const r = await api.getVariables({ limit: 3 });
     expect(r.returned).toBe(3);
     expect(r.truncated).toBe(true);
+    expect(r.offset).toBe(0);
+    expect(r.nextOffset).toBe(3);
     expect(r.matchedVariables).toBeGreaterThan(3);
+  });
+
+  it("supports pagination with offset and nextOffset", async () => {
+    const page1 = await api.getVariables({ limit: 3, offset: 0 });
+    const page2 = await api.getVariables({ limit: 3, offset: 3 });
+
+    expect(page1.variables.length).toBe(3);
+    expect(page2.variables.length).toBe(3);
+    expect(page1.offset).toBe(0);
+    expect(page1.nextOffset).toBe(3);
+    expect(page2.offset).toBe(3);
+    expect(page2.nextOffset).toBe(6);
+
+    // Verify disjoint sets across pages
+    const page1Ids = page1.variables.map((v: any) => v.id);
+    const page2Ids = page2.variables.map((v: any) => v.id);
+    for (const id of page1Ids) {
+      expect(page2Ids).not.toContain(id);
+    }
+  });
+
+  it("supports limit: 0 to fetch all variables without truncation", async () => {
+    const r = await api.getVariables({ limit: 0 });
+    expect(r.returned).toBe(r.totalVariables);
+    expect(r.truncated).toBe(false);
+    expect(r.nextOffset).toBeNull();
   });
 });
 
