@@ -48,6 +48,8 @@ beforeEach(() => {
   figma = loaded.figma;
   figma.viewport = {
     bounds: { x: 0, y: 0, width: 1000, height: 1000 },
+    zoom: 1,
+    center: { x: 500, y: 500 },
     scrollAndZoomIntoView: jest.fn(),
   };
 });
@@ -73,13 +75,27 @@ describe("highlightNodes", () => {
     expect(figma.currentPage.selection.map((n: any) => n.id)).toEqual(["1:1"]);
   });
 
-  it("scrolls to work that is off-screen", async () => {
+  it("moves the canvas to off-screen work instead of zooming out to it", async () => {
     const far = sceneNode("1:2", { x: 8000, y: 8000, width: 100, height: 100 });
     onPage(far);
 
     await api.highlightNodes(["1:2"]);
 
-    expect(figma.viewport.scrollAndZoomIntoView).toHaveBeenCalled();
+    // Centred on the node, and still at 100% — zooming out to frame a
+    // page-sized target is what made the work unreadable.
+    expect(figma.viewport.center).toEqual({ x: 8050, y: 8050 });
+    expect(figma.viewport.zoom).toBe(1);
+    expect(figma.viewport.scrollAndZoomIntoView).not.toHaveBeenCalled();
+  });
+
+  it("restores 100% zoom even when the target is already in view", async () => {
+    const near = sceneNode("1:4", { x: 10, y: 10, width: 50, height: 50 });
+    onPage(near);
+    figma.viewport.zoom = 0.2;   // user or an older build zoomed out
+
+    await api.highlightNodes(["1:4"]);
+
+    expect(figma.viewport.zoom).toBe(1);
   });
 
   it("leaves the canvas alone when the target is already visible", async () => {

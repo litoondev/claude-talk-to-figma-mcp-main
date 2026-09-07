@@ -270,14 +270,41 @@ export function registerActivityTools(server: McpServer): void {
             "Nodes already in view are left alone, so the canvas does not jump around " +
             "during an edit. Default on; turn off if a human is navigating the same file."
         ),
+      lockZoom: z
+        .boolean()
+        .optional()
+        .describe(
+          "Hold the canvas at 100% zoom while following the work, moving the viewport " +
+            "rather than zooming out to frame a target. Zooming out to fit a page-sized " +
+            "node leaves the work too small to read. Default on."
+        ),
+      autoCleanup: z
+        .boolean()
+        .optional()
+        .describe(
+          "Remove the cursor and the status card once the agent has been idle for a few " +
+            "seconds, so a finished file is not left with plugin nodes on the canvas. " +
+            "Only nodes this plugin drew are touched, and only when no command is running. " +
+            "Default on; turn off to keep the status card as a record."
+        ),
     },
-    async ({ cursorEnabled, cursorLabel, overlayEnabled, highlightEnabled, followViewport }) => {
+    async ({
+      cursorEnabled,
+      cursorLabel,
+      overlayEnabled,
+      highlightEnabled,
+      followViewport,
+      lockZoom,
+      autoCleanup,
+    }) => {
       const params: Record<string, boolean | string> = {};
       if (cursorEnabled !== undefined) params.cursorEnabled = cursorEnabled;
       if (cursorLabel !== undefined) params.cursorLabel = cursorLabel;
       if (overlayEnabled !== undefined) params.overlayEnabled = overlayEnabled;
       if (highlightEnabled !== undefined) params.highlightEnabled = highlightEnabled;
       if (followViewport !== undefined) params.followViewport = followViewport;
+      if (lockZoom !== undefined) params.lockZoom = lockZoom;
+      if (autoCleanup !== undefined) params.autoCleanup = autoCleanup;
 
       if (Object.keys(params).length === 0) {
         return {

@@ -93,6 +93,14 @@ const activity = {
     // bridge, so it is on unless the user turns it off.
     cursorEnabled: true,
     cursorLabel: "Claude",   // name shown in the cursor's pill
+    // Instrumentation is scaffolding, not design. Once the agent stops working
+    // both the cursor and the status card are removed, so a finished file is
+    // never left with orphaned plugin nodes on the canvas.
+    autoCleanup: true,
+    // Hold the canvas at 100% while working. Framing a target by zooming out
+    // makes the work unreadable on a full page — the opposite of what watching
+    // it happen requires.
+    lockZoom: true,
   },
   // Most recent entries, newest last. Bounded so a long session cannot grow
   // the plugin's memory without limit.
@@ -106,6 +114,8 @@ const activity = {
   // overlapping redraws would interleave partial text updates.
   overlayBusy: false,
   overlayDirty: false,
+  // Fires once the agent has been quiet long enough to call the task done.
+  idleCleanupTimer: null,
   // Ghost cursor animation handles.
   cursorAnim: null,
   cursorIdleTimer: null,
@@ -145,10 +155,13 @@ function recordActivity(entry) {
 
   if (entry.kind === "started") {
     activity.current = { command: entry.command, startedAt: record.ts };
+    // More work arrived — the previous command was not the end of the task.
+    cancelIdleCleanup();
   } else if (entry.kind === "completed" || entry.kind === "error") {
     if (entry.kind === "completed") activity.completed++;
     else activity.failed++;
     activity.current = null;
+    scheduleIdleCleanup();
   }
 
   // Feed the plugin panel.
@@ -209,6 +222,70 @@ function nodesInViewport(nodes) {
   }
 }
 
+/**
+ * Hand the frame back to Figma so it can repaint.
+ *
+ * Node writes only reach the canvas when the plugin's current JS task ends, so
+ * a tight loop looks frozen and then lands everything at once. A zero-delay
+ * timer is enough to break the task and let the render catch up.
+ */
+function yieldToCanvas() {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/** Smallest box containing every node, in absolute canvas coordinates. */
+function unionBounds(nodes) {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+
+  for (const node of nodes) {
+    const box = node.absoluteBoundingBox;
+    if (!box) continue;
+    minX = Math.min(minX, box.x);
+    minY = Math.min(minY, box.y);
+    maxX = Math.max(maxX, box.x + box.width);
+    maxY = Math.max(maxY, box.y + box.height);
+  }
+
+  if (minX === Infinity) return null;
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+}
+
+/**
+ * Bring the working area into view without zooming out.
+ *
+ * scrollAndZoomIntoView frames its targets by changing the zoom. On anything
+ * page-sized that means zooming far enough out that the work is unreadable,
+ * which defeats the point of watching it happen. This holds the canvas at 100%
+ * and moves it instead, so the active element is always on screen at a legible
+ * size.
+ */
+function focusViewport(nodes) {
+  if (!activity.settings.followViewport) return;
+
+  try {
+    const box = unionBounds(nodes);
+    if (!box) return;
+
+    const lockZoom = activity.settings.lockZoom;
+    const zoomWrong = lockZoom && Math.abs(figma.viewport.zoom - 1) > 0.01;
+
+    // Already legible and on screen: leave the canvas alone rather than yanking
+    // it out from under someone who is reading it.
+    if (!zoomWrong && nodesInViewport(nodes)) return;
+
+    // Zoom first — Figma keeps the centre point when zoom changes, so centring
+    // afterwards is what actually decides the final framing.
+    if (lockZoom) figma.viewport.zoom = 1;
+    figma.viewport.center = {
+      x: box.x + box.width / 2,
+      y: box.y + box.height / 2,
+    };
+  } catch (err) {
+    // Framing is cosmetic; never let it break a command.
+    console.log("focusViewport failed:", err && err.message);
+  }
+}
+
 // Highlights are async and fire-and-forget, so a slow lookup for the *inputs*
 // of a command could otherwise land after the highlight for its *results* and
 // leave the selection pointing at the wrong thing.
@@ -250,12 +327,7 @@ async function highlightNodes(nodeIds) {
     if (token !== highlightToken) return;
     figma.currentPage.selection = nodes;
 
-    // Following the viewport unconditionally is jarring; never following it
-    // means work that happens off-screen is invisible, which is the whole
-    // complaint. Scroll only when the target is not already in view.
-    if (activity.settings.followViewport && !nodesInViewport(nodes)) {
-      figma.viewport.scrollAndZoomIntoView(nodes);
-    }
+    focusViewport(nodes);
   } catch (err) {
     // Highlighting is cosmetic; never let it break a command.
     console.log("highlightNodes failed:", err && err.message);
@@ -743,6 +815,49 @@ function scheduleCursorIdle() {
   }, 4000);
 }
 
+// ─── Idle cleanup ──────────────────────────────────────────────────────────
+//
+// The plugin sees individual commands, never "the task" — no message says the
+// agent is done. Quiet is the only available signal, so a terminal event arms a
+// timer and any new command disarms it. Long enough that the pause between two
+// commands in one task never trips it; short enough that a finished file is
+// tidy by the time anyone looks at it.
+const IDLE_CLEANUP_MS = 4000;
+
+function cancelIdleCleanup() {
+  if (activity.idleCleanupTimer) {
+    clearTimeout(activity.idleCleanupTimer);
+    activity.idleCleanupTimer = null;
+  }
+}
+
+function scheduleIdleCleanup() {
+  if (!activity.settings.autoCleanup) return;
+  cancelIdleCleanup();
+  activity.idleCleanupTimer = setTimeout(() => {
+    activity.idleCleanupTimer = null;
+    // Re-check at fire time, not schedule time: a command that started during
+    // the wait means the task is still running and nothing should be removed.
+    if (activity.current) return;
+    if (!activity.settings.autoCleanup) return;
+    cleanupInstrumentation().catch((err) =>
+      console.log("Idle cleanup failed:", err && err.message)
+    );
+  }, IDLE_CLEANUP_MS);
+}
+
+/**
+ * Remove every node this plugin drew for its own benefit.
+ *
+ * Only instrumentation is touched — both nodes are found by their plugin-data
+ * marker, never by name or position, so nothing a designer made can be caught
+ * by this even if they name a frame identically.
+ */
+async function cleanupInstrumentation() {
+  removeCursorNode();
+  await removeOverlay();
+}
+
 function removeCursorNode() {
   if (activity.cursorAnim) {
     clearInterval(activity.cursorAnim);
@@ -782,7 +897,13 @@ async function applyActivitySettings(next) {
     if (typeof next.cursorLabel === "string" && next.cursorLabel.trim()) {
       activity.settings.cursorLabel = next.cursorLabel.trim().slice(0, 24);
     }
+    if (typeof next.autoCleanup === "boolean") activity.settings.autoCleanup = next.autoCleanup;
+    if (typeof next.lockZoom === "boolean") activity.settings.lockZoom = next.lockZoom;
   }
+
+  // Turning cleanup off mid-session must not leave a timer armed to delete the
+  // nodes the user just asked to keep.
+  if (!activity.settings.autoCleanup) cancelIdleCleanup();
 
   try {
     await figma.clientStorage.setAsync("activitySettings", activity.settings);
@@ -1058,8 +1179,10 @@ figma.on("run", ({ command }) => {
 });
 
 // The ghost cursor is ephemeral instrumentation, not part of the design, so it
-// must not outlive the session that drew it. The overlay is deliberately left
-// in place — it is a status record the user chose to add.
+// must not outlive the session that drew it. The overlay used to be kept as a
+// status record the user chose to add, but a card reading "Idle — waiting for
+// the next instruction" left sitting on a finished design is clutter, not a
+// record: both are now cleared once the agent goes quiet (see scheduleIdleCleanup).
 // A cursor drawn on one page would otherwise sit there forever once the user
 // navigates elsewhere. Drop it; the next command draws a fresh one in view.
 figma.on("currentpagechange", () => {
@@ -6921,7 +7044,11 @@ async function setMultipleTextContents(params) {
     );
 
     // Process replacements within a chunk in parallel
-    const chunkPromises = chunk.map(async (replacement) => {
+    // Sequential, not Promise.all: concurrent writes fire their five
+    // reportActivityStep calls at the same instant, so the cursor and selection
+    // only ever showed the last one and the batch looked like a single jump.
+    // Stepping through them is what makes the progress visible at all.
+    const runReplacement = async (replacement) => {
       if (!replacement.nodeId || replacement.text === undefined) {
         console.error(`Missing nodeId or text for replacement`);
         return {
@@ -6989,10 +7116,15 @@ async function setMultipleTextContents(params) {
           error: `Error applying replacement: ${error.message}`
         };
       }
-    });
+    };
 
-    // Wait for all replacements in this chunk to complete
-    const chunkResults = await Promise.all(chunkPromises);
+    const chunkResults = [];
+    for (const replacement of chunk) {
+      chunkResults.push(await runReplacement(replacement));
+      // Hand the frame back so the selection and cursor move actually paint
+      // before the next write starts.
+      await yieldToCanvas();
+    }
 
     // Process results for this chunk
     chunkResults.forEach(result => {
