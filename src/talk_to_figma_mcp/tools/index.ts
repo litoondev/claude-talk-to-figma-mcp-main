@@ -16,9 +16,16 @@ import { registerActivityTools } from "./activity-tools";
 import { registerDesignSystemTools } from "./design-system-tools";
 import { registerResponsiveTools } from "./responsive-tools";
 import { registerBatchTools } from "./batch-tools";
+import { registerUsageTools } from "./usage-tools";
 import { getProfile, makeToolFilter } from "../config/profiles";
 import { logger } from "../utils/logger";
 import { capResponse } from "../utils/respond";
+import {
+  appendUsageFooter,
+  estimateResponseTokens,
+  estimateValueTokens,
+  recordToolUsage,
+} from "../utils/token-usage";
 import { registerSkillTools, setAvailableTools } from "../skills/integration";
 
 /**
@@ -53,13 +60,30 @@ export function registerTools(server: McpServer): void {
     if (typeof name === "string") registeredNames.push(name);
 
     // Wrap the handler so every tool result passes through the response size
-    // cap. Doing it here means a new tool inherits the ceiling for free.
+    // cap and lands in the token tally. Doing it here means a new tool inherits
+    // both for free.
     const handlerIndex = args.length - 1;
     const handler = args[handlerIndex];
-    if (typeof handler === "function") {
+    if (typeof handler === "function" && typeof name === "string") {
       const inner = handler as (...a: unknown[]) => unknown;
-      args[handlerIndex] = async (...handlerArgs: unknown[]) =>
-        capResponse(await inner(...handlerArgs));
+      args[handlerIndex] = async (...handlerArgs: unknown[]) => {
+        const inputTokens = estimateValueTokens(handlerArgs[0]);
+        try {
+          const result = capResponse(await inner(...handlerArgs));
+          // Measured after capping, so the tally reflects what the model
+          // actually receives, not what the tool would have returned uncapped.
+          recordToolUsage(name, inputTokens, estimateResponseTokens(result));
+          // Stamped after measuring, so the footer never inflates the figure it
+          // reports. The usage tool already returns a full report of its own.
+          if (name !== "get_token_usage") appendUsageFooter(result);
+          return result;
+        } catch (error) {
+          // A throwing tool still cost the model its arguments, and the SDK
+          // still renders an error back into the transcript.
+          recordToolUsage(name, inputTokens, estimateValueTokens(String(error)));
+          throw error;
+        }
+      };
     }
 
     return (originalTool as (...a: unknown[]) => unknown)(...args);
@@ -96,6 +120,8 @@ export function registerTools(server: McpServer): void {
     registerSectionScopeTools(server);
     // Live activity tracking — see tools/activity-tools.ts
     registerActivityTools(server);
+    // Token spend reporting — see tools/usage-tools.ts
+    registerUsageTools(server);
     // Skill catalogue lookup — see skills/integration.ts
     registerSkillTools(server);
   } finally {
@@ -131,4 +157,5 @@ export {
   registerDesignSystemTools,
   registerResponsiveTools,
   registerBatchTools,
+  registerUsageTools,
 };

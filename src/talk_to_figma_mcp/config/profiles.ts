@@ -28,6 +28,8 @@ export const CORE_TOOLS: readonly string[] = [
   "figma_batch",
   // skill catalogue — how a vetted procedure gets loaded instead of improvised
   "figma_skill",
+  // cost reporting — the end-of-task footer, cheap enough to keep everywhere
+  "get_token_usage",
   // connection + scope
   "join_channel",
   "check_figma_connection",

@@ -7,8 +7,9 @@ coverage/
 # NPM lock file (project uses Bun as primary package manager)
 package-lock.json
 
-# DXT packages (build artifacts - distribute via releases only)
+# DXT/MCPB packages (build artifacts - distribute via releases only)
 *.dxt
+*.mcpb
 
 # macOS system files
 .DS_Store

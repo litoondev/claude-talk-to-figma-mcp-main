@@ -7,6 +7,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **📊 Token usage reporting (`get_token_usage`)**: the server now tallies the estimated token cost of every tool call — arguments sent and result text received — and reports it, so the user can see what a task cost instead of guessing.
+  - Accounting is applied centrally in `registerTools` (`src/talk_to_figma_mcp/tools/index.ts`), alongside the existing response-size cap, so every tool — including any added later — is measured for free. Results are measured *after* capping, and image blocks are not charged as characters.
+  - New `get_token_usage` tool with a `task` window (spend since the last report, reset on read) and a cumulative `session` window, a per-tool breakdown ranked by cost, and `text` / `json` output.
+  - Server instructions now direct the agent to call it once at the end of a task and show the result to the user.
+  - Estimated from payload size at ~4 chars/token, and covers Figma bridge traffic only — an MCP server cannot see the rest of the conversation. Both caveats are stated in the tool description and in its rendered output.
+- **🧾 Usage footer on every tool result**: each response now ends with `[figma-usage: ~N tokens over N calls this task]`. Relying on the agent to remember a closing tool call was not reliable enough — a report nobody sees is the same as no feature — so the running total is carried in the results themselves. Costs ~12 tokens per call; disable with `FIGMA_MCP_USAGE_FOOTER=off`.
+- **📈 Per-chat token report (`npm run tokens`)**: `scripts/chat-token-report.mjs` sums the API's own `usage` blocks out of Claude Code's session transcripts (`~/.claude/projects/**/*.jsonl`), giving true per-conversation totals — fresh input, cache writes, cache reads, output and thinking — which an MCP server cannot observe. Supports `--all`, `--limit`, and a per-session breakdown.
+
 ## [1.3.0] - 2026-09-03
 
 ### Added

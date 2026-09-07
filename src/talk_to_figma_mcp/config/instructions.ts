@@ -22,7 +22,13 @@ export const SERVER_INSTRUCTIONS = `
   4. Batch the renames using figma_batch (with rename_node ops) or rename_node immediately.
   5. Provide a clear, concise confirmation of renamed layers to the user.
 
-## 2. Design System and Scope Rules
+## 2. Report Token Usage When a Task Finishes (MANDATORY)
+- After completing any task that used Figma tools, call \`get_token_usage\` once as the final step and show its output to the user, so they can see what the work cost.
+- Present it verbatim as a short footer under your summary. Do not paraphrase the numbers and do not omit the estimate caveat.
+- Report it as the cost of Figma tool traffic — it is not the conversation's total token usage, which this server cannot see.
+- Call it once per task, not after each individual tool call.
+
+## 3. Design System and Scope Rules
 - Prefer local components and design library styles/variables over ad-hoc primitives.
 - Confine modifications strictly to the user's requested scope (e.g., selected node, active section).
 `;

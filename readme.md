@@ -707,6 +707,89 @@ by itself. Tool responses are now capped (~24,000 characters, roughly 6,000
 tokens) and truncated with a note telling the AI to narrow the query. Adjust with
 the **Maximum tool response size** setting or `FIGMA_MCP_MAX_RESPONSE_CHARS`.
 
+### 5. See what it cost — `get_token_usage`
+
+Every Figma task spends context twice — once for the arguments the agent writes,
+and again for the result text, which the model re-reads on every later turn. The
+expensive calls are rarely the obvious ones: reading a deep node tree costs far
+more than creating a frame.
+
+The server tallies both halves of every tool call and reports them, so a task can
+end with a plain statement of what it cost:
+
+```
+This task — ~18k tokens across 47 Figma tool calls in 2m 14s
+  sent ~2.1k · received ~16k
+  most expensive:
+    get_node_info — 9×, ~11k tokens
+    scan_text_nodes — 3×, ~3.4k tokens
+    figma_batch — 12×, ~2.0k tokens
+  (Estimated from payload size at ~4 chars/token. Covers Figma tool traffic only,
+  not the rest of the conversation.)
+```
+
+Every tool result also carries a one-line running total:
+
+```
+[figma-usage: ~4.2k tokens over 12 calls this task — report this to the user when the task is done]
+```
+
+That footer is the part that makes this reliable. An instruction telling the
+agent to call a tool at the end of a task is only as good as its compliance, and
+a report nobody sees is the same as no feature — so the number rides along in
+every result instead. It costs about a dozen tokens per call. Turn it off with
+`FIGMA_MCP_USAGE_FOOTER=off` if you would rather rely on the tool alone.
+
+The agent is instructed to call `get_token_usage` once at the end of a task and
+show you the result, so you get this without asking. You can also ask for it
+directly:
+
+> "How many tokens has that cost so far?"
+
+| Argument | Effect |
+|---|---|
+| `scope` | `task` (default) — spend since the last report. `session` — everything since the relay started |
+| `reset` | Start a fresh task window after reporting. Defaults to on for `task`; session totals never reset |
+| `topTools` | How many tools to list in the breakdown (default 5, `0` for none) |
+| `format` | `text` (default) for the block above, `json` for the raw numbers |
+
+**Two limits worth knowing.** The counts are estimated from payload size at
+~4 chars/token, not produced by a tokenizer, so treat them as a close
+approximation rather than a bill. And an MCP server sits outside the model's
+context window: it can measure the traffic crossing this bridge, but not your
+system prompt, your messages, or the model's own reasoning. The figure is the
+cost of the Figma work, not of the conversation.
+
+### 6. Per-chat totals — `npm run tokens`
+
+`get_token_usage` measures the Figma bridge. It cannot measure the *chat*, because
+an MCP server sits outside the model's context window. Those numbers come from
+elsewhere: Claude Code writes one JSONL transcript per session under
+`~/.claude/projects/`, and every assistant message in it carries the API's own
+`usage` block. `scripts/chat-token-report.mjs` sums them.
+
+```bash
+npm run tokens                 # this project's chats, newest first
+npm run tokens -- --all        # every project
+npm run tokens -- <session-id> # one chat, broken down
+```
+
+```
+last active       turns    input  cache rd   output    total  chat
+──────────────────────────────────────────────────────────────────
+2026-09-07 17:00     70   147.5k     4.70M    40.8k    4.89M  add token reporting
+2026-09-04 09:35      7    36.0k    299.8k     1.6k   337.4k  push to main branch
+```
+
+Read the `cache rd` column before the `total` one. Most of a long chat's tokens are
+cache reads — the same context re-sent each turn — and those are billed far below
+the base input rate, so the raw total badly overstates cost. For money rather than
+tokens, use `/cost` in Claude Code or the Anthropic Console.
+
+**In Claude Desktop** there is no equivalent: it keeps no local transcript and
+exposes no token counter, so `get_token_usage` is the only per-task figure
+available there.
+
 ### Also faster
 
 `scan_text_nodes` and `set_multiple_text_contents` used to tint each text node
