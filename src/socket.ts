@@ -1,4 +1,4 @@
-import { Server, ServerWebSocket } from "bun";
+import { ServerWebSocket } from "bun";
 import {
   recordActivity,
   getActivitySnapshot,
@@ -655,10 +655,12 @@ const server = Bun.serve({
   port: LISTEN_PORT,
   // uncomment this to allow connections in windows wsl
   // hostname: "0.0.0.0",
-  // `Server` is generic in current bun-types; parameterise it to match the
-  // `ServerWebSocket<any>` usage elsewhere in this file. Without the type
-  // argument the declaration build (tsup --dts) fails with TS2314.
-  fetch(req: Request, server: Server<any>) {
+  // Deliberately unannotated: Bun.serve() contextually types its own handler.
+  // Naming the type here tied the build to a bun-types version — `Server` fails
+  // on 1.3.x with TS2314, `Server<any>` fails on 1.2.x with TS2315 — and the
+  // repo resolves 1.3.x under npm but 1.2.9 under the committed bun.lock, so
+  // either spelling built locally and broke CI. Inference works on both.
+  fetch(req, server) {
     const url = new URL(req.url);
 
     logger.debug(`Received ${req.method} request to ${url.pathname}`);
