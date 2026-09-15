@@ -77,6 +77,19 @@ export function makeNode(spec: any = {}): any {
     fills: spec.fills ?? [],
     strokes: spec.strokes ?? [],
     effects: spec.effects ?? [],
+    primaryAxisAlignItems: spec.primaryAxisAlignItems ?? "MIN",
+    counterAxisAlignItems: spec.counterAxisAlignItems ?? "MIN",
+    clipsContent: spec.clipsContent ?? false,
+    gridRowGap: 0,
+    gridColumnGap: 0,
+    gridAutoTracks: "NONE",
+    gridItemsPositioning: "MANUAL",
+    gridRowSizes: [] as any[],
+    gridColumnSizes: [] as any[],
+    gridRowSpan: 1,
+    gridColumnSpan: 1,
+    gridChildHorizontalAlign: "AUTO",
+    gridChildVerticalAlign: "AUTO",
     boundVariables: spec.boundVariables ?? {},
     explicitVariableModes: { ...(spec.explicitVariableModes ?? {}) },
     resolvedVariableModes: { ...(spec.resolvedVariableModes ?? spec.explicitVariableModes ?? {}) },
@@ -238,12 +251,90 @@ export function makeNode(spec: any = {}): any {
     },
   });
 
+  // Grid tracks follow the counts, as in Figma: raising a count appends FLEX tracks.
+  const trackCount = (key: "gridRowSizes" | "gridColumnSizes") => ({
+    enumerable: false,
+    configurable: true,
+    get: () => node[key].length,
+    set(value: number) {
+      if (node.layoutMode !== "GRID") throw new Error("grid track counts need layoutMode GRID");
+      if (value < 1) throw new Error("grid track count must be at least 1");
+      while (node[key].length < value) node[key].push({ type: "FLEX", value: 1 });
+      node[key].length = value;
+    },
+  });
+  Object.defineProperty(node, "gridRowCount", trackCount("gridRowSizes"));
+  Object.defineProperty(node, "gridColumnCount", trackCount("gridColumnSizes"));
+
+  // Figma refuses a column span that would cover a child already placed beside it.
+  let columnSpan = 1;
+  Object.defineProperty(node, "gridColumnSpan", {
+    enumerable: false,
+    configurable: true,
+    get: () => columnSpan,
+    set(value: number) {
+      const grid = node.parent;
+      if (grid && grid.layoutMode === "GRID") {
+        const placement = autoFlowPlacement(grid);
+        const own = placement.get(node);
+        if (own) {
+          if (own.column + value > grid.gridColumnCount) {
+            throw new Error("in set_gridColumnSpan: Cannot set child to specified column span beyond the grid");
+          }
+          for (const [other, cell] of placement) {
+            if (other === node || cell.row !== own.row) continue;
+            if (cell.column >= own.column + columnSpan && cell.column < own.column + value) {
+              throw new Error(
+                "in set_gridColumnSpan: Cannot set child to specified column span due to existing children in adjacent columns"
+              );
+            }
+          }
+        }
+      }
+      columnSpan = value;
+    },
+  });
+
+  // Geometry is opt-in: a spec value or a function of the node's current state.
+  if (spec.absoluteBoundingBox) {
+    Object.defineProperty(node, "absoluteBoundingBox", {
+      enumerable: false,
+      configurable: true,
+      get: () =>
+        typeof spec.absoluteBoundingBox === "function"
+          ? spec.absoluteBoundingBox(node)
+          : spec.absoluteBoundingBox,
+    });
+  }
+
   for (const child of spec.children ?? []) {
     child.parent = node;
     node.children.push(child);
   }
 
   return node;
+}
+
+/**
+ * Where row auto-flow puts each in-flow child of a Grid frame, given current
+ * spans. Used to refuse a span that would overlap a placed neighbour, as Figma does.
+ */
+function autoFlowPlacement(grid: any): Map<any, { row: number; column: number }> {
+  const columns = Math.max(1, grid.gridColumnCount || 1);
+  const placement = new Map<any, { row: number; column: number }>();
+  let row = 0;
+  let column = 0;
+  for (const child of grid.children ?? []) {
+    if (child.layoutPositioning === "ABSOLUTE") continue;
+    const span = Math.min(child.gridColumnSpan ?? 1, columns);
+    if (column + span > columns) {
+      row++;
+      column = 0;
+    }
+    placement.set(child, { row, column });
+    column += span;
+  }
+  return placement;
 }
 
 /** Registry the mock's getNodeByIdAsync reads from. */
@@ -276,6 +367,7 @@ export function createMockFigma(options: MockFigmaOptions = {}) {
     ui: { onmessage: null as unknown, postMessage: () => undefined },
     on: () => undefined,
     notify: () => undefined,
+    commitUndo: () => undefined,
     currentPage: { selection: [], children: [] },
     root: { children: [] },
     clientStorage: {

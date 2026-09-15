@@ -62,3 +62,6 @@ images/mcp-figma-plugin-configuration.png
 # Settings and cache
 .claude/
 .npm/
+# Built packages — never pack a previous package into the next one
+*.dxt
+*.mcpb

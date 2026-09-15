@@ -10,12 +10,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **🧹 Interactive layer optimization (`clean_layers`)**: cleanup now scans, asks, then applies. It no longer deletes anything the designer might want without asking.
+  - **Scan** (`dryRun: true`) lists empty/zero-size layers, redundant single-child wrappers (double-nested frames, purposeless groups), hidden layers, layers needing confirmation, and protected layers, with node IDs.
+  - **Hidden layers are never removed on inference.** Previously a hidden empty frame was deleted silently. Now hidden layers are removed only with `removeAllHidden: true` or when listed in `confirmedHiddenIds`.
+  - **Layers with a prototype interaction, prototype flow start, effect, export setting or mask** (on the layer, or for removals on a child) are kept unless their ID is in `confirmedRiskyIds`. Previously a purposeless wrapper carrying a click interaction or export setting was collapsed and the interaction lost.
+  - **Protected, never removed:** main components, component-property layers, and hidden layers inside a main component (variant/boolean-property states).
+  - Hidden wrappers are no longer collapsed. Collapsing one made its child visible.
+  - `scope: "page"` cleans the whole current page, and a multi-node selection now cleans every selected node, not just the first.
+  - Generated responsive frames keep hidden and risky layers and report them as warnings.
+  - Server instructions now require the scan → ask → apply flow.
+  - **Double-nested Auto Layout wrappers are now collapsed** (e.g. `Container > 01 Block > 01 Block > Card` → `Container > Card`). Previously any frame with Auto Layout counted as "doing layout work" and was never collapsed, so a real file with this structure scanned as clean. A wrapper qualifies only when collapsing it cannot change the render: one child at its exact origin and size, zero padding, no fill/stroke/effect/clip/radius/opacity/blend, no variable binding, no min/max size. The wrapper's Fill sizing moves to the child. If Figma refuses any step, the move is undone.
+  - A plain wrapper inside an Auto Layout parent is collapsed only when its child fills it exactly. Previously an offset or smaller child was pulled into the flow and shifted. In a parent without Auto Layout, the child's position is now preserved.
+  - Nothing inside a main component is flattened.
+  - An absolutely positioned layer *inside* the wrapper's child (e.g. a card instance's `BG`) no longer blocks collapsing. Only the direct child's positioning is checked. Before, the subtree search rejected every card wrapper in a real file and walked into every instance.
+  - **Grid proposals.** A vertical section holding heading(s) and one row of equal items is proposed for conversion to Figma Grid layout. Wrappers around the items are allowed only if they are transparent. The row and item widths plus gaps must exactly fill the section's content width. Example: `# Work Process > Container > Frame > Frame > Card ×4` becomes `# Work Process (GRID) > Text_Container + Card ×4`.
+    - The scan lists proposals, and apply converts only IDs in `confirmedGridIds`.
+    - The result has N FLEX columns and HUG rows, auto-flowing. Headings span every column and keep the section's alignment. Items Fill their cell.
+    - The section gap becomes the row gap and the row gap becomes the column gap, each keeping its variable binding. Padding (with bindings) and sizing are preserved.
+    - The old row stays in the section, out of the flow, until every heading and item is confirmed at its previous position and size (±1px). Then it is deleted. If anything moved, or Figma refused a step, the section is restored and the reason reported.
+    - Undo checkpoints are committed around each conversion.
+    - The heading's full-width span is set before the items enter the Grid. Before this fix, Figma refused the span on a real file ("existing children in adjacent columns") because a card was already placed beside the heading, and every conversion rolled back. Proposals are limited to one heading per section until side-by-side placement of several headings is verified.
+    - The test harness now refuses overlapping Grid spans with Figma's own error.
+    - Not proposed: generated responsive frames, sections inside main components, and rows with padding, paint, wrap, space-between, unequal or hidden items, or a width that doesn't match the section's content box.
 - **📊 Token usage reporting (`get_token_usage`)**: the server now tallies the estimated token cost of every tool call — arguments sent and result text received — and reports it, so the user can see what a task cost instead of guessing.
   - Accounting is applied centrally in `registerTools` (`src/talk_to_figma_mcp/tools/index.ts`), alongside the existing response-size cap, so every tool — including any added later — is measured for free. Results are measured *after* capping, and image blocks are not charged as characters.
   - New `get_token_usage` tool with a `task` window (spend since the last report, reset on read) and a cumulative `session` window, a per-tool breakdown ranked by cost, and `text` / `json` output.
   - Server instructions now direct the agent to call it once at the end of a task and show the result to the user.
   - Estimated from payload size at ~4 chars/token, and covers Figma bridge traffic only — an MCP server cannot see the rest of the conversation. Both caveats are stated in the tool description and in its rendered output.
 ### Fixed
+- **🔤 `FigmaCommand` was missing 15 commands the server sends**: `get_design_system`, `analyze_responsive`, `make_responsive`, `clean_layers`, `validate_responsive`, `get_activity_state`, `set_activity_overlay`, `detach_instance`, `set_reactions`, `get_reactions`, `create_text_style`, `create_paint_style`, `create_effect_style`, `fix_text_sizing` and `set_text_align` are now in the union. This is type-only and changes no runtime behaviour. Any test importing those tool modules failed to compile under ts-jest. `tsc --noEmit -p .` never reported it, because the root tsconfig's `rootDir: src` + `include: tests/**` raises TS6059 option errors that suppress semantic checking. Ten unrelated pre-existing type errors remain (prompts, activity-tools, section-scope-tools, websocket).
 - **🟢 CI build, failing since the first commit**: `bun run build` died in the declaration step with `TS2315: Type 'Server' is not generic`, so tests never ran on any commit in the repo's history. `src/socket.ts` named bun's `Server` type for the `Bun.serve()` fetch handler, but that type changed shape between versions — generic in bun-types 1.3.x, non-generic in 1.2.x — and the repo resolves 1.3.x under an npm install while the committed `bun.lock` pins 1.2.9. Every spelling therefore built on a developer's machine and broke in CI. The handler is now unannotated, since `Bun.serve()` contextually types it, which compiles under both.
 
 ### Added

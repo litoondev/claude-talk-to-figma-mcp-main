@@ -25,6 +25,90 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { sendCommandToFigma } from "../utils/websocket";
 
+// ── Layer cleanup result ──────────────────────────────────────────────────
+
+interface CleanupEntry {
+  id: string;
+  name: string;
+  type: string;
+  action?: string;
+  reasons?: string[];
+  reason?: string;
+}
+
+interface GridProposal {
+  id: string;
+  name: string;
+  columns: number;
+  headers: string[];
+  items: string[];
+  itemName: string | null;
+  removes: string[];
+}
+
+interface CleanLayersResult {
+  dryRun: boolean;
+  targets?: Array<{ id: string; name: string; type?: string }>;
+  frame: { id: string; name: string };
+  layerCount?: number;
+  layerCountBefore?: number;
+  layerCountAfter?: number;
+  genericNames?: string[];
+  removableLayers?: string[];
+  collapsibleWrappers?: string[];
+  renamed?: string[];
+  removed?: string[];
+  removedHidden?: string[];
+  collapsed?: string[];
+  hiddenLayers?: CleanupEntry[];
+  needsConfirmation?: CleanupEntry[];
+  protectedLayers?: CleanupEntry[];
+  gridCandidates?: GridProposal[];
+  gridConverted?: GridProposal[];
+  gridSkipped?: Array<{ id: string; name: string; reason: string }>;
+  warnings: string[];
+}
+
+/** Entries listed with IDs, so the model can pass confirmed ones back. */
+const CLEANUP_ENTRY_LIMIT = 40;
+
+function describeCleanupTargets(r: CleanLayersResult): string {
+  const targets = r.targets?.length ? r.targets : [r.frame];
+  if (targets.length === 1) return `"${targets[0].name}"`;
+  const names = targets.slice(0, 3).map((t) => `"${t.name}"`).join(", ");
+  return `${targets.length} layers (${names}${targets.length > 3 ? ", …" : ""})`;
+}
+
+function describeGridProposal(p: GridProposal): string {
+  const heading = p.headers.length
+    ? `${p.headers.map((h) => `"${h}"`).join(", ")} spanning all ${p.columns} columns, `
+    : "";
+  const items = p.itemName ? `${p.items.length} × "${p.itemName}"` : `${p.items.length} items`;
+  const removed = p.removes.slice(0, 3).map((r) => `"${r}"`).join(", ") + (p.removes.length > 3 ? ", …" : "");
+  return (
+    `"${p.name}" [id ${p.id}] — ${p.columns}-column Grid: ${heading}${items} directly inside; ` +
+    `removes ${p.removes.length} wrapper layer(s) (${removed})`
+  );
+}
+
+function appendCleanupEntries(lines: string[], heading: string, entries?: CleanupEntry[]): void {
+  if (!entries?.length) return;
+  lines.push(`\n${heading} (${entries.length}):`);
+  for (const e of entries.slice(0, CLEANUP_ENTRY_LIMIT)) {
+    const detail = e.reasons?.length
+      ? ` — ${e.action ? `${e.action}: ` : ""}${e.reasons.join(", ")}`
+      : e.reason
+        ? ` — ${e.reason}`
+        : "";
+    lines.push(`  "${e.name}" (${String(e.type).toLowerCase()}) [id ${e.id}]${detail}`);
+  }
+  if (entries.length > CLEANUP_ENTRY_LIMIT) {
+    lines.push(
+      `  … ${entries.length - CLEANUP_ENTRY_LIMIT} more — scan a smaller selection to see their IDs`
+    );
+  }
+}
+
 // ── Shapes returned by the plugin ─────────────────────────────────────────
 
 interface SectionAnalysis {
@@ -677,18 +761,57 @@ export function registerResponsiveTools(server: McpServer): void {
       "Groups standing in for responsive structure and excessively deep nesting are reported " +
       "rather than restructured. Preserves existing meaningful names and design-system conventions. " +
       "Use it only when layer cleanup is part of the requested scope. Generated responsive " +
-      "frames are cleaned automatically without changing the approved desktop source.",
+      "frames are cleaned automatically without changing the approved desktop source. " +
+      "INTERACTIVE: hidden layers and layers carrying a prototype interaction, effect, export " +
+      "setting or mask are never removed on inference. Run dryRun first — it lists them with IDs — " +
+      "ask the user, then apply with removeAllHidden / confirmedHiddenIds / confirmedRiskyIds set " +
+      "only from the user's answer. Main components and component-property layers are never removed. " +
+      "GRID: a vertical section holding heading(s) and one row of equal items (often buried in wrappers) " +
+      "is listed under 'Grid proposals'. Converting it puts the items directly inside a Grid with the " +
+      "heading spanning every column, keeping gap and padding variables. Only IDs the user confirmed in " +
+      "confirmedGridIds are converted, and a conversion that would move anything is undone.",
     {
       nodeId: z
         .string()
         .optional()
-        .describe("Frame to clean. Defaults to the current Figma selection."),
+        .describe("Frame or section to clean. Defaults to every node in the current Figma selection."),
+      scope: z
+        .enum(["selection", "page"])
+        .optional()
+        .describe(
+          "'page' cleans the whole current page. Use it only when the user asked for the whole " +
+            "page or file. Ignored when nodeId is given. Default 'selection'."
+        ),
       dryRun: z
         .boolean()
         .optional()
         .describe(
-          "Report what would change without modifying anything. Use this first on a file you " +
-            "do not want altered."
+          "Scan and report what would change — including hidden layers and layers that need " +
+            "confirmation, with their IDs — without modifying anything. Always run this first."
+        ),
+      removeAllHidden: z
+        .boolean()
+        .optional()
+        .describe(
+          "Remove every hidden layer the scan listed under 'Hidden layers'. Set true ONLY after " +
+            "the user confirmed removing hidden layers. Default false."
+        ),
+      confirmedHiddenIds: z
+        .array(z.string())
+        .optional()
+        .describe("IDs of hidden layers the user approved removing, when they approved only some."),
+      confirmedRiskyIds: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "IDs from 'Needs confirmation' the user explicitly approved. Anything not listed is kept."
+        ),
+      confirmedGridIds: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "IDs of sections under 'Grid proposals' the user approved converting to a Grid. Each is " +
+            "converted only if the result renders identically; otherwise it is left as it was."
         ),
       rename: z.boolean().optional().describe("Rename generic layers. Default true."),
       removeUnwanted: z
@@ -700,32 +823,37 @@ export function registerResponsiveTools(server: McpServer): void {
         .optional()
         .describe("Collapse single-child frames that control no layout. Default true."),
     },
-    async ({ nodeId, dryRun, rename, removeUnwanted, collapseWrappers }) => {
+    async ({
+      nodeId,
+      scope,
+      dryRun,
+      removeAllHidden,
+      confirmedHiddenIds,
+      confirmedRiskyIds,
+      confirmedGridIds,
+      rename,
+      removeUnwanted,
+      collapseWrappers,
+    }) => {
       try {
         const r = (await sendCommandToFigma("clean_layers", {
           nodeId,
+          scope: scope ?? "selection",
           dryRun: dryRun ?? false,
+          removeAllHidden: removeAllHidden ?? false,
+          confirmedHiddenIds: confirmedHiddenIds ?? [],
+          confirmedRiskyIds: confirmedRiskyIds ?? [],
+          confirmedGridIds: confirmedGridIds ?? [],
           rename: rename ?? true,
           removeUnwanted: removeUnwanted ?? true,
           collapseWrappers: collapseWrappers ?? true,
-        })) as {
-          dryRun: boolean;
-          frame: { id: string; name: string };
-          layerCount?: number;
-          layerCountBefore?: number;
-          layerCountAfter?: number;
-          genericNames?: string[];
-          removableLayers?: string[];
-          renamed?: string[];
-          removed?: string[];
-          collapsed?: string[];
-          warnings: string[];
-        };
+        })) as CleanLayersResult;
 
         const lines: string[] = [];
+        const targetName = describeCleanupTargets(r);
 
         if (r.dryRun) {
-          lines.push(`Layer audit — "${r.frame.name}" (${r.layerCount} layers). Nothing modified.`);
+          lines.push(`Layer scan — ${targetName} (${r.layerCount} layers). Nothing modified.`);
           lines.push("");
           if (r.genericNames?.length) {
             lines.push(`${r.genericNames.length} layers have auto-generated names:`);
@@ -742,11 +870,63 @@ export function registerResponsiveTools(server: McpServer): void {
           } else {
             lines.push("No empty or purposeless layers found.");
           }
+          if (r.collapsibleWrappers?.length) {
+            lines.push(`\n${r.collapsibleWrappers.length} redundant wrappers would be collapsed:`);
+            lines.push(
+              `  ${r.collapsibleWrappers.slice(0, 15).join(", ")}` +
+                (r.collapsibleWrappers.length > 15 ? `, … ${r.collapsibleWrappers.length - 15} more` : "")
+            );
+          }
+
+          appendCleanupEntries(lines, "Hidden layers — NOT removed without the user's permission", r.hiddenLayers);
+          appendCleanupEntries(
+            lines,
+            "Needs confirmation — removing may change the design or prototype",
+            r.needsConfirmation
+          );
+          appendCleanupEntries(lines, "Protected — never removed", r.protectedLayers);
+
+          if (r.gridCandidates?.length) {
+            lines.push(`\nGrid proposals — converted only with the user's permission (${r.gridCandidates.length}):`);
+            for (const p of r.gridCandidates.slice(0, CLEANUP_ENTRY_LIMIT)) lines.push(`  ${describeGridProposal(p)}`);
+          }
+
+          const hiddenCount = r.hiddenLayers?.length ?? 0;
+          const pending = r.needsConfirmation ?? [];
+          const grids = r.gridCandidates ?? [];
+          lines.push("\nNEXT STEP:");
+          if (hiddenCount || pending.length || grids.length) {
+            lines.push("  Ask the user before applying, in their language:");
+            if (hiddenCount) {
+              lines.push(
+                `  • "${hiddenCount} hidden layer(s) were found. Do you want to remove them?" — ` +
+                  "yes: removeAllHidden: true (or confirmedHiddenIds for some). No: leave both unset."
+              );
+            }
+            if (pending.length) {
+              const first = pending[0];
+              lines.push(
+                `  • Ask about each layer under "Needs confirmation" by name and reason, e.g. ` +
+                  `"\\"${first.name}\\" has a ${first.reasons?.[0] ?? "special setting"} — removing it may ` +
+                  `change the design. Remove it?" Put only the approved IDs in confirmedRiskyIds.`
+              );
+            }
+            for (const p of grids.slice(0, CLEANUP_ENTRY_LIMIT)) {
+              lines.push(
+                `  • "\\"${p.name}\\" can become a ${p.columns}-column Grid with its items directly inside ` +
+                  `(${p.removes.length} wrapper layer(s) removed, design unchanged). Convert it?" — ` +
+                  `yes: add ${p.id} to confirmedGridIds.`
+              );
+            }
+            lines.push("  Then call clean_layers again without dryRun.");
+          } else {
+            lines.push("  Nothing needs the user's permission — call clean_layers without dryRun to apply.");
+          }
         } else {
           const before = r.layerCountBefore ?? 0;
           const after = r.layerCountAfter ?? 0;
           lines.push(
-            `Layer cleanup — "${r.frame.name}": ${before} layers → ${after}` +
+            `Layer cleanup — ${targetName}: ${before} layers → ${after}` +
               (before > after ? ` (${before - after} removed)` : "")
           );
 
@@ -760,12 +940,43 @@ export function registerResponsiveTools(server: McpServer): void {
             for (const x of r.removed.slice(0, 15)) lines.push(`  ${x}`);
             if (r.removed.length > 15) lines.push(`  … ${r.removed.length - 15} more`);
           }
+          if (r.removedHidden?.length) {
+            lines.push(`\nRemoved ${r.removedHidden.length} hidden layers (confirmed by the user):`);
+            for (const x of r.removedHidden.slice(0, 15)) lines.push(`  ${x}`);
+            if (r.removedHidden.length > 15) lines.push(`  … ${r.removedHidden.length - 15} more`);
+          }
           if (r.collapsed?.length) {
             lines.push(`\nCollapsed ${r.collapsed.length} redundant wrappers:`);
             lines.push(`  ${r.collapsed.slice(0, 15).join(", ")}`);
           }
-          if (!r.renamed?.length && !r.removed?.length && !r.collapsed?.length) {
+          if (
+            !r.renamed?.length &&
+            !r.removed?.length &&
+            !r.removedHidden?.length &&
+            !r.gridConverted?.length &&
+            !r.collapsed?.length
+          ) {
             lines.push("\nNothing needed changing — the layer tree is already clean.");
+          }
+          if (r.hiddenLayers?.length) {
+            lines.push(`\n${r.hiddenLayers.length} hidden layer(s) kept — removal not confirmed.`);
+          }
+          if (r.gridConverted?.length) {
+            lines.push(`\nConverted to Grid (${r.gridConverted.length}):`);
+            for (const p of r.gridConverted.slice(0, 15)) lines.push(`  ${describeGridProposal(p)}`);
+          }
+          if (r.gridSkipped?.length) {
+            lines.push(`\nGrid conversion not applied (${r.gridSkipped.length}) — left exactly as it was:`);
+            for (const s of r.gridSkipped.slice(0, 15)) lines.push(`  "${s.name}" [id ${s.id}] — ${s.reason}`);
+          }
+          if (r.gridCandidates?.length) {
+            lines.push(`\n${r.gridCandidates.length} Grid proposal(s) not converted — not confirmed:`);
+            for (const p of r.gridCandidates.slice(0, 15)) lines.push(`  ${describeGridProposal(p)}`);
+          }
+          appendCleanupEntries(lines, "Kept — needs the user's confirmation", r.needsConfirmation);
+          appendCleanupEntries(lines, "Protected — never removed", r.protectedLayers);
+          if (r.needsConfirmation?.length) {
+            lines.push("\nAsk the user about the layers kept for confirmation before removing them.");
           }
           lines.push("\nComponent instances were not entered. Typography and copy untouched.");
         }

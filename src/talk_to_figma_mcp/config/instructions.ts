@@ -28,7 +28,20 @@ export const SERVER_INSTRUCTIONS = `
 - Report it as the cost of Figma tool traffic — it is not the conversation's total token usage, which this server cannot see.
 - Call it once per task, not after each individual tool call.
 
-## 3. Design System and Scope Rules
+## 3. Layer Optimization — Scan, Ask, Then Apply (MANDATORY)
+- When the user asks to optimize, clean up or simplify layers (remove unwanted layers, empty groups, double/nested frames), use clean_layers in two steps:
+  1. **Scan** — call clean_layers with dryRun: true on the selected section (or nodeId; scope: "page" only when the user asked for the whole page/file). Nothing is modified.
+  2. **Ask** — before applying, put every decision the scan reports in front of the user, in the user's language:
+     - Hidden layers: never remove them on your own. Ask: "N hidden layer(s) were found. Do you want to remove them?"
+     - Needs confirmation (prototype interaction, effect, export setting, mask): ask about each one specifically, naming the layer and the reason, e.g. "\"Card\" has a prototype interaction — removing it may break the prototype. Remove it?"
+     - If the scan lists neither, skip this step.
+  3. **Apply** — call clean_layers without dryRun. Pass removeAllHidden: true (or confirmedHiddenIds for a subset) only if the user said yes to removing hidden layers, and put only the IDs the user approved in confirmedRiskyIds. Never fill these from your own judgement.
+- If the apply result lists new layers needing confirmation, ask again before touching them.
+- Protected layers (main components, component-property and variant layers) are never removed. Report them; do not try to delete them another way.
+- Grid proposals: when the scan lists a section under "Grid proposals" (heading + one row of equal items buried in wrappers), ask by name whether to convert it to a Grid with the items directly inside. Pass only the approved section IDs in confirmedGridIds. The plugin undoes any conversion that would move something and reports why. Report that too; do not rebuild the section by hand with other tools.
+- If a Grid conversion is not applied, report the reason and stop. NEVER imitate it with ungroup_nodes, move_node, or set_auto_layout layoutMode NONE. Ungrouping an Auto Layout row stacks its items in the parent, and pinning them with x/y leaves a frame that looks right but has no layout and no longer adapts.
+
+## 4. Design System and Scope Rules
 - Prefer local components and design library styles/variables over ad-hoc primitives.
 - Confine modifications strictly to the user's requested scope (e.g., selected node, active section).
 `;

@@ -126,6 +126,21 @@ Auto Layout wrappers with no function, layers with no visual or layout effect.
 Never delete: required component layers, component properties, variant structure,
 necessary masks, existing design-system elements, layers used for interaction/prototyping.
 
+**Optimization process:**
+1. **Scan first** — inspect the whole section/file before removing anything.
+2. **Collapse to one layer of Auto Layout** — where a single Auto Layout frame does the job,
+   remove the extra groups, double/nested frames and wrappers so the structure is short and solid.
+3. **Grid or normal flow** — convert repeating row/column items (card lists, feature grids,
+   galleries) to Grid Auto Layout; keep everything else in normal (horizontal/vertical)
+   Auto Layout. Choose whichever gives the cleaner, more developer-friendly structure.
+   If a Grid conversion would shift spacing, alignment or wrapping, do not convert — keep the
+   existing structure and report it.
+4. **Reuse system padding** — before setting any padding or gap on an optimized frame, check
+   the local variables (Left-Right, Top-Bottom, Row Gap, Column Gap, etc.) and bind the existing
+   token. If none exists, follow section 4 (ask; never auto-create).
+5. **Conflict-free** — optimized layers must not break other components, instances, variables,
+   styles or prototype links. Compare before/after screenshots to confirm the design is unchanged.
+
 ## 11. Optimization must not change the design
 
 Layer optimization is structural cleanup. It must not cause visual redesign, typography or
@@ -181,6 +196,8 @@ introduced where an appropriate token exists.
 - Never reduce font size or change approved typography to solve a height problem.
 - Optimize unnecessary layers without changing the approved design.
 - Do not add Auto Layout that serves no layout purpose.
+- Optimization: scan first, collapse redundant wrappers, use Grid for repeating row/column
+  items and normal Auto Layout elsewhere, bind existing padding tokens, stay conflict-free.
 - Do not perform extra work the designer did not request.
 
 > **Most important responsive sizing rule:** never solve responsive content with a fixed

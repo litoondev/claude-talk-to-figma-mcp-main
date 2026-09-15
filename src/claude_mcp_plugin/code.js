@@ -4871,7 +4871,9 @@ function isComponentLike(node) {
 function frameHasLayoutPurpose(node) {
   if (!node || !isContainer(node)) return true;
   if (isComponentLike(node)) return true;
-  if (containsAbsolutePositionedLayer(node)) return true;
+  // Only a direct child can be positioned against this frame; deeper absolute
+  // layers belong to their own parents and move with them.
+  if (node.children.some((child) => isAbsolutePositionedLayer(child))) return true;
 
   if (isAutoLayout(node)) return true;
   if (node.clipsContent) return true;
@@ -4959,6 +4961,176 @@ function isPossibleSpacer(node) {
   if (!Array.isArray(node.children) || node.children.length !== 0) return false;
   if (hasVisualPresence(node) || node.visible === false) return false;
   return !!(node.parent && isAutoLayout(node.parent) && node.width > 0.5 && node.height > 0.5);
+}
+
+// ─── Cleanup confirmation gate ─────────────────────────────────────────────
+//
+// Some layers are never removed on inference alone. Hidden layers may be
+// alternate states the designer keeps on purpose, and a layer carrying a
+// prototype interaction, effect, export setting or mask changes the design or
+// the prototype when it goes. Cleanup reports those instead, and removes one
+// only when its ID comes back in a confirmation list the user approved.
+
+/** Node IDs the current page's prototype flows start from. */
+function readFlowStartIds() {
+  const ids = new Set();
+  try {
+    const points = figma.currentPage && figma.currentPage.flowStartingPoints;
+    if (Array.isArray(points)) {
+      for (const point of points) if (point && point.nodeId) ids.add(point.nodeId);
+    }
+  } catch (e) { /* not available in this editor */ }
+  return ids;
+}
+
+/**
+ * Build the gate once per cleanup. `apply: false` is a scan: every decision is
+ * made and recorded, but nothing in the document changes.
+ */
+function normalizeCleanupGate(options) {
+  const opts = options || {};
+  if (opts.hiddenIds instanceof Set) return opts;
+  return {
+    apply: opts.apply !== false,
+    removeAllHidden: opts.removeAllHidden === true,
+    hiddenIds: new Set(Array.isArray(opts.confirmedHiddenIds) ? opts.confirmedHiddenIds : []),
+    riskyIds: new Set(Array.isArray(opts.confirmedRiskyIds) ? opts.confirmedRiskyIds : []),
+    gridIds: new Set(Array.isArray(opts.confirmedGridIds) ? opts.confirmedGridIds : []),
+    flowStartIds: opts.flowStartIds instanceof Set ? opts.flowStartIds : readFlowStartIds(),
+  };
+}
+
+/**
+ * Why removing or collapsing this layer could change the design or prototype.
+ * Empty means nothing is at stake. Descendants are checked for removal (they go
+ * with the layer) but not for collapsing (they survive it). Effects count only
+ * on the layer itself — nearly every card has a shadowed child.
+ */
+function layerRiskReasons(node, flowStartIds, includeDescendants) {
+  const reasons = [];
+  const add = (reason) => { if (reasons.indexOf(reason) === -1) reasons.push(reason); };
+  const read = (n, key) => { try { return n[key]; } catch (e) { return undefined; } };
+  let budget = 400;
+
+  const inspect = (n, own) => {
+    if (!n || budget-- <= 0) return;
+    const where = own ? "" : " on a child layer";
+    const reactions = read(n, "reactions");
+    if (Array.isArray(reactions) && reactions.length > 0) add("prototype interaction" + where);
+    if (flowStartIds && flowStartIds.has(n.id)) add("prototype flow starting point" + where);
+    const exportSettings = read(n, "exportSettings");
+    if (Array.isArray(exportSettings) && exportSettings.length > 0) add("export setting" + where);
+    if (own) {
+      const effects = read(n, "effects");
+      if (Array.isArray(effects) && effects.some((e) => e && e.visible !== false)) add("effect");
+    }
+    if (read(n, "isMask") === true) add("mask" + where);
+    if (own && !includeDescendants) return;
+    if (isContainer(n)) for (const child of n.children) inspect(child, false);
+  };
+
+  inspect(node, true);
+  return reasons;
+}
+
+function isInsideMainComponent(node) {
+  let p = node.parent;
+  let depth = 0;
+  while (p && depth < 30) {
+    if (p.type === "COMPONENT" || p.type === "COMPONENT_SET") return true;
+    p = p.parent;
+    depth++;
+  }
+  return false;
+}
+
+/**
+ * Why a hidden layer must never be removed, even with confirmation — it belongs
+ * to a component's definition. Null when it is not protected.
+ */
+function protectedLayerReason(node) {
+  if (node.type === "COMPONENT" || node.type === "COMPONENT_SET") {
+    return "main component — removing it breaks every instance";
+  }
+  try {
+    const refs = node.componentPropertyReferences;
+    if (refs && Object.keys(refs).length > 0) return "controlled by a component property";
+  } catch (e) { /* not a component child */ }
+  if (isInsideMainComponent(node)) return "part of a main component's variant structure";
+  return null;
+}
+
+function cleanupList(report, key) {
+  if (!Array.isArray(report[key])) report[key] = [];
+  return report[key];
+}
+
+function cleanupLabel(node) {
+  return `${node.name} (${String(node.type).toLowerCase()})`;
+}
+
+function recordNeedsConfirmation(report, node, action, reasons) {
+  const list = cleanupList(report, "needsConfirmation");
+  if (list.some((entry) => entry.id === node.id && entry.action === action)) return;
+  list.push({ id: node.id, name: node.name, type: node.type, action, reasons });
+}
+
+/**
+ * Decide a hidden layer's fate. Returns without descending: removing a hidden
+ * layer takes its children with it, and keeping one keeps them too.
+ */
+function handleHiddenLayer(node, report, gate) {
+  if (isInsideInstance(node)) return;
+
+  const protectedReason = protectedLayerReason(node);
+  if (protectedReason) {
+    cleanupList(report, "protectedLayers").push({
+      id: node.id, name: node.name, type: node.type, reason: protectedReason,
+    });
+    return;
+  }
+
+  const reasons = layerRiskReasons(node, gate.flowStartIds, true);
+  const confirmed = reasons.length > 0
+    ? gate.riskyIds.has(node.id)
+    : gate.removeAllHidden || gate.hiddenIds.has(node.id);
+
+  if (!confirmed || !gate.apply) {
+    if (reasons.length > 0) recordNeedsConfirmation(report, node, "remove hidden layer", reasons);
+    else cleanupList(report, "hiddenLayers").push({ id: node.id, name: node.name, type: node.type });
+    return;
+  }
+
+  const label = cleanupLabel(node);
+  try {
+    node.remove();
+    cleanupList(report, "removedHidden").push(label);
+  } catch (e) {
+    report.warnings.push(`"${node.name}" is hidden and confirmed for removal, but Figma refused to remove it.`);
+  }
+}
+
+/**
+ * One warning per kind of layer the cleanup kept for confirmation. Used where
+ * nobody is asked interactively (generated responsive frames), so a kept layer
+ * is still visible in the report.
+ */
+function summarizePendingCleanup(report) {
+  // Read, never create: this report may belong to a caller with its own shape.
+  const hidden = (report.hiddenLayers || []).length;
+  const pending = (report.needsConfirmation || []).length;
+  if (hidden > 0) {
+    report.warnings.push(
+      `${hidden} hidden layer(s) were kept. Hidden layers are removed only after the user confirms — ` +
+        "run clean_layers with dryRun to list them."
+    );
+  }
+  if (pending > 0) {
+    report.warnings.push(
+      `${pending} layer(s) carry a prototype interaction, effect, export setting or mask and were kept. ` +
+        "Run clean_layers with dryRun to review them."
+    );
+  }
 }
 
 function shortenForName(value, limit) {
@@ -5236,12 +5408,19 @@ function inferLayerName(node, context) {
 /**
  * Remove empty and purposeless layers.
  * Runs bottom-up so that a wrapper emptied by its children's removal is itself
- * then removable in the same pass.
+ * then removable in the same pass. Hidden and risky layers go through the
+ * confirmation gate; with `gate.apply` false this only records decisions.
  */
-function removeUnwantedLayers(root, report) {
+function removeUnwantedLayers(root, report, gate) {
+  const g = normalizeCleanupGate(gate);
   const walk = (node, depth) => {
     if (!node || node.removed || depth > 16) return;
     if (isInstrumentation(node)) return;
+    // Hidden layers are the user's call, whatever else is true of them.
+    if (node !== root && node.visible === false) {
+      handleHiddenLayer(node, report, g);
+      return;
+    }
     if (isAbsolutePositionedLayer(node)) return;
     // Never restructure the inside of a component.
     if (node.type === "INSTANCE") return;
@@ -5263,7 +5442,16 @@ function removeUnwantedLayers(root, report) {
     }
 
     if (isRemovableLayer(node)) {
-      const label = `${node.name} (${node.type.toLowerCase()})`;
+      const reasons = layerRiskReasons(node, g.flowStartIds, true);
+      if (reasons.length > 0 && !g.riskyIds.has(node.id)) {
+        recordNeedsConfirmation(report, node, "remove", reasons);
+        return;
+      }
+      const label = cleanupLabel(node);
+      if (!g.apply) {
+        report.removed.push(label);
+        return;
+      }
       try {
         node.remove();
         report.removed.push(label);
@@ -5276,25 +5464,135 @@ function removeUnwantedLayers(root, report) {
 }
 
 /**
+ * An Auto Layout wrapper that can go without changing the render: one child
+ * that fills it exactly, no padding, nothing painted or clipped, no variable
+ * binding and no size constraint. The typical "Block > Block > Card" double
+ * nesting. Anything else is doing real work.
+ */
+function isTransparentAutoLayoutWrapper(node) {
+  if (!isAutoLayout(node) || !isContainer(node) || node.children.length !== 1) return false;
+  if (hasVisualPresence(node) || node.clipsContent) return false;
+  if (node.cornerRadius !== undefined && node.cornerRadius !== 0) return false;
+  if (typeof node.opacity === "number" && node.opacity < 1) return false;
+  if (node.blendMode && node.blendMode !== "NORMAL" && node.blendMode !== "PASS_THROUGH") return false;
+  if (node.paddingTop || node.paddingRight || node.paddingBottom || node.paddingLeft) return false;
+  for (const key of ["minWidth", "maxWidth", "minHeight", "maxHeight"]) {
+    if (typeof node[key] === "number") return false;
+  }
+  try {
+    if (node.boundVariables && Object.keys(node.boundVariables).length > 0) return false;
+  } catch (e) {
+    return false;
+  }
+  // Only the direct child's positioning matters — childFillsWrapper rejects an
+  // absolute one. Absolute layers deeper down (a card's background) move with
+  // their parent, so searching the subtree would wrongly keep every card wrapper.
+  return childFillsWrapper(node, node.children[0]);
+}
+
+/** The child sits at the wrapper's origin at the wrapper's exact size. */
+function childFillsWrapper(wrapper, child) {
+  if (!child || isAbsolutePositionedLayer(child)) return false;
+  return (
+    Math.abs(child.x || 0) < 0.5 &&
+    Math.abs(child.y || 0) < 0.5 &&
+    Math.abs(child.width - wrapper.width) < 0.5 &&
+    Math.abs(child.height - wrapper.height) < 0.5
+  );
+}
+
+function readLayoutSizing(node, axis) {
+  try {
+    const value = axis === "h" ? node.layoutSizingHorizontal : node.layoutSizingVertical;
+    return value || null;
+  } catch (e) {
+    return null; // no Auto Layout on the node or its parent
+  }
+}
+
+function writeLayoutSizing(node, axis, value) {
+  if (axis === "h") node.layoutSizingHorizontal = value;
+  else node.layoutSizingVertical = value;
+}
+
+/**
+ * Put a wrapper's only child in the wrapper's place and delete the wrapper,
+ * keeping the child where it was, at the size it was, with the wrapper's
+ * Fill/Fixed behaviour in its new parent. Any refused step is undone, so a
+ * failure never leaves a half-restructured layer.
+ */
+function unwrapSingleChild(wrapper, parent, child) {
+  const index = parent.children.indexOf(wrapper);
+  const childX = child.x;
+  const childY = child.y;
+  const before = { h: readLayoutSizing(child, "h"), v: readLayoutSizing(child, "v") };
+  const target = isAutoLayout(parent)
+    ? { h: readLayoutSizing(wrapper, "h"), v: readLayoutSizing(wrapper, "v") }
+    : null;
+  let moved = false;
+
+  try {
+    // A child that filled the wrapper would fill the wrong parent once moved — freeze it first.
+    for (const axis of ["h", "v"]) {
+      if (before[axis] === "FILL") writeLayoutSizing(child, axis, "FIXED");
+    }
+    parent.insertChild(index, child);
+    moved = true;
+    if (!isAutoLayout(parent)) {
+      child.x = wrapper.x + childX;
+      child.y = wrapper.y + childY;
+    }
+    if (target) {
+      for (const axis of ["h", "v"]) {
+        if (target[axis] === "FILL") writeLayoutSizing(child, axis, "FILL");
+      }
+    }
+    wrapper.remove();
+    return true;
+  } catch (e) {
+    try {
+      if (moved && !wrapper.removed) wrapper.insertChild(0, child);
+      child.x = childX;
+      child.y = childY;
+      for (const axis of ["h", "v"]) {
+        if (before[axis] && readLayoutSizing(child, axis) !== before[axis]) {
+          writeLayoutSizing(child, axis, before[axis]);
+        }
+      }
+    } catch (restoreError) { /* best effort — the wrapper is still in place */ }
+    return false;
+  }
+}
+
+/**
  * Collapse wrappers that provide no layout function.
  *
- * Only a single-child frame with no auto layout, background, border, effect or
- * clipping is collapsed — those are pure nesting. Anything doing real work is
- * left exactly as it is.
+ * Two kinds are collapsed. A single-child frame with no auto layout,
+ * background, border, effect or clipping is pure nesting. An Auto Layout wrapper
+ * whose only child fills it exactly, with no padding and nothing painted, is
+ * double nesting (see isTransparentAutoLayoutWrapper). Either way the design
+ * must render identically afterwards, so a wrapper whose child is offset or
+ * sized differently inside an Auto Layout parent is kept. Anything doing real
+ * work is left exactly as it is. A wrapper carrying a prototype interaction,
+ * export setting or mask is collapsed only once confirmed.
  */
-function collapseRedundantWrappers(root, report) {
+function collapseRedundantWrappers(root, report, gate) {
+  const g = normalizeCleanupGate(gate);
   let collapsed = 0;
 
   const walk = (node, depth) => {
     if (!node || node.removed || depth > 16) return;
     if (isInstrumentation(node) || node.type === "INSTANCE") return;
+    // Collapsing a hidden wrapper would make its child visible.
+    if (node !== root && node.visible === false) return;
     if (isAbsolutePositionedLayer(node)) return;
     if (isContainer(node)) for (const child of node.children.slice()) walk(child, depth + 1);
 
     if (node === root || !node.parent) return;
     if (!isContainer(node) || isComponentLike(node)) return;
+    // A main component's layers are its variants' structure, not ours to flatten.
+    if (isInsideMainComponent(node)) return;
     if (node.children.length !== 1) return;
-    if (frameHasLayoutPurpose(node)) return;
 
     const parent = node.parent;
     if (!isContainer(parent)) return;
@@ -5302,15 +5600,27 @@ function collapseRedundantWrappers(root, report) {
     const child = node.children[0];
     if (isInstrumentation(child)) return;
 
-    try {
-      const index = parent.children.indexOf(node);
-      parent.insertChild(index, child);
-      const label = node.name;
-      node.remove();
+    if (!isTransparentAutoLayoutWrapper(node)) {
+      if (frameHasLayoutPurpose(node)) return;
+      // In an Auto Layout parent the child takes the wrapper's slot, so it must fill it.
+      if (isAutoLayout(parent) && !childFillsWrapper(node, child)) return;
+    }
+
+    const reasons = layerRiskReasons(node, g.flowStartIds, false);
+    if (reasons.length > 0 && !g.riskyIds.has(node.id)) {
+      recordNeedsConfirmation(report, node, "collapse wrapper", reasons);
+      return;
+    }
+    if (!g.apply) {
+      report.collapsed.push(node.name);
+      collapsed++;
+      return;
+    }
+
+    const label = node.name;
+    if (unwrapSingleChild(node, parent, child)) {
       report.collapsed.push(label);
       collapsed++;
-    } catch (e) {
-      // Reparenting refused (locked layer, incompatible parent) — leave it.
     }
   };
 
@@ -5522,6 +5832,370 @@ function flagExcessiveNesting(root, report, maxDepth) {
   walk(root, 0, [root.name]);
 }
 
+// ─── Grid conversion ───────────────────────────────────────────────────────
+//
+// A vertical section holding heading(s) and one row of N equal items is a grid
+// assembled from Auto Layout: the row frame, and any wrapper around each item,
+// exist only to make it render. As a real Grid the section holds the headings
+// (each spanning every column) and the items directly. Converting is only ever
+// a proposal — it runs for a section whose ID the user confirmed — and the
+// result is measured against the layout it replaces and undone if anything
+// moved.
+
+const GRID_TOLERANCE = 1;
+const GRID_ALIGN = { MIN: "MIN", CENTER: "CENTER", MAX: "MAX" };
+const SECTION_SPACING_FIELDS = ["itemSpacing", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft"];
+
+/** A horizontal row that only spaces its children: no paint, padding, wrap, constraint, or binding but its gap. */
+function isPlainGridRow(node) {
+  if (!node || node.type !== "FRAME" || node.layoutMode !== "HORIZONTAL") return false;
+  if (node.layoutWrap === "WRAP" || node.primaryAxisAlignItems === "SPACE_BETWEEN") return false;
+  if (hasVisualPresence(node) || node.clipsContent) return false;
+  if (node.cornerRadius !== undefined && node.cornerRadius !== 0) return false;
+  if (typeof node.opacity === "number" && node.opacity < 1) return false;
+  if (node.blendMode && node.blendMode !== "NORMAL" && node.blendMode !== "PASS_THROUGH") return false;
+  if (node.paddingTop || node.paddingRight || node.paddingBottom || node.paddingLeft) return false;
+  for (const key of ["minWidth", "maxWidth", "minHeight", "maxHeight"]) {
+    if (typeof node[key] === "number") return false;
+  }
+  try {
+    if (Object.keys(node.boundVariables || {}).some((field) => field !== "itemSpacing")) return false;
+  } catch (e) {
+    return false;
+  }
+  return layerRiskReasons(node, null, false).length === 0;
+}
+
+/** Peel transparent wrappers off a row item. Null when the item cannot be a grid cell. */
+function unwrapGridCell(node) {
+  if (!node || node.visible === false || isAbsolutePositionedLayer(node) || isInstrumentation(node)) return null;
+  const wrappers = [];
+  let current = node;
+  while (
+    !isComponentLike(current) &&
+    isContainer(current) &&
+    current.children.length === 1 &&
+    layerRiskReasons(current, null, false).length === 0 &&
+    (isTransparentAutoLayoutWrapper(current) ||
+      (!isAutoLayout(current) &&
+        !frameHasLayoutPurpose(current) &&
+        childFillsWrapper(current, current.children[0])))
+  ) {
+    // A wrapper around hidden content renders empty — it is not an item to grid.
+    if (current.children[0].visible === false) return null;
+    wrappers.push(current);
+    current = current.children[0];
+  }
+  return { leaf: current, wrappers };
+}
+
+/**
+ * The plan for turning a section into a Grid, or null when it is not a
+ * heading + equal-row section, or when a Grid could not reproduce it exactly.
+ */
+function detectGridCandidate(section) {
+  if (!section || section.removed || section.type !== "FRAME" || section.layoutMode !== "VERTICAL") return null;
+  if (typeof section.gridColumnCount !== "number") return null; // this editor has no Grid layout
+  if (section.visible === false || isInsideInstance(section) || isInsideMainComponent(section)) return null;
+  if (section.primaryAxisAlignItems === "SPACE_BETWEEN" || section.counterAxisAlignItems === "BASELINE") return null;
+  // FLEX columns are not valid on a grid whose width hugs its content.
+  if (readLayoutSizing(section, "h") === "HUG") return null;
+  if (readLayoutSizing(section, "v") !== "HUG" && section.primaryAxisAlignItems !== "MIN") return null;
+
+  const kids = section.children;
+  if (kids.length === 0) return null;
+  if (kids.some((c) => c.visible === false || isAbsolutePositionedLayer(c) || isInstrumentation(c))) return null;
+
+  const row = kids[kids.length - 1];
+  if (!isPlainGridRow(row)) return null;
+  const headers = kids.slice(0, -1);
+  // One heading only: several may land side by side when the section becomes a Grid, and
+  // Figma refuses a span over a neighbour. Not yet verified against real placement.
+  if (headers.length > 1) return null;
+  if (headers.some((h) => isPlainGridRow(h) || readLayoutSizing(h, "v") === "FILL")) return null;
+
+  const cells = row.children.map(unwrapGridCell);
+  if (cells.length < 2 || cells.some((cell) => !cell)) return null;
+
+  const width = cells[0].leaf.width;
+  const height = cells[0].leaf.height;
+  if (cells.some((cell) => Math.abs(cell.leaf.width - width) > GRID_TOLERANCE)) return null;
+  const sameHeight = cells.every((cell) => Math.abs(cell.leaf.height - height) <= GRID_TOLERANCE);
+  if (!sameHeight && row.counterAxisAlignItems !== "MIN") return null;
+
+  // Equal FLEX columns reproduce the row only when its items and gaps fill it exactly…
+  const gap = row.itemSpacing;
+  if (typeof gap !== "number") return null;
+  if (Math.abs(cells.length * width + (cells.length - 1) * gap - row.width) > GRID_TOLERANCE) return null;
+  // …and the row fills the section's content box.
+  const contentWidth = section.width - (section.paddingLeft || 0) - (section.paddingRight || 0);
+  if (Math.abs(row.width - contentWidth) > GRID_TOLERANCE) return null;
+
+  return { section, row, headers, cells, columns: cells.length };
+}
+
+function describeGridCandidate(plan) {
+  const leaves = plan.cells.map((cell) => cell.leaf);
+  const leafNames = Array.from(new Set(leaves.map((leaf) => leaf.name)));
+  const wrapperNames = [];
+  for (const cell of plan.cells) for (const wrapper of cell.wrappers) wrapperNames.push(wrapper.name);
+  return {
+    id: plan.section.id,
+    name: plan.section.name,
+    columns: plan.columns,
+    headers: plan.headers.map((header) => header.name),
+    items: leaves.map((leaf) => leaf.name),
+    itemName: leafNames.length === 1 ? leafNames[0] : null,
+    removes: [plan.row.name].concat(wrapperNames),
+  };
+}
+
+/** Every heading + equal-row section under root, root included, outermost first. */
+function findGridCandidates(root) {
+  const plans = [];
+  const walk = (node, depth) => {
+    if (!node || node.removed || depth > 16) return;
+    if (node.type === "INSTANCE" || node.visible === false || isInstrumentation(node)) return;
+    const plan = detectGridCandidate(node);
+    if (plan) plans.push(plan);
+    if (isContainer(node)) for (const child of node.children) walk(child, depth + 1);
+  };
+  walk(root, 0);
+  return plans;
+}
+
+function readBox(node) {
+  try {
+    const box = node.absoluteBoundingBox;
+    return box ? { x: box.x, y: box.y, width: box.width, height: box.height } : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/** False when either side has no geometry to compare. */
+function boxMoved(before, after) {
+  if (!before || !after) return false;
+  return ["x", "y", "width", "height"].some((key) => Math.abs(before[key] - after[key]) > GRID_TOLERANCE);
+}
+
+function boundVariableId(node, field) {
+  try {
+    const alias = node.boundVariables && node.boundVariables[field];
+    return alias && alias.id ? alias.id : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function bindVariableById(node, field, variableId) {
+  if (!variableId) return;
+  const variable = await figma.variables.getVariableByIdAsync(variableId);
+  if (variable) node.setBoundVariable(field, variable);
+}
+
+function readSizingPair(node) {
+  return { h: readLayoutSizing(node, "h"), v: readLayoutSizing(node, "v") };
+}
+
+function restoreSizing(node, saved) {
+  let ok = true;
+  for (const axis of ["h", "v"]) {
+    if (!saved || !saved[axis] || readLayoutSizing(node, axis) === saved[axis]) continue;
+    try {
+      writeLayoutSizing(node, axis, saved[axis]);
+    } catch (e) {
+      ok = false;
+    }
+  }
+  return ok;
+}
+
+/**
+ * Convert one planned section to a Grid. The old row stays in the section, out
+ * of the flow, until every heading and item is confirmed to render where it
+ * did; then it is deleted along with its emptied wrappers. Anything else puts
+ * the section back.
+ */
+async function convertSectionToGrid(plan) {
+  const { section, row, headers, cells, columns } = plan;
+  const leaves = cells.map((cell) => cell.leaf);
+  const tracked = [section].concat(headers, leaves);
+  const before = tracked.map(readBox);
+  const snapshot = {
+    layoutMode: section.layoutMode,
+    itemSpacing: section.itemSpacing,
+    padding: {
+      paddingTop: section.paddingTop,
+      paddingRight: section.paddingRight,
+      paddingBottom: section.paddingBottom,
+      paddingLeft: section.paddingLeft,
+    },
+    primary: section.primaryAxisAlignItems,
+    counter: section.counterAxisAlignItems,
+    sizing: readSizingPair(section),
+    bindings: SECTION_SPACING_FIELDS.map((field) => [field, boundVariableId(section, field)]),
+    rowIndex: section.children.indexOf(row),
+    rowSizing: readSizingPair(row),
+    headerSizing: headers.map(readSizingPair),
+    leafSizing: leaves.map(readSizingPair),
+    cellIndex: cells.map((cell) => row.children.indexOf(cell.wrappers[0] || cell.leaf)),
+  };
+  const rowGap = section.itemSpacing;
+  const columnGap = row.itemSpacing;
+  const columnGapVariable = boundVariableId(row, "itemSpacing");
+
+  if (typeof figma.commitUndo === "function") figma.commitUndo();
+  try {
+    row.layoutPositioning = "ABSOLUTE";
+
+    // The heading takes its full-width span while it still has its row to itself.
+    // With the items already placed beside it, Figma refuses the span as an overlap.
+    section.layoutMode = "GRID";
+    section.gridColumnCount = columns;
+    section.gridAutoTracks = "ROWS";
+    section.gridItemsPositioning = "ROW_AUTO_FLOW";
+    for (const header of headers) header.gridColumnSpan = columns;
+
+    leaves.forEach((leaf, i) => {
+      // A filling item would fill the wrong parent mid-move — freeze it first.
+      for (const axis of ["h", "v"]) {
+        if (snapshot.leafSizing[i][axis] === "FILL") writeLayoutSizing(leaf, axis, "FIXED");
+      }
+      section.insertChild(headers.length + i, leaf);
+    });
+    for (const track of section.gridColumnSizes) {
+      track.type = "FLEX";
+      track.value = 1;
+    }
+    for (const track of section.gridRowSizes) track.type = "HUG";
+    section.gridRowGap = rowGap;
+    section.gridColumnGap = columnGap;
+    await bindVariableById(section, "gridRowGap", snapshot.bindings[0][1]);
+    await bindVariableById(section, "gridColumnGap", columnGapVariable);
+
+    // Padding and sizing should survive a layout-mode change; make certain they did.
+    for (const field of Object.keys(snapshot.padding)) {
+      if (section[field] !== snapshot.padding[field]) section[field] = snapshot.padding[field];
+    }
+    for (const [field, variableId] of snapshot.bindings) {
+      if (field !== "itemSpacing" && variableId && boundVariableId(section, field) !== variableId) {
+        await bindVariableById(section, field, variableId);
+      }
+    }
+    restoreSizing(section, snapshot.sizing);
+
+    const headerAlign = GRID_ALIGN[snapshot.counter] || "AUTO";
+    headers.forEach((header, i) => {
+      if (snapshot.headerSizing[i].h === "FILL") writeLayoutSizing(header, "h", "FILL");
+      else header.gridChildHorizontalAlign = headerAlign;
+      restoreSizing(header, { v: snapshot.headerSizing[i].v });
+    });
+    const itemAlign = GRID_ALIGN[row.counterAxisAlignItems] || "AUTO";
+    leaves.forEach((leaf, i) => {
+      writeLayoutSizing(leaf, "h", "FILL");
+      if (snapshot.leafSizing[i].v === "FILL") writeLayoutSizing(leaf, "v", "FILL");
+      else {
+        restoreSizing(leaf, { v: snapshot.leafSizing[i].v });
+        leaf.gridChildVerticalAlign = itemAlign;
+      }
+    });
+
+    const after = tracked.map(readBox);
+    const moved = tracked.findIndex((node, i) => boxMoved(before[i], after[i]));
+    if (moved >= 0) {
+      const error = new Error(`"${tracked[moved].name}" would move or resize as a Grid`);
+      error.layoutMoved = true;
+      throw error;
+    }
+
+    row.remove();
+    if (typeof figma.commitUndo === "function") figma.commitUndo();
+    return { ok: true };
+  } catch (e) {
+    const detail = e && e.message ? e.message : String(e);
+    const restored = await restoreSectionFromGrid(plan, snapshot);
+    const reason = e && e.layoutMoved ? detail : `Figma refused a step (${detail})`;
+    return {
+      ok: false,
+      reason: restored
+        ? `${reason}, so the section was left as it was`
+        : `${reason}, and restoring it did not fully succeed — check the section or undo (Cmd+Z)`,
+    };
+  }
+}
+
+/** Put a section back the way convertSectionToGrid found it. True when every step succeeded. */
+async function restoreSectionFromGrid(plan, snapshot) {
+  const { section, row, headers, cells } = plan;
+  let ok = true;
+  const attempt = (step) => {
+    try {
+      step();
+    } catch (e) {
+      ok = false;
+    }
+  };
+
+  attempt(() => { section.layoutMode = snapshot.layoutMode; });
+  attempt(() => { section.itemSpacing = snapshot.itemSpacing; });
+  attempt(() => { section.primaryAxisAlignItems = snapshot.primary; });
+  attempt(() => { section.counterAxisAlignItems = snapshot.counter; });
+  for (const field of Object.keys(snapshot.padding)) {
+    attempt(() => { section[field] = snapshot.padding[field]; });
+  }
+  for (const [field, variableId] of snapshot.bindings) {
+    if (!variableId) continue;
+    try {
+      await bindVariableById(section, field, variableId);
+    } catch (e) {
+      ok = false;
+    }
+  }
+
+  cells.forEach((cell, i) => attempt(() => {
+    if (cell.wrappers.length > 0) cell.wrappers[cell.wrappers.length - 1].insertChild(0, cell.leaf);
+    else row.insertChild(Math.min(snapshot.cellIndex[i], row.children.length), cell.leaf);
+  }));
+  attempt(() => { row.layoutPositioning = "AUTO"; });
+  attempt(() => section.insertChild(Math.min(snapshot.rowIndex, section.children.length), row));
+
+  if (!restoreSizing(section, snapshot.sizing)) ok = false;
+  if (!restoreSizing(row, snapshot.rowSizing)) ok = false;
+  headers.forEach((header, i) => { if (!restoreSizing(header, snapshot.headerSizing[i])) ok = false; });
+  cells.forEach((cell, i) => { if (!restoreSizing(cell.leaf, snapshot.leafSizing[i])) ok = false; });
+  return ok;
+}
+
+/**
+ * Convert the confirmed sections under root; list the rest as proposals.
+ * Deepest first, so converting an outer section never invalidates an inner plan.
+ */
+async function applyGridConversions(root, gate, report, handled) {
+  const plans = findGridCandidates(root);
+  const pending = [];
+  for (let i = plans.length - 1; i >= 0; i--) {
+    const section = plans[i].section;
+    if (!gate.gridIds.has(section.id)) {
+      pending.unshift(describeGridCandidate(plans[i]));
+      continue;
+    }
+    handled.add(section.id);
+    const plan = detectGridCandidate(section);
+    if (!plan) {
+      cleanupList(report, "gridSkipped").push({
+        id: section.id, name: section.name, reason: "no longer a heading + equal-row section",
+      });
+      continue;
+    }
+    const summary = describeGridCandidate(plan);
+    const result = await convertSectionToGrid(plan);
+    if (result.ok) cleanupList(report, "gridConverted").push(summary);
+    else cleanupList(report, "gridSkipped").push({ id: section.id, name: section.name, reason: result.reason });
+  }
+  for (const proposal of pending) cleanupList(report, "gridCandidates").push(proposal);
+}
+
 /**
  * Full cleanup pass. Order matters: remove dead layers first, then collapse the
  * wrappers that removal has emptied of purpose, then name what remains — so
@@ -5529,10 +6203,18 @@ function flagExcessiveNesting(root, report, maxDepth) {
  */
 function cleanLayers(root, options, report) {
   const opts = options || {};
+  cleanStructure(root, opts, report, normalizeCleanupGate(opts));
+  return finishCleanup(root, opts, report);
+}
 
-  if (opts.removeUnwanted !== false) removeUnwantedLayers(root, report);
-  if (opts.collapseWrappers !== false) collapseRedundantWrappers(root, report);
+/** Remove dead layers, then collapse the wrappers that removal has emptied of purpose. */
+function cleanStructure(root, opts, report, gate) {
+  if (opts.removeUnwanted !== false) removeUnwantedLayers(root, report, gate);
+  if (opts.collapseWrappers !== false) collapseRedundantWrappers(root, report, gate);
+}
 
+/** Name what remains and flag what needs a human, once the structure is final. */
+function finishCleanup(root, opts, report) {
   // Re-derive section kinds after restructuring so names match reality.
   let sectionKinds = null;
   if (isContainer(root)) {
@@ -5544,11 +6226,26 @@ function cleanLayers(root, options, report) {
   if (opts.flagGroups !== false) flagLayoutGroups(root, report);
   if (opts.flagNesting !== false) flagExcessiveNesting(root, report);
 
+  // Interactive callers ask the user about kept layers; everyone else gets a warning.
+  if (!opts.interactive) summarizePendingCleanup(report);
+
   return report;
 }
 
 function emptyCleanupReport() {
-  return { renamed: [], removed: [], collapsed: [], warnings: [] };
+  return {
+    renamed: [],
+    removed: [],
+    removedHidden: [],
+    collapsed: [],
+    hiddenLayers: [],
+    needsConfirmation: [],
+    protectedLayers: [],
+    gridCandidates: [],
+    gridConverted: [],
+    gridSkipped: [],
+    warnings: [],
+  };
 }
 
 // ─── Command entry points ──────────────────────────────────────────────────
@@ -5570,53 +6267,125 @@ async function resolveResponsiveTarget(params) {
 }
 
 /**
+ * What a cleanup runs on: an explicit node, the whole current page, or every
+ * selected node. A node selected together with one of its ancestors is cleaned
+ * once, as part of that ancestor.
+ */
+async function resolveCleanupTargets(params) {
+  const opts = params || {};
+  if (opts.nodeId) return [await resolveResponsiveTarget(opts)];
+  if (opts.scope === "page") return [figma.currentPage];
+
+  const selection = figma.currentPage.selection;
+  if (!selection || selection.length === 0) {
+    throw new Error(
+      "Nothing selected. Select the section or frame to optimize in Figma, pass nodeId, " +
+        "or pass scope \"page\" for the whole current page."
+    );
+  }
+  const selected = new Set(selection);
+  return selection.filter((node) => {
+    for (let p = node.parent; p; p = p.parent) if (selected.has(p)) return false;
+    return true;
+  });
+}
+
+/**
  * Standalone layer cleanup, for tidying a frame the responsive flow did not
  * generate — most usefully the desktop source, so all three breakpoints end up
  * with matching names.
+ *
+ * Interactive: a dry run records every decision — including the hidden and
+ * risky layers the user must confirm — and the apply run removes those only
+ * when their IDs come back confirmed.
  */
 async function cleanLayersCommand(params) {
   const opts = params || {};
-  const node = await resolveResponsiveTarget(opts);
+  const targets = await resolveCleanupTargets(opts);
+  const gate = normalizeCleanupGate({
+    apply: !opts.dryRun,
+    removeAllHidden: opts.removeAllHidden,
+    confirmedHiddenIds: opts.confirmedHiddenIds,
+    confirmedRiskyIds: opts.confirmedRiskyIds,
+    confirmedGridIds: opts.confirmedGridIds,
+  });
 
   const report = emptyCleanupReport();
-  const before = countDescendants(node, function () { return true; }, 5000);
+  const countLayers = () =>
+    targets.reduce(
+      (sum, target) => sum + countDescendants(target, function () { return true; }, 5000),
+      0
+    );
+  const before = countLayers();
+  const targetInfo = targets.map((t) => ({ id: t.id, name: t.name, type: t.type }));
 
   if (opts.dryRun) {
-    // Report only: flag what would change without touching the document.
+    // Report only: the decisions the apply run would make, without touching the document.
     const generic = [];
-    const empties = [];
-    const walk = (n, depth) => {
-      if (!n || depth > 16 || n.removed) return;
-      if (isInstrumentation(n) || isInsideInstance(n)) return;
-      if (n !== node && isGenericName(n.name)) generic.push(n.name);
-      if (n !== node && isRemovableLayer(n)) empties.push(`${n.name} (${n.type.toLowerCase()})`);
-      if (isContainer(n) && n.type !== "INSTANCE") for (const c of n.children) walk(c, depth + 1);
-    };
-    walk(node, 0);
-    flagLayoutGroups(node, report);
-    flagExcessiveNesting(node, report);
+    for (const target of targets) {
+      const walk = (n, depth) => {
+        if (!n || depth > 16 || n.removed) return;
+        if (isInstrumentation(n) || isInsideInstance(n)) return;
+        if (n !== target && isGenericName(n.name)) generic.push(n.name);
+        if (isContainer(n) && n.type !== "INSTANCE") for (const c of n.children) walk(c, depth + 1);
+      };
+      walk(target, 0);
+      if (opts.removeUnwanted !== false) removeUnwantedLayers(target, report, gate);
+      if (opts.collapseWrappers !== false) collapseRedundantWrappers(target, report, gate);
+      for (const plan of findGridCandidates(target)) report.gridCandidates.push(describeGridCandidate(plan));
+      flagLayoutGroups(target, report);
+      flagExcessiveNesting(target, report);
+    }
 
     return {
       dryRun: true,
-      frame: { id: node.id, name: node.name },
+      targets: targetInfo,
+      frame: targetInfo[0],
       layerCount: before,
       genericNames: generic,
-      removableLayers: empties,
+      removableLayers: report.removed,
+      collapsibleWrappers: report.collapsed,
+      hiddenLayers: report.hiddenLayers,
+      needsConfirmation: report.needsConfirmation,
+      protectedLayers: report.protectedLayers,
+      gridCandidates: report.gridCandidates,
       warnings: report.warnings,
     };
   }
 
-  cleanLayers(node, opts, report);
-  const after = countDescendants(node, function () { return true; }, 5000);
+  const handledGridIds = new Set();
+  for (const target of targets) {
+    const targetOpts = Object.assign({}, opts, gate, { interactive: true });
+    cleanStructure(target, targetOpts, report, gate);
+    // Grids after the structural pass, so wrappers it already collapsed are not counted twice.
+    await applyGridConversions(target, gate, report, handledGridIds);
+    finishCleanup(target, targetOpts, report);
+  }
+  for (const id of gate.gridIds) {
+    if (!handledGridIds.has(id)) {
+      report.gridSkipped.push({
+        id, name: id, reason: "not found in the selection as a heading + equal-row section",
+      });
+    }
+  }
+  const after = countLayers();
 
   return {
     dryRun: false,
-    frame: { id: node.id, name: node.name },
+    targets: targetInfo,
+    frame: targetInfo[0],
     layerCountBefore: before,
     layerCountAfter: after,
     renamed: report.renamed,
     removed: report.removed,
+    removedHidden: report.removedHidden,
     collapsed: report.collapsed,
+    hiddenLayers: report.hiddenLayers,
+    needsConfirmation: report.needsConfirmation,
+    protectedLayers: report.protectedLayers,
+    gridCandidates: report.gridCandidates,
+    gridConverted: report.gridConverted,
+    gridSkipped: report.gridSkipped,
     warnings: report.warnings,
   };
 }
