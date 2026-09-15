@@ -4,6 +4,8 @@
 
 Enable your AI agents to read, analyze, and modify Figma designs.
 
+> 🌐 **Language / ভাষা:** [English guide](#english) · [বাংলা নির্দেশিকা](#bangla)
+
 Works with your favorite agentic tools:
 
 - [Claude Desktop](https://claude.ai/)
@@ -56,6 +58,8 @@ Generate production-ready code directly from designs:
 > "Show me every unresolved comment I'm involved in across the team, flag the ones waiting on my reply, and draft an answer for each"
 
 ---
+
+<a id="english"></a>
 
 # 🚀 Installation — complete beginner's guide
 
@@ -210,32 +214,23 @@ Warnings (`WARN`, `deprecated`) are cosmetic — ignore them. Only stop if you s
 
 ## Step 3: Build the Claude Desktop extension
 
-The GitHub Releases page only carries an older v1.0.0 build **without the comment tools**, so build the current one yourself. Still inside the project folder, run:
+The GitHub Releases page only carries an old build, so build the current one yourself. Still inside the project folder, run:
 
 ```bash
-npm run build:dxt
+npx dxt pack . claude-talk-to-figma-mcp.mcpb
 ```
 
-This creates a file named something like `claude-talk-to-figma-mcp-1.1.0.dxt` in the project folder.
+When it finishes (about 30 seconds), the project folder contains **`claude-talk-to-figma-mcp.mcpb`**, the file you install in the next step.
 
-Now make a copy with the modern extension name — current Claude Desktop expects `.mcpb`:
+> 💡 `npx dxt` is the packaging tool that `npm install` already downloaded. Nothing else to install.
+>
+> 🪟 **Windows:** the command is the same.
 
-```bash
-cp claude-talk-to-figma-mcp-*.dxt claude-talk-to-figma-mcp.mcpb
-```
+<details>
+<summary>❓ I also see <code>.dxt</code> files in the folder</summary>
 
-> 💡 The `*` in that command is a wildcard — it matches whatever version number is in the filename. Copy-paste it exactly as written.
-
-> 🪟 **Windows:** use `copy claude-talk-to-figma-mcp-*.dxt claude-talk-to-figma-mcp.mcpb` instead.
-
-You now have both files. **Use `.mcpb`.**
-
-| File | Use it when |
-|------|-------------|
-| `claude-talk-to-figma-mcp.mcpb` | ✅ **Default — try this first.** Current Claude Desktop |
-| `claude-talk-to-figma-mcp-1.1.0.dxt` | Fallback only, for older Claude Desktop builds that reject `.mcpb` |
-
-> ℹ️ They are byte-identical — Anthropic renamed the format from **DXT** to **MCPB**. Only the file extension differs, so if one is rejected, try the other.
+Older instructions (`npm run build:dxt`, `npm run pack`) create extra copies named `.dxt`. They contain exactly the same thing, since Anthropic renamed the format from **DXT** to **MCPB**. Use the `.mcpb` and delete the `.dxt` copies if you like. Only use a `.dxt` if a very old Claude Desktop refuses the `.mcpb`.
+</details>
 
 ---
 
@@ -329,6 +324,10 @@ A small panel opens showing a **channel ID** in bold inside a green box — some
 
 **→ Copy that 6-character ID now. You'll paste it into Claude in the very next step.**
 
+> 💡 See a **Connect** button instead of an ID? Click it. The ID appears once the plugin reaches the bridge server. If it never does, the server from Step 6a isn't running.
+>
+> 💡 **Shortcut:** click the ID itself. It copies the whole message `Connect to Figma, channel …` so you can paste it straight into Claude.
+
 ### 6c. Connect Claude
 
 In Claude Desktop, type the message below — but **replace `a4f9c2` with the ID you just copied from the plugin panel**:
@@ -379,6 +378,420 @@ cd ~/Documents/claude-talk-to-figma-mcp-main && npm run socket
 1. ✅ Run the command above (leave the Terminal window open)
 2. ✅ Figma → **Plugins** → **Development** → **Claude Talk to Figma** → copy the channel ID from the green box
 3. ✅ Tell Claude: `Connect to Figma, channel` and then paste your ID — e.g. `Connect to Figma, channel d7b3f1`
+
+---
+
+## 🧹 Optimize layers & convert to Grid
+
+Clean up messy layer trees (empty frames, useless groups, `Frame > Frame > Card` double nesting) and turn card rows into a real Figma **Grid**, **without changing how the design looks**.
+
+### How to use it
+
+1. In Figma, **select one section or frame**, for example `# Work Process`. Don't select a whole page of 100+ sections.
+2. Tell Claude:
+   ```
+   Optimize the layers of the selected section
+   ```
+3. Claude first **scans** (nothing changes yet), then asks you about anything that needs a decision:
+
+   | Claude asks | What it means | Your answer |
+   |---|---|---|
+   | "N hidden layers were found. Do you want to remove them?" | Hidden layers may be alternate states you kept on purpose | **Yes** to delete them, **No** to keep them |
+   | "\"Card\" has a prototype interaction — remove it?" | Removing it could break your prototype, an effect, an export or a mask | Decide for each one |
+   | "\"# Work Process\" can become a 4-column Grid… Convert it?" | The heading and cards can sit directly inside a Grid, with the wrapper frames removed | **Yes** to convert |
+
+4. Claude applies only what you approved and reports what changed.
+
+### What it does automatically (no question needed)
+
+- Removes empty and zero-size layers
+- Collapses wrapper frames that do nothing: a single child exactly the same size, no padding, no fill, no stroke, no clip
+- Hands the wrapper's **Fill** sizing to the child, so the layout stays identical
+
+### What it never does
+
+- Never deletes a **hidden** layer, or a layer with a **prototype interaction, effect, export setting or mask**, without your "yes"
+- Never deletes **main components**, **component-property** layers or **variant** layers
+- Never changes text, fonts, colours, spacing values or variables
+- Never enters **component instances**
+
+### How the Grid conversion stays safe
+
+| Your design | After conversion |
+|---|---|
+| `# Work Process` (vertical Auto Layout) → `Text_Container` + `Container` → `Frame` → `Frame` → `Card` ×4 | `# Work Process` (**Grid**, 4 columns) → `Text_Container` (spans all 4) + `Card` ×4 |
+
+- The **column count is read from your design**: 4 equal cards means 4 equal columns (`repeat(4, 1fr)`).
+- Gaps and padding keep their **variables** (row gap = the section's gap, column gap = the row's gap).
+- After converting, the plugin **measures every heading and card**. If anything moved by more than 1px, or Figma refuses a step, **it undoes the conversion** and tells you why. Each conversion is one `Cmd` + `Z`.
+- A section is only proposed when a Grid can reproduce it exactly: one heading, one row of equal-width items, no padding or background on the row.
+
+> ⚠️ **If a Grid conversion is not applied, don't "fix" it by ungrouping.** Ungrouping an Auto Layout row stacks the cards, and moving them back by hand leaves a frame with **fixed positions and no layout**. It looks right but no longer adapts. Report the reason instead.
+
+---
+
+## 🔄 Update to the newest version
+
+When this repository gets new features, update like this (about 3 minutes):
+
+```bash
+cd ~/Documents/claude-talk-to-figma-mcp-main
+git pull
+npm install
+npm run build
+npx dxt pack . claude-talk-to-figma-mcp.mcpb
+```
+
+Then:
+
+1. Double-click the new **`claude-talk-to-figma-mcp.mcpb`** → **Install / Replace**
+2. **Quit Claude Desktop completely** (`Cmd` + `Q`) and reopen it
+3. In the Terminal running the bridge, press `Ctrl` + `C`, then start it again with `npm run socket`
+4. In Figma, **close the plugin and open it again** (it loads the new plugin code), and connect with the new channel ID
+
+> 🔑 **Skipping step 1 or 2 is the #1 reason "nothing changed".** Claude Desktop keeps running the extension you installed before until you reinstall it and restart. The version number in Settings → Extensions may not change, so don't rely on it.
+>
+> 🪟 **Windows:** use `npm run build:win` instead of `npm run build`, and `cd $HOME\Documents\claude-talk-to-figma-mcp-main`.
+
+---
+
+<a id="bangla"></a>
+
+# 🇧🇩 বাংলা নির্দেশিকা — একদম নতুনদের জন্য
+
+**সময় লাগবে:** প্রথমবার প্রায় ১৫ মিনিট। এরপর প্রতিদিন মাত্র ২০ সেকেন্ড।
+
+এই নির্দেশিকা ধরে নিচ্ছে আপনি আগে কখনো Terminal ব্যবহার করেননি। প্রতিটি কমান্ড পুরোটা লেখা আছে, শুধু কপি করে পেস্ট করবেন। কমান্ডগুলো ইংরেজিতেই থাকবে, এগুলো বদলাবেন না।
+
+> 💡 নির্দেশিকাটি **macOS**-এর জন্য লেখা। Windows-এ যেখানে আলাদা, সেখানে `🪟 Windows` লেখা আছে।
+
+## 🧠 আগে বুঝে নিন কী ইনস্টল করছেন
+
+এটা একটা অ্যাপ নয়, **তিনটি অংশ একসাথে কাজ করে**:
+
+```
+┌─────────────────┐        ┌──────────────────┐        ┌─────────────────┐
+│  Claude Desktop │◄──────►│  ব্রিজ সার্ভার      │◄──────►│  Figma Desktop  │
+│  ১. এক্সটেনশন     │        │  ২. Terminal-এ চলে │        │  ৩. প্লাগইন        │
+└─────────────────┘        └──────────────────┘        └─────────────────┘
+```
+
+| # | অংশ | কী কাজ করে | কোথায় থাকে |
+|---|---|---|---|
+| **১** | **এক্সটেনশন** (`.mcpb` ফাইল) | Claude-কে Figma-র টুলগুলো দেয় | Claude Desktop-এর ভেতরে |
+| **২** | **ব্রিজ সার্ভার** | Claude আর Figma-র মধ্যে বার্তা আদান-প্রদান করে | একটা খোলা Terminal উইন্ডোতে |
+| **৩** | **Figma প্লাগইন** | নির্দেশ পেয়ে আসলে ডিজাইনে পরিবর্তন করে | Figma Desktop-এর ভেতরে |
+
+**তিনটিই একসাথে চালু থাকতে হবে।** যেকোনো একটা বন্ধ থাকলে Claude বলবে সে Figma-তে পৌঁছাতে পারছে না। এটাই সবচেয়ে সাধারণ সমস্যা।
+
+---
+
+## ধাপ ০: Terminal খুলুন
+
+1. কিবোর্ডে `Cmd` + `Space` চাপুন
+2. `Terminal` লিখুন
+3. `Enter` চাপুন
+
+একটা লেখাভরা উইন্ডো খুলবে, এটাই Terminal। কমান্ড চালাতে: কমান্ড কপি করুন → Terminal-এ পেস্ট করুন (`Cmd` + `V`) → `Enter` চাপুন → লেখা থামা পর্যন্ত **অপেক্ষা করুন**।
+
+> 🪟 **Windows:** `Win` কী চাপুন, `PowerShell` লিখে `Enter` চাপুন।
+
+---
+
+## ধাপ ১: চারটি প্রয়োজনীয় জিনিস ইনস্টল করুন
+
+### ১ক. Node.js
+
+আগে থেকে আছে কিনা দেখুন:
+
+```bash
+node -v
+```
+
+- ✅ `v22.14.0`-এর মতো কিছু দেখালে (**18 বা তার বেশি**) → ১খ-তে যান।
+- ❌ `command not found` দেখালে → **[nodejs.org](https://nodejs.org/en/download)**-এ গিয়ে সবুজ **"Download Node.js (LTS)"** বাটনে ক্লিক করুন, ডাউনলোড হওয়া ফাইল খুলে **Continue** চাপতে থাকুন।
+
+তারপর Terminal **বন্ধ করে আবার খুলুন**, আর `node -v` আবার চালিয়ে দেখুন।
+
+### ১খ. Bun (অবশ্যই লাগবে, বাদ দেবেন না)
+
+ব্রিজ সার্ভার Bun ছাড়া **চলবেই না**। এই ধাপ বাদ দেওয়াই সেটআপ ব্যর্থ হওয়ার ১ নম্বর কারণ।
+
+```bash
+bun -v
+```
+
+`command not found` দেখালে ইনস্টল করুন:
+
+```bash
+curl -fsSL https://bun.sh/install | bash
+```
+
+শেষ হলে Terminal **বন্ধ করে আবার খুলুন**, তারপর `bun -v` চালান। `1.2.4`-এর মতো ভার্সন দেখাবে।
+
+> 🪟 **Windows:** এর বদলে চালান `powershell -c "irm bun.sh/install.ps1 | iex"`
+
+### ১গ. Figma **Desktop** অ্যাপ
+
+**[figma.com/downloads](https://www.figma.com/downloads/)** থেকে ডাউনলোড করুন।
+
+> ⚠️ ব্রাউজারের Figma-তে **কাজ করবে না**। ডেস্কটপ অ্যাপ লাগবেই।
+
+### ১ঘ. Claude Desktop
+
+**[claude.ai/download](https://claude.ai/download)** থেকে ডাউনলোড করে সাইন ইন করুন।
+
+> ⚠️ ব্রাউজারের claude.ai নয়, **ডেস্কটপ অ্যাপ** লাগবে। ব্রাউজারে এক্সটেনশন চলে না।
+
+**✅ যাচাই:** `node -v` আর `bun -v` দুটোই ভার্সন দেখাচ্ছে, আর Figma Desktop ও Claude Desktop দুটোই খুলছে।
+
+---
+
+## ধাপ ২: প্রজেক্ট ডাউনলোড করে বিল্ড করুন
+
+নিচের **পুরো ব্লকটা একসাথে** কপি করে Terminal-এ পেস্ট করুন, তারপর `Enter`:
+
+```bash
+cd ~/Documents
+git clone https://github.com/litoondev/claude-talk-to-figma-mcp-main.git
+cd claude-talk-to-figma-mcp-main
+npm install
+npm run build
+```
+
+| লাইন | কী করে |
+|---|---|
+| `cd ~/Documents` | Documents ফোল্ডারে যায় |
+| `git clone …` | প্রজেক্টটা `Documents/claude-talk-to-figma-mcp-main`-এ ডাউনলোড করে |
+| `cd claude-talk…` | সেই ফোল্ডারের ভেতরে ঢোকে |
+| `npm install` | দরকারি লাইব্রেরি ডাউনলোড করে (১–৩ মিনিট, অনেক লেখা আসবে, এটা স্বাভাবিক) |
+| `npm run build` | প্রজেক্টকে চালানোর উপযোগী করে |
+
+**এই ফোল্ডারটাই আপনার মূল জায়গা:** `Documents/claude-talk-to-figma-mcp-main`। প্রতিবার এখানেই ফিরে আসবেন।
+
+> ❓ **`git: command not found` দেখালে:** `xcode-select --install` চালান, যে উইন্ডো আসবে সেখানে **Install** চাপুন, তারপর উপরের ব্লকটা আবার চালান। অথবা [GitHub পেজ](https://github.com/litoondev/claude-talk-to-figma-mcp-main) থেকে সবুজ **Code** বাটন → **Download ZIP** → Documents-এ unzip করুন → সেই ফোল্ডারে `npm install` আর `npm run build` চালান।
+>
+> ❓ **লাল রঙের `WARN` বা `deprecated` লেখা এলে:** চিন্তার কিছু নেই, উপেক্ষা করুন। শুধু **`ERR!`** লেখা এসে কমান্ড মাঝপথে থেমে গেলে সমস্যা।
+>
+> 🪟 **Windows:** `npm run build`-এর বদলে `npm run build:win`, আর `cd ~/Documents`-এর বদলে `cd $HOME\Documents` লিখুন।
+
+---
+
+## ধাপ ৩: Claude Desktop-এর এক্সটেনশন ফাইল তৈরি করুন
+
+একই ফোল্ডারে থেকে এটা চালান:
+
+```bash
+npx dxt pack . claude-talk-to-figma-mcp.mcpb
+```
+
+প্রায় ৩০ সেকেন্ড পর ফোল্ডারে **`claude-talk-to-figma-mcp.mcpb`** ফাইল তৈরি হবে। পরের ধাপে এটাই ইনস্টল করবেন।
+
+> 💡 ফোল্ডারে `.dxt` ফাইলও দেখলে ঘাবড়াবেন না। ওগুলো একই জিনিসের পুরোনো নামের কপি। **সবসময় `.mcpb` ব্যবহার করুন।**
+
+---
+
+## ধাপ ৪: Claude Desktop-এ এক্সটেনশন ইনস্টল করুন
+
+1. **Finder** খুলুন → বাঁ পাশে **Documents** → `claude-talk-to-figma-mcp-main` ফোল্ডার খুলুন
+2. **`claude-talk-to-figma-mcp.mcpb`** ফাইলে **ডাবল-ক্লিক** করুন
+3. Claude Desktop খুলে ইনস্টলের অনুমতি চাইবে → **Install** চাপুন (আগে থেকে থাকলে **Replace**)
+4. **Figma personal access token** চাইলে → **খালি রেখে Continue চাপুন।** এটা শুধু কমান্ড টুলের জন্য, পরে দিলেও চলবে ([ধাপ ৭](#bangla-step7))
+5. **Claude Desktop পুরো বন্ধ করুন:** `Cmd` + `Q` চাপুন (লাল × চাপলে পুরো বন্ধ হয় না), তারপর আবার খুলুন
+
+**ডাবল-ক্লিকে কিছু না হলে:** Claude Desktop → **Settings** → **Extensions** → `.mcpb` ফাইলটা টেনে এনে ওই পেজে ছেড়ে দিন।
+
+**✅ যাচাই:** Claude Desktop → Settings → Extensions-এ **Claude Talk to Figma** দেখা যাচ্ছে এবং চালু আছে।
+
+> ❓ ফাইলটা অন্য কোনো অ্যাপে খুলে গেলে: ফাইলে রাইট-ক্লিক → **Open With** → **Claude**।
+
+---
+
+## ধাপ ৫: Figma-তে প্লাগইন ইনস্টল করুন
+
+1. **Figma Desktop** অ্যাপ খুলুন, যেকোনো ডিজাইন ফাইল খুলুন
+2. উপরে বাঁ কোণে **Figma লোগো ("F" আইকন)** → **Plugins** → **Development** → **Import plugin from manifest…**
+3. এই পথে যান:
+   ```
+   Documents → claude-talk-to-figma-mcp-main → src → claude_mcp_plugin → manifest.json
+   ```
+4. **`manifest.json`** সিলেক্ট করে **Open** চাপুন
+
+> 💡 `src` ফোল্ডার খুঁজে না পেলে ফাইল পিকারে `Cmd` + `Shift` + `G` চাপুন আর পেস্ট করুন: `~/Documents/claude-talk-to-figma-mcp-main/src/claude_mcp_plugin`
+
+**✅ যাচাই:** **Plugins** → **Development**-এ **Claude Talk to Figma** দেখা যাচ্ছে। এটা জীবনে একবারই করতে হয়।
+
+---
+
+## ধাপ ৬: চালু করুন (প্রতিদিনের কাজ)
+
+### ৬ক. ব্রিজ সার্ভার চালু করুন
+
+Terminal খুলে চালান:
+
+```bash
+cd ~/Documents/claude-talk-to-figma-mcp-main
+npm run socket
+```
+
+এমন লেখা আসবে:
+
+```
+Claude to Figma WebSocket server running on port 3055
+```
+
+> 🚨 **এই Terminal উইন্ডো খোলা রাখুন।** বন্ধ করলে বা `Ctrl` + `C` চাপলে ব্রিজ বন্ধ হয়ে যাবে আর Claude Figma হারাবে। উইন্ডোটা শুধু একপাশে সরিয়ে রাখুন।
+>
+> 💡 চালু আছে কিনা দেখতে ব্রাউজারে খুলুন: **http://localhost:3055/status**
+
+### ৬খ. Figma-তে প্লাগইন খুলুন
+
+আপনার Figma ফাইলে: **Plugins** → **Development** → **Claude Talk to Figma**
+
+একটা ছোট প্যানেল খুলবে। সেখানে সবুজ বক্সে একটা **channel ID** দেখাবে, যেমন `a4f9c2`।
+
+- **Connect** বাটন দেখালে সেটায় ক্লিক করুন।
+- **ID-টার উপর ক্লিক করলে** পুরো বার্তা `Connect to Figma, channel …` কপি হয়ে যায়।
+
+> ⚠️ **প্লাগইন যতবার খুলবেন, ID ততবার বদলাবে।** পুরোনো ID কখনো ব্যবহার করবেন না।
+
+### ৬গ. Claude-কে কানেক্ট করুন
+
+Claude Desktop-এ লিখুন, তবে **`a4f9c2`-এর জায়গায় আপনার নিজের ID দিন**:
+
+```
+Connect to Figma, channel a4f9c2
+```
+
+তারপর Figma-তে যেকোনো লেয়ার সিলেক্ট করে জিজ্ঞেস করুন:
+
+```
+What's currently selected in Figma?
+```
+
+Claude সেই লেয়ারের বর্ণনা দিলে **সেটআপ সম্পূর্ণ।** 🎉
+
+---
+
+<a id="bangla-step7"></a>
+
+## ধাপ ৭ (ঐচ্ছিক): Figma কমেন্ট টুল
+
+শুধু যদি চান Claude Figma-র **কমেন্ট পড়ুক ও উত্তর দিক**। বাকি সব এটা ছাড়াই কাজ করে।
+
+1. Figma: **আপনার ছবি** → **Settings** → **Security** → **Personal access tokens** → **Generate new token**
+2. এই দুটো scope চালু করুন: **`files:read`** আর **`file_comments:write`**
+3. টোকেনটা সাথে সাথে কপি করুন (Figma একবারই দেখায়), এটা `figd_` দিয়ে শুরু হয়
+4. Claude Desktop → **Settings** → **Extensions** → **Claude Talk to Figma** → টোকেন পেস্ট করুন
+5. `Cmd` + `Q` দিয়ে Claude বন্ধ করে আবার খুলুন
+
+> 🔒 এই টোকেন দিয়ে আপনার অ্যাকাউন্টের **সব ফাইল** পড়া যায়। কখনো কারো সাথে শেয়ার করবেন না, চ্যাটে পেস্ট করবেন না।
+
+---
+
+## 📅 প্রথমবারের পর প্রতিদিন
+
+সেটআপ স্থায়ী। প্রতিদিন শুধু তিনটি কাজ:
+
+```bash
+cd ~/Documents/claude-talk-to-figma-mcp-main && npm run socket
+```
+
+1. ✅ উপরের কমান্ড চালান (Terminal খোলা রাখুন)
+2. ✅ Figma → **Plugins** → **Development** → **Claude Talk to Figma** → নতুন channel ID কপি করুন
+3. ✅ Claude-কে লিখুন: `Connect to Figma, channel` তারপর আপনার ID
+
+---
+
+## 🧹 লেয়ার অপটিমাইজ ও Grid-এ রূপান্তর
+
+অগোছালো লেয়ার পরিষ্কার করে (খালি ফ্রেম, অকেজো গ্রুপ, `Frame > Frame > Card`-এর মতো ডাবল নেস্টিং) আর কার্ডের সারিকে আসল Figma **Grid**-এ রূপান্তর করে, **ডিজাইন দেখতে একটুও না বদলে**।
+
+### কীভাবে ব্যবহার করবেন
+
+1. Figma-তে **একটা সেকশন বা ফ্রেম সিলেক্ট করুন**, যেমন `# Work Process`। একসাথে পুরো পেজ সিলেক্ট করবেন না।
+2. Claude-কে লিখুন:
+   ```
+   Optimize the layers of the selected section
+   ```
+3. Claude আগে **শুধু স্ক্যান করবে** (কিছুই বদলাবে না), তারপর যেখানে আপনার সিদ্ধান্ত লাগবে সেখানে জিজ্ঞেস করবে:
+
+   | Claude যা জিজ্ঞেস করবে | এর মানে | আপনার উত্তর |
+   |---|---|---|
+   | "N টি হিডেন লেয়ার পাওয়া গেছে, রিমুভ করবেন?" | হিডেন লেয়ার হয়তো আপনি ইচ্ছে করে রেখেছেন | মুছতে **হ্যাঁ**, রাখতে **না** |
+   | "\"Card\"-এ প্রোটোটাইপ ইন্টারঅ্যাকশন আছে, রিমুভ করবেন?" | মুছলে প্রোটোটাইপ, ইফেক্ট, এক্সপোর্ট বা মাস্ক নষ্ট হতে পারে | প্রতিটির জন্য আলাদা সিদ্ধান্ত |
+   | "\"# Work Process\" ৪-কলাম Grid হতে পারে, রূপান্তর করবেন?" | হেডিং আর কার্ডগুলো সরাসরি Grid-এর ভেতরে বসবে, অপ্রয়োজনীয় র‍্যাপার সরে যাবে | রূপান্তর করতে **হ্যাঁ** |
+
+4. Claude শুধু আপনার অনুমতি দেওয়া কাজগুলোই করবে, আর কী বদলেছে জানাবে।
+
+### নিজে থেকে যা করে (জিজ্ঞেস না করেই)
+
+- খালি ও শূন্য-মাপের লেয়ার সরায়
+- অকেজো র‍্যাপার ফ্রেম সরায়: যার ভেতরে একটাই চাইল্ড হুবহু সমান মাপের, কোনো প্যাডিং, fill, stroke বা clip নেই
+- র‍্যাপারের **Fill** সাইজিং চাইল্ডকে দিয়ে দেয়, তাই লেআউট হুবহু একই থাকে
+
+### যা কখনো করে না
+
+- আপনার "হ্যাঁ" ছাড়া **হিডেন** লেয়ার, বা **প্রোটোটাইপ, ইফেক্ট, এক্সপোর্ট সেটিং বা মাস্ক** থাকা লেয়ার মোছে না
+- **মেইন কম্পোনেন্ট**, **কম্পোনেন্ট প্রপার্টি** বা **ভ্যারিয়েন্ট** লেয়ার কখনো মোছে না
+- লেখা, ফন্ট, রং, স্পেসিং ভ্যালু বা ভেরিয়েবল বদলায় না
+- **কম্পোনেন্ট ইনস্ট্যান্সের** ভেতরে হাত দেয় না
+
+### Grid রূপান্তর কেন নিরাপদ
+
+| আপনার ডিজাইন | রূপান্তরের পর |
+|---|---|
+| `# Work Process` (vertical Auto Layout) → `Text_Container` + `Container` → `Frame` → `Frame` → `Card` ×4 | `# Work Process` (**Grid**, ৪ কলাম) → `Text_Container` (৪ কলাম জুড়ে) + `Card` ×4 |
+
+- **কলাম সংখ্যা ডিজাইন থেকেই নেয়:** ৪টি সমান কার্ড মানে ৪টি সমান কলাম (`repeat(4, 1fr)`)।
+- গ্যাপ আর প্যাডিং তাদের **ভেরিয়েবল** সহ থাকে।
+- রূপান্তরের পর প্লাগইন **প্রতিটি হেডিং ও কার্ডের পজিশন মেপে দেখে**। ১px-এর বেশি নড়লে বা Figma কোনো ধাপ মানতে না চাইলে **রূপান্তর বাতিল করে আগের অবস্থায় ফিরিয়ে দেয়** আর কারণ জানায়। প্রতিটি রূপান্তর একবার `Cmd` + `Z` চাপলেই ফেরানো যায়।
+- শুধু তখনই প্রস্তাব করে যখন Grid হুবহু একই রকম দেখাতে পারবে: একটা হেডিং, সমান চওড়ার কার্ডের একটা সারি, সারিতে প্যাডিং বা ব্যাকগ্রাউন্ড নেই।
+
+> ⚠️ **Grid রূপান্তর না হলে নিজে ungroup করে "ঠিক" করতে যাবেন না।** Auto Layout সারি ungroup করলে কার্ডগুলো একটার নিচে আরেকটা চলে যায়। হাতে আবার সাজালে ফ্রেমটা **fixed পজিশনের, লেআউটহীন** হয়ে যায়: দেখতে ঠিক, কিন্তু আর রেসপন্সিভ থাকে না। বরং Claude যে কারণ জানিয়েছে সেটা দেখুন।
+
+---
+
+<a id="bangla-update"></a>
+
+## 🔄 নতুন ভার্সনে আপডেট করবেন যেভাবে
+
+এই রিপোজিটরিতে নতুন ফিচার এলে (প্রায় ৩ মিনিট):
+
+```bash
+cd ~/Documents/claude-talk-to-figma-mcp-main
+git pull
+npm install
+npm run build
+npx dxt pack . claude-talk-to-figma-mcp.mcpb
+```
+
+তারপর:
+
+1. নতুন **`claude-talk-to-figma-mcp.mcpb`**-এ ডাবল-ক্লিক → **Install / Replace**
+2. **Claude Desktop পুরো বন্ধ করুন** (`Cmd` + `Q`), তারপর আবার খুলুন
+3. ব্রিজ চলা Terminal-এ `Ctrl` + `C` চাপুন, তারপর আবার `npm run socket` চালান
+4. Figma-তে **প্লাগইন বন্ধ করে আবার খুলুন** (তাহলে নতুন কোড লোড হবে), নতুন channel ID দিয়ে কানেক্ট করুন
+
+> 🔑 **"কিছুই বদলায়নি" মনে হওয়ার ১ নম্বর কারণ ১ বা ২ নম্বর ধাপ বাদ দেওয়া।** আবার ইনস্টল করে রিস্টার্ট না করা পর্যন্ত Claude Desktop পুরোনো এক্সটেনশনই চালায়। Settings-এ ভার্সন নম্বর নাও বদলাতে পারে, তাই সেটা দেখে বিচার করবেন না।
+
+---
+
+## 🆘 সমস্যা ও সমাধান
+
+| যা দেখছেন | আসলে কী হয়েছে | সমাধান |
+|---|---|---|
+| "I can't connect to Figma" | ব্রিজ সার্ভার চলছে না | ধাপ ৬ক আবার করুন, Terminal খোলা রাখুন |
+| "Channel not found" | পুরোনো channel ID | প্লাগইন আবার খুলে **নতুন** ID দিন |
+| Claude-এর কাছে Figma টুলই নেই | এক্সটেনশন ইনস্টল হয়নি বা Claude রিস্টার্ট হয়নি | Settings → Extensions দেখুন, ধাপ ৪ আবার করুন, `Cmd` + `Q` দিয়ে বন্ধ করুন |
+| `ReferenceError: Bun is not defined` | Bun নেই | ধাপ ১খ |
+| `EADDRINUSE` / port 3055 | সার্ভার আগেই অন্য উইন্ডোতে চলছে | সেটাই ব্যবহার করুন, অথবা `pkill -f socket.js` |
+| Figma মেনুতে প্লাগইন নেই | ব্রাউজারের Figma-তে ইমপোর্ট করেছেন | **Figma Desktop**-এ ধাপ ৫ আবার করুন |
+| নতুন ফিচার কাজ করছে না, পুরোনো আচরণ করছে | Claude Desktop পুরোনো এক্সটেনশন চালাচ্ছে | [আপডেট করুন](#bangla-update): নতুন `.mcpb` ইনস্টল → `Cmd` + `Q` → প্লাগইন আবার খুলুন |
+| "Grid conversion not applied" | Grid হুবহু একই রকম দেখাতে পারত না, তাই প্লাগইন বাতিল করেছে | ডিজাইন অক্ষত আছে। Claude-এর দেখানো কারণ পড়ুন, ungroup করবেন না |
+| গতকাল চলছিল, আজ চলছে না | Terminal বন্ধ বা কম্পিউটার রিস্টার্ট হয়েছে | স্বাভাবিক। প্রতিদিনের ৩টি কাজ আবার করুন |
+
+তবুও সমস্যা থাকলে [TROUBLESHOOTING.md](TROUBLESHOOTING.md) দেখুন অথবা [GitHub-এ Issue খুলুন](https://github.com/litoondev/claude-talk-to-figma-mcp-main/issues)।
 
 ---
 
@@ -905,6 +1318,8 @@ something that behaves differently.
 | Commands work, comments don't | No Figma token | [Step 7](#step-7-optional-comment-tools) |
 | `git: command not found` | Xcode CLI tools missing | `xcode-select --install`, or download the ZIP |
 | Everything worked yesterday, nothing today | Server stopped when you closed Terminal / rebooted | Normal. Redo the [3-step daily routine](#-every-session-after-the-first) |
+| New features don't work, old behaviour | Claude Desktop still runs the extension you installed before | [Update](#-update-to-the-newest-version): install the new `.mcpb` → `Cmd` + `Q` → reopen the plugin |
+| "Grid conversion not applied" | A Grid could not reproduce the section exactly, so the plugin undid it | Your design is untouched. Read the reason; don't ungroup by hand |
 
 Still stuck? See [TROUBLESHOOTING.md](TROUBLESHOOTING.md), or [open an issue](https://github.com/litoondev/claude-talk-to-figma-mcp-main/issues).
 
@@ -1068,6 +1483,11 @@ If you want to know about all project contributions, you can visit the ["Contrib
 ## 📊 Project status
 
 ✅ **Stable production** - Tool ready for daily use in design and development teams
+
+🆕 **New — layer optimization:**
+- Scan → ask → apply: hidden and risky layers are removed only with your confirmation
+- Double-nested Auto Layout wrappers collapsed without changing the design
+- Heading + card rows converted to Figma Grid, verified to 1px and undone if anything moves
 
 🆕 **New in 1.2.0:**
 - Read and reply to Figma comments via the REST API
