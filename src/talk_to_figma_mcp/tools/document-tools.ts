@@ -687,7 +687,10 @@ export function registerDocumentTools(server: McpServer): void {
   server.tool(
     "execute_code",
     "Execute arbitrary JavaScript code directly inside the Figma Plugin environment. 'figma' and 'params' " +
-      "are in scope. Supports async/await. Returns the evaluated result. Use when an operation is not covered " +
+      "are in scope. Supports async/await. Returns the evaluated result. All pages are loaded before the " +
+      "script runs; use async lookups (figma.getNodeByIdAsync), since synchronous getNodeById is unavailable. " +
+      "Layers inside an instance cannot be appended or moved: edit the main component instead. A failure " +
+      "reports the script line and, for known causes, a hint. Use when an operation is not covered " +
       "by existing tools or when performing custom batch operations.",
     {
       code: z.string().describe("JavaScript code to execute in Figma plugin context"),

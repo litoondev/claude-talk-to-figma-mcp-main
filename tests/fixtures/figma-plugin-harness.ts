@@ -121,6 +121,7 @@ export function makeNode(spec: any = {}): any {
       }
       this.children.push(child);
       child.parent = this;
+      child._gridCell = undefined;
     },
     insertChild(index: number, child: any) {
       if (child.parent?.children) {
@@ -132,6 +133,22 @@ export function makeNode(spec: any = {}): any {
       }
       this.children.splice(index, 0, child);
       child.parent = this;
+      child._gridCell = undefined;
+    },
+    appendChildAt(child: any, row: number, column: number) {
+      if (this.layoutMode !== "GRID") throw new Error("appendChildAt needs a GRID frame");
+      if (row < 0 || column < 0 || row >= this.gridRowCount || column >= this.gridColumnCount) {
+        throw new Error("in appendChildAt: row or column index out of bounds");
+      }
+      for (const other of this.children) {
+        const cell = other._gridCell;
+        if (other === child || !cell || other.layoutPositioning === "ABSOLUTE") continue;
+        if (cell.row === row && column >= cell.column && column < cell.column + (other.gridColumnSpan ?? 1)) {
+          throw new Error("in appendChildAt: the specified cell is occupied");
+        }
+      }
+      this.appendChild(child);
+      child._gridCell = { row, column };
     },
     remove() {
       if (this.parent?.children) {
@@ -258,6 +275,9 @@ export function makeNode(spec: any = {}): any {
     get: () => node[key].length,
     set(value: number) {
       if (node.layoutMode !== "GRID") throw new Error("grid track counts need layoutMode GRID");
+      if (key === "gridRowSizes" && node.gridAutoTracks === "ROWS") {
+        throw new Error("gridRowCount cannot be set while gridAutoTracks is ROWS");
+      }
       if (value < 1) throw new Error("grid track count must be at least 1");
       while (node[key].length < value) node[key].push({ type: "FLEX", value: 1 });
       node[key].length = value;
@@ -322,6 +342,42 @@ export function makeNode(spec: any = {}): any {
 function autoFlowPlacement(grid: any): Map<any, { row: number; column: number }> {
   const columns = Math.max(1, grid.gridColumnCount || 1);
   const placement = new Map<any, { row: number; column: number }>();
+  if (grid.gridItemsPositioning === "MANUAL") {
+    // Children placed with appendChildAt keep their cell; the rest take the next
+    // free cells in reading order, as Figma places a child added with appendChild.
+    const occupied = new Set<string>();
+    const flowing: any[] = [];
+    for (const child of grid.children ?? []) {
+      if (child.layoutPositioning === "ABSOLUTE") continue;
+      if (!child._gridCell) {
+        flowing.push(child);
+        continue;
+      }
+      placement.set(child, child._gridCell);
+      for (let c = 0; c < (child.gridColumnSpan ?? 1); c++) occupied.add(`${child._gridCell.row}:${child._gridCell.column + c}`);
+    }
+    let cursorRow = 0;
+    let cursorColumn = 0;
+    for (const child of flowing) {
+      const span = Math.min(child.gridColumnSpan ?? 1, columns);
+      const fits = () => {
+        if (cursorColumn + span > columns) return false;
+        for (let c = 0; c < span; c++) if (occupied.has(`${cursorRow}:${cursorColumn + c}`)) return false;
+        return true;
+      };
+      while (!fits()) {
+        cursorColumn++;
+        if (cursorColumn >= columns) {
+          cursorColumn = 0;
+          cursorRow++;
+        }
+      }
+      placement.set(child, { row: cursorRow, column: cursorColumn });
+      for (let c = 0; c < span; c++) occupied.add(`${cursorRow}:${cursorColumn + c}`);
+      cursorColumn += span;
+    }
+    return placement;
+  }
   let row = 0;
   let column = 0;
   for (const child of grid.children ?? []) {
@@ -368,8 +424,10 @@ export function createMockFigma(options: MockFigmaOptions = {}) {
     on: () => undefined,
     notify: () => undefined,
     commitUndo: () => undefined,
+    createFrame: () => makeNode({ name: "Frame" }),
     currentPage: { selection: [], children: [] },
     root: { children: [] },
+    loadAllPagesAsync: async () => undefined,
     clientStorage: {
       getAsync: async () => undefined,
       setAsync: async () => undefined,

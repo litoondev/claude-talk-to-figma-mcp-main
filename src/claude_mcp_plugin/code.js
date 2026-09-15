@@ -1288,6 +1288,8 @@ async function handleCommand(command, params) {
       return await setMultipleTextContents(params);
     case "set_auto_layout":
       return await setAutoLayout(params);
+    case "set_grid_layout":
+      return await setGridLayout(params);
     case "set_layout_sizing":
       return await setLayoutSizing(params);
     // Nuevos comandos para propiedades de texto
@@ -7970,6 +7972,170 @@ function generateCommandId() {
   return 'cmd_' + Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
 }
 
+/**
+ * Build a Figma Grid on a frame whose children already exist.
+ *
+ * Each child goes into the cell row auto-flow would give it, in reading order,
+ * and is spanned the moment it lands — before the next child is in the grid —
+ * because Figma refuses a span over a child already placed beside it. The
+ * children wait in a hidden staging frame meanwhile. If anything is refused the
+ * frame is put back as it was, and staging is deleted only once it is empty.
+ */
+async function setGridLayout(params) {
+  const opts = params || {};
+  const columns = opts.columns;
+  if (!opts.nodeId) throw new Error("Missing nodeId parameter");
+  if (!Number.isInteger(columns) || columns < 1) {
+    throw new Error("columns must be a whole number of at least 1");
+  }
+
+  const frame = await getNodeByIdSafe(opts.nodeId);
+  if (!frame) throw new Error(`Node not found with ID: ${opts.nodeId}`);
+  if (!("layoutMode" in frame) || !isContainer(frame)) {
+    throw new Error(`"${frame.name}" cannot hold a grid layout`);
+  }
+  if (typeof frame.gridColumnCount !== "number") {
+    throw new Error("This version of Figma has no Grid layout");
+  }
+
+  const kids = frame.children.filter((child) => !isAbsolutePositionedLayer(child) && !isInstrumentation(child));
+  const spanById = new Map();
+  for (const entry of Array.isArray(opts.spans) ? opts.spans : []) {
+    if (!entry || !kids.some((kid) => kid.id === entry.nodeId)) {
+      throw new Error(`"${entry && entry.nodeId}" is not an in-flow child of "${frame.name}"`);
+    }
+    spanById.set(entry.nodeId, Math.max(1, Math.min(columns, Math.floor(entry.columnSpan || 1))));
+  }
+
+  const frameSizing = readSizingPair(frame);
+  const columnSizes = Array.isArray(opts.columnSizes) ? opts.columnSizes : [];
+  const rowSizes = Array.isArray(opts.rowSizes) ? opts.rowSizes : [];
+  // FLEX tracks are invalid on an axis where the grid hugs its content.
+  if (frameSizing.h === "HUG" && columnSizes.some((t) => t && t.type === "FLEX")) {
+    throw new Error(
+      `FLEX columns are not valid on "${frame.name}" because its width hugs its content. ` +
+        "Use HUG or FIXED columns, or give the frame a fixed or fill width."
+    );
+  }
+  if (frameSizing.v === "HUG" && rowSizes.some((t) => t && t.type === "FLEX")) {
+    throw new Error(
+      `FLEX rows are not valid on "${frame.name}" because its height hugs its content. Use HUG or FIXED rows.`
+    );
+  }
+
+  const placement = [];
+  let row = 0;
+  let column = 0;
+  for (const kid of kids) {
+    const span = spanById.get(kid.id) || 1;
+    if (column + span > columns) {
+      row++;
+      column = 0;
+    }
+    placement.push({ node: kid, row, column, span });
+    column += span;
+    if (column >= columns) {
+      row++;
+      column = 0;
+    }
+  }
+  const rows = placement.length ? placement[placement.length - 1].row + 1 : 1;
+
+  const snapshot = {
+    layoutMode: frame.layoutMode,
+    order: frame.children.slice(),
+    kidSizing: kids.map(readSizingPair),
+  };
+
+  if (typeof figma.commitUndo === "function") figma.commitUndo();
+  const staging = figma.createFrame();
+  staging.name = "Grid layout staging (temporary)";
+  try { staging.visible = false; } catch (e) { /* cosmetic */ }
+
+  try {
+    for (const kid of kids) {
+      // A filling child would fill the wrong parent while it waits — freeze it first.
+      for (const axis of ["h", "v"]) {
+        if (readLayoutSizing(kid, axis) === "FILL") writeLayoutSizing(kid, axis, "FIXED");
+      }
+      staging.appendChild(kid);
+    }
+
+    frame.layoutMode = "GRID";
+    frame.gridAutoTracks = "NONE";
+    frame.gridItemsPositioning = "MANUAL";
+    frame.gridColumnCount = columns;
+    frame.gridRowCount = rows;
+    frame.gridColumnSizes.forEach((track, i) => {
+      const wanted = columnSizes[i] || { type: frameSizing.h === "HUG" ? "HUG" : "FLEX" };
+      track.type = wanted.type;
+      if (wanted.type !== "HUG") track.value = typeof wanted.value === "number" ? wanted.value : 1;
+    });
+    frame.gridRowSizes.forEach((track, i) => {
+      const wanted = rowSizes[i] || { type: "HUG" };
+      track.type = wanted.type;
+      if (wanted.type !== "HUG") track.value = typeof wanted.value === "number" ? wanted.value : 1;
+    });
+    if (typeof opts.rowGap === "number") frame.gridRowGap = opts.rowGap;
+    if (typeof opts.columnGap === "number") frame.gridColumnGap = opts.columnGap;
+
+    for (const p of placement) {
+      frame.appendChildAt(p.node, p.row, p.column);
+      if (p.span > 1) p.node.gridColumnSpan = p.span;
+    }
+    placement.forEach((p, i) => {
+      const saved = snapshot.kidSizing[i];
+      if (saved.h === "FILL") writeLayoutSizing(p.node, "h", "FILL");
+      if (saved.v === "FILL") writeLayoutSizing(p.node, "v", "FILL");
+    });
+
+    let positioning = "MANUAL";
+    try {
+      frame.gridItemsPositioning = "ROW_AUTO_FLOW";
+      frame.gridAutoTracks = "ROWS";
+      positioning = "ROW_AUTO_FLOW";
+    } catch (e) {
+      // Manual placement renders identically; auto-flow only makes later edits easier.
+      try { frame.gridItemsPositioning = "MANUAL"; } catch (ignored) { /* already manual */ }
+    }
+    restoreSizing(frame, frameSizing);
+    staging.remove();
+    if (typeof figma.commitUndo === "function") figma.commitUndo();
+
+    return {
+      id: frame.id,
+      name: frame.name,
+      columns,
+      rows,
+      rowGap: frame.gridRowGap,
+      columnGap: frame.gridColumnGap,
+      positioning,
+      placement: placement.map((p) => ({ id: p.node.id, row: p.row, column: p.column, columnSpan: p.span })),
+    };
+  } catch (e) {
+    const detail = e && e.message ? e.message : String(e);
+    let restored = true;
+    try { frame.layoutMode = snapshot.layoutMode; } catch (x) { restored = false; }
+    snapshot.order.forEach((child, index) => {
+      if (child.removed) return;
+      try { frame.insertChild(Math.min(index, frame.children.length), child); } catch (x) { restored = false; }
+    });
+    kids.forEach((kid, i) => { if (!restoreSizing(kid, snapshot.kidSizing[i])) restored = false; });
+    if (!restoreSizing(frame, frameSizing)) restored = false;
+    if (staging.children.length === 0) {
+      try { staging.remove(); } catch (x) { /* nothing left in it */ }
+    } else {
+      restored = false;
+    }
+    throw new Error(
+      restored
+        ? `Could not build the grid on "${frame.name}": ${detail}. The frame was restored.`
+        : `Could not build the grid on "${frame.name}": ${detail}. Restoring it did not fully succeed — ` +
+            `check the frame, the hidden frame "${staging.name}", or undo (Cmd+Z).`
+    );
+  }
+}
+
 async function setAutoLayout(params) {
   const {
     nodeId,
@@ -11073,6 +11239,7 @@ const FIELD_RESOLVED_TYPE = {
   fontSize: "FLOAT", lineHeight: "FLOAT", letterSpacing: "FLOAT",
   paragraphSpacing: "FLOAT", paragraphIndent: "FLOAT",
   fontWeight: "FLOAT",
+  gridRowGap: "FLOAT", gridColumnGap: "FLOAT",
   fontFamily: "STRING", fontStyle: "STRING", characters: "STRING",
   visible: "BOOLEAN",
 };
@@ -11095,6 +11262,7 @@ const FIELD_SCOPES = {
   paragraphSpacing: ["PARAGRAPH_SPACING"], paragraphIndent: ["PARAGRAPH_INDENT"],
   fontWeight: ["FONT_WEIGHT"], fontFamily: ["FONT_FAMILY"], fontStyle: ["FONT_STYLE"],
   characters: ["TEXT_CONTENT"],
+  gridRowGap: ["GAP"], gridColumnGap: ["GAP"],
 };
 
 /** Scopes for the paint- and effect-level pseudo-fields. */
@@ -11776,6 +11944,75 @@ function safeSerializePluginValue(val, depth = 0, seen = new Set()) {
   return out;
 }
 
+// Failures a script commonly hits, with what to do instead. The patterns match
+// Figma's own error text (QuickJS wording, plus V8's for the iterator case).
+const EXECUTE_CODE_HINTS = [
+  {
+    pattern: /New parent is an instance or is inside of an instance/,
+    hint: "Layers inside an instance cannot be added, moved or reordered. Make the change on the main component (await instance.getMainComponentAsync()), or call instance.detachInstance() only if the designer agreed to lose the component link.",
+  },
+  {
+    pattern: /Symbol\.iterator|is not iterable/,
+    hint: "A for...of loop, spread (...) or array destructuring received undefined. Check that the node exists (getNodeByIdAsync returns null for a wrong id), that it has children (TEXT, VECTOR, RECTANGLE and other leaf layers do not), and that params holds the field being read.",
+  },
+  {
+    pattern: /has not been explicitly loaded/,
+    hint: "All pages are loaded before the script starts, so this page was created or reached after that. Call await page.loadAsync() before reading its children.",
+  },
+  {
+    // CSS align-items: stretch (the flex default) copied onto a frame.
+    pattern: /AxisAlignItems[\s\S]*received 'STRETCH'/,
+    hint: "Auto Layout frames have no STRETCH alignment. Set counterAxisAlignItems to 'MIN' and make each child fill the cross axis instead: layoutSizingHorizontal = 'FILL' in a vertical frame, layoutSizingVertical = 'FILL' in a horizontal one.",
+  },
+  {
+    pattern: /failed validation: Invalid enum value/,
+    hint: "Use one of the values the error lists. Figma's names differ from CSS: flex-start → MIN, flex-end → MAX, center → CENTER, space-between → SPACE_BETWEEN.",
+  },
+  {
+    // QuickJS: "cannot read property 'x' of null"; V8: "Cannot read properties of null (reading 'x')".
+    pattern: /cannot read propert(y|ies) (?:'[^']*' )?of (null|undefined)/i,
+    hint: "A lookup returned nothing: getNodeByIdAsync with an id not in this file (stale, deleted, or from an earlier session), findOne with no match, or selection[0] with nothing selected. Check the result before using it, and read ids again from the current file.",
+  },
+];
+
+// Lines the Function constructor adds above the script body; undefined until
+// measured, null when this engine's stacks carry no script line.
+let executeCodeLineOffset;
+
+function scriptLineFromStack(error) {
+  const match = /<(?:input|anonymous)>:(\d+):\d+/.exec(String(error && error.stack));
+  return match ? Number(match[1]) : null;
+}
+
+async function measureExecuteCodeLineOffset(AsyncFunction) {
+  if (executeCodeLineOffset !== undefined) return executeCodeLineOffset;
+  try {
+    await new AsyncFunction("figma", "params", "throw new Error('line offset probe');")();
+  } catch (probe) {
+    const line = scriptLineFromStack(probe);
+    executeCodeLineOffset = line === null ? null : line - 1;
+  }
+  return executeCodeLineOffset;
+}
+
+// The bare message ("cannot read property 'Symbol.iterator' of undefined")
+// gives the caller nothing to find in its script, so add the line and a hint.
+async function describeExecuteCodeError(error, AsyncFunction) {
+  const message = error instanceof Error ? error.message : String(error);
+  const parts = [message];
+
+  const line = scriptLineFromStack(error);
+  const offset = line === null ? null : await measureExecuteCodeLineOffset(AsyncFunction);
+  if (offset !== null && line - offset >= 1) {
+    parts.push(`(line ${line - offset} of the script)`);
+  }
+
+  const known = EXECUTE_CODE_HINTS.find((h) => h.pattern.test(message));
+  if (known) parts.push(`Hint: ${known.hint}`);
+
+  return parts.join(" ");
+}
+
 // Execute arbitrary JavaScript code inside the plugin sandbox
 async function executeCode(params) {
   const { code } = params || {};
@@ -11783,8 +12020,13 @@ async function executeCode(params) {
     throw new Error("Missing code parameter (must be a JavaScript string)");
   }
 
+  const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
   try {
-    const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+    // With documentAccess "dynamic-page" only the pages Figma has opened are
+    // readable, so a script walking figma.root fails on every other page.
+    // Measured live: ~350ms the first time on a 10-page file, ~1ms after.
+    await figma.loadAllPagesAsync();
+
     const runner = new AsyncFunction("figma", "params", code);
     const rawResult = await runner(figma, params.params || params);
 
@@ -11793,7 +12035,7 @@ async function executeCode(params) {
       result: safeSerializePluginValue(rawResult),
     };
   } catch (error) {
-    throw new Error(`execute_code failed: ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(`execute_code failed: ${await describeExecuteCodeError(error, AsyncFunction)}`);
   }
 }
 

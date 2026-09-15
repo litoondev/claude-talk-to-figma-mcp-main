@@ -430,6 +430,60 @@ Clean up messy layer trees (empty frames, useless groups, `Frame > Frame > Card`
 
 ---
 
+## 🌐 Convert an HTML file or website to Figma
+
+Turn a web page into a Figma design that **looks exactly like the page**: every section, text, image and icon. It's linked to your file's own styles and variables, with a clean, flat layer tree.
+
+### How to use it
+
+1. In Figma, open the file whose design system (colour variables, text styles, spacing tokens) you want the import to use.
+2. Take a **full-page screenshot** of the website or HTML page and send it to Claude. It's the reference Claude compares the result against at the end.
+3. Tell Claude one of these:
+   ```
+   Convert https://example.com to Figma
+   ```
+   ```
+   Convert /Users/YOUR_NAME/Desktop/page.html to Figma
+   ```
+   > 💡 A local file needs its **full path**, and must be on the same computer as Claude Desktop. To get the path on a Mac: select the file in Finder, hold `Option`, right-click → **Copy "page.html" as Pathname**.
+4. Claude works through these steps and tells you what it is doing:
+
+   | Step | What happens |
+   |---|---|
+   | **1. Analyse** | Reads the page and its CSS: sections, text, colours, fonts, spacing, radii, **every image and icon**, and whether each block is a grid or a row/column |
+   | **2. Match** | Compares every value with your design system: **use from the system** / **close but not exact** / **not in the system** |
+   | **3. Build** | Binds your variables and text styles where they match **exactly**; builds everything else with the page's own values. Places every image and icon. Uses **Grid** or **Auto Layout** per container (table below) |
+   | **4. Components** | An element that appears **2 or more times** with no exact component in your file becomes a **new component** in a frame named **Components — from HTML** beside the page, and the page uses instances of it. Elements that appear once stay plain layers |
+   | **5. Import Notes** | A frame beside the design listing what was not in your design system, the new components, and anything that could not be made identical |
+   | **6. Compare** | Exports the result and compares it with your screenshot, fixing differences until nothing differs; then runs the layer scan, asking before removing anything |
+
+### The rules it follows
+
+- **Identical.** Nothing is left out, nothing is added, nothing is restyled or simplified. If something truly can't be reproduced, Claude says so in Import Notes instead of approximating it.
+- **Linked to your style guide.** A colour, text style, spacing or radius that exists in your design system is bound to it, never typed. A "close" style or component is not used, because it would change the design.
+- **No new variables or styles.** The only things created are components for repeated elements.
+
+### Grid or Auto Layout?
+
+| The page uses | Built in Figma as |
+|---|---|
+| `display: grid` with equal columns | **Grid** with the same number of columns |
+| A heading above a row of equal cards | **One Grid**: heading spans all columns, cards directly inside, no row wrapper |
+| A row of equal items that wraps | **Grid** |
+| A single row (menu, buttons, logos) | **Auto Layout — horizontal** |
+| Stacked blocks / a column | **Auto Layout — vertical** |
+| A button or banner pinned to the screen (`position: fixed`) | Built at the same position, on top of the page |
+| A `div` that only wraps one element | **No frame**, as long as removing it changes nothing visually |
+
+### Good to know
+
+- **Images** are downloaded by the plugin's server (`place_html_image`) and placed at their exact size, from websites or from files next to a local `.html` page. **Icons** (inline SVG) are placed as vectors, including icons that come from an icon sprite. An image that can't be fetched keeps its exact-size frame, named `Image-Missing-…`, so the layout doesn't shift.
+- **It reads the page's HTML and CSS, not a live browser.** Pages that build their content with JavaScript after loading may come in incomplete. For those, open the page in Chrome → **File → Save Page As… → Webpage, Complete**, and convert the saved `.html` file.
+- **Pages behind a login** can't be read. Save them as above.
+- **Fonts** must be installed on your computer for Figma to use them.
+
+---
+
 ## 🔄 Update to the newest version
 
 When this repository gets new features, update like this (about 3 minutes):
@@ -749,6 +803,62 @@ cd ~/Documents/claude-talk-to-figma-mcp-main && npm run socket
 - শুধু তখনই প্রস্তাব করে যখন Grid হুবহু একই রকম দেখাতে পারবে: একটা হেডিং, সমান চওড়ার কার্ডের একটা সারি, সারিতে প্যাডিং বা ব্যাকগ্রাউন্ড নেই।
 
 > ⚠️ **Grid রূপান্তর না হলে নিজে ungroup করে "ঠিক" করতে যাবেন না।** Auto Layout সারি ungroup করলে কার্ডগুলো একটার নিচে আরেকটা চলে যায়। হাতে আবার সাজালে ফ্রেমটা **fixed পজিশনের, লেআউটহীন** হয়ে যায়: দেখতে ঠিক, কিন্তু আর রেসপন্সিভ থাকে না। বরং Claude যে কারণ জানিয়েছে সেটা দেখুন।
+
+---
+
+<a id="bangla-html"></a>
+
+## 🌐 HTML ফাইল বা ওয়েবসাইট থেকে Figma ডিজাইন
+
+একটা ওয়েব পেজকে Figma ডিজাইনে রূপান্তর করে, **দেখতে হুবহু পেজের মতো**: প্রতিটি সেকশন, লেখা, ছবি আর আইকন সহ। ডিজাইনটা **আপনার ফাইলের নিজস্ব স্টাইল ও ভেরিয়েবলের সাথে যুক্ত** থাকে, আর লেয়ার থাকে পরিষ্কার ও কম নেস্টেড।
+
+### কীভাবে ব্যবহার করবেন
+
+1. Figma-তে সেই ফাইলটি খুলুন যার ডিজাইন সিস্টেম (কালার ভেরিয়েবল, টেক্সট স্টাইল, স্পেসিং টোকেন) ব্যবহার করতে চান।
+2. ওয়েবসাইট বা HTML পেজের **পুরো পেজের একটা স্ক্রিনশট** নিয়ে Claude-কে দিন। শেষে Claude এটার সাথেই ফলাফল মিলিয়ে দেখবে।
+3. Claude-কে লিখুন:
+   ```
+   Convert https://example.com to Figma
+   ```
+   ```
+   Convert /Users/YOUR_NAME/Desktop/page.html to Figma
+   ```
+   > 💡 কম্পিউটারের ফাইল হলে **পুরো path** দিতে হবে, আর ফাইলটা Claude Desktop যে কম্পিউটারে চলছে সেখানেই থাকতে হবে। Mac-এ path পেতে: Finder-এ ফাইল সিলেক্ট করুন → `Option` চেপে ধরে রাইট-ক্লিক → **Copy "page.html" as Pathname**।
+4. Claude এই ধাপগুলোতে কাজ করবে আর জানাবে কী করছে:
+
+   | ধাপ | কী হয় |
+   |---|---|
+   | **১. বিশ্লেষণ** | পেজ আর তার CSS পড়ে: সেকশন, লেখা, কালার, ফন্ট, স্পেসিং, radius, **প্রতিটি ছবি ও আইকন**, আর কোন অংশ গ্রিড বা সারি/কলাম |
+   | **২. মিলিয়ে দেখা** | প্রতিটি ভ্যালু আপনার ডিজাইন সিস্টেমের সাথে মেলায়: **সিস্টেম থেকে ব্যবহার** / **কাছাকাছি কিন্তু হুবহু না** / **সিস্টেমে নেই** |
+   | **৩. তৈরি** | যেখানে **হুবহু** মেলে সেখানে আপনার ভেরিয়েবল ও টেক্সট স্টাইল বসায়; বাকিগুলো পেজের নিজের ভ্যালু দিয়ে তৈরি করে। প্রতিটি ছবি ও আইকন বসায়। প্রতিটি অংশে **Grid** বা **Auto Layout** বেছে নেয় (নিচের টেবিল) |
+   | **৪. কম্পোনেন্ট** | যে জিনিস **২ বা তার বেশি বার** আসে আর আপনার ফাইলে যার হুবহু কম্পোনেন্ট নেই, সেটা পেজের পাশে **Components — from HTML** নামের ফ্রেমে **নতুন কম্পোনেন্ট** হিসেবে তৈরি হয়, আর পেজে তার instance বসে। একবার আসা জিনিস সাধারণ লেয়ার হিসেবেই থাকে |
+   | **৫. Import Notes** | ডিজাইনের পাশে একটা ফ্রেম, যেখানে লেখা থাকে কী আপনার ডিজাইন সিস্টেমে ছিল না, কোন নতুন কম্পোনেন্ট তৈরি হয়েছে, আর কোনো কিছু হুবহু করা না গেলে সেটা |
+   | **৬. মিলিয়ে দেখা** | ফলাফল এক্সপোর্ট করে আপনার স্ক্রিনশটের সাথে মেলায়, পার্থক্য না থাকা পর্যন্ত ঠিক করে; তারপর লেয়ার স্ক্যান চালায়, কিছু মোছার আগে জিজ্ঞেস করে |
+
+### যে নিয়ম মেনে চলে
+
+- **হুবহু।** কিছু বাদ যায় না, কিছু যোগ হয় না, কোনো স্টাইল বদলানো বা সরল করা হয় না। কোনো কিছু সত্যিই তৈরি করা না গেলে Claude আন্দাজে কাছাকাছি বানায় না, Import Notes-এ জানিয়ে দেয়।
+- **আপনার স্টাইল গাইডের সাথে যুক্ত।** যে কালার, টেক্সট স্টাইল, স্পেসিং বা radius আপনার ডিজাইন সিস্টেমে আছে, সেটা ভ্যালু টাইপ করে নয়, টোকেনের সাথে যুক্ত করে বসানো হয়। "কাছাকাছি" স্টাইল বা কম্পোনেন্ট ব্যবহার করা হয় না, কারণ তাতে ডিজাইন বদলে যায়।
+- **নতুন ভেরিয়েবল বা স্টাইল তৈরি হয় না।** নতুন তৈরি হয় শুধু বারবার আসা জিনিসের কম্পোনেন্ট।
+
+### Grid নাকি Auto Layout?
+
+| পেজে যা আছে | Figma-তে যেভাবে তৈরি হবে |
+|---|---|
+| সমান কলামের `display: grid` | একই সংখ্যক কলামের **Grid** |
+| হেডিং, নিচে সমান কার্ডের সারি | **একটাই Grid**: হেডিং সব কলাম জুড়ে, কার্ড সরাসরি ভেতরে, আলাদা row wrapper নেই |
+| সমান আইটেমের সারি যা নিচে নেমে যায় (wrap) | **Grid** |
+| এক সারির জিনিস (মেনু, বাটন, লোগো) | **Auto Layout — horizontal** |
+| একটার নিচে আরেকটা ব্লক | **Auto Layout — vertical** |
+| স্ক্রিনে আটকে থাকা বাটন বা ব্যানার (`position: fixed`) | একই জায়গায়, পেজের উপরে তৈরি হয় |
+| শুধু একটা এলিমেন্টকে ঘিরে থাকা `div` | **কোনো ফ্রেম তৈরি হয় না**, যদি সরালে দেখতে কিছুই না বদলায় |
+
+### জেনে রাখুন
+
+- **ছবি** প্লাগইনের সার্ভার নিজেই ডাউনলোড করে (`place_html_image`) আর হুবহু মাপে বসায়, ওয়েবসাইট থেকে হোক বা লোকাল `.html` পেজের পাশের ফাইল থেকে। **আইকন** (inline SVG) ভেক্টর হিসেবে বসে, আইকন স্প্রাইট থেকে আসা আইকনও। কোনো ছবি আনা না গেলে তার হুবহু মাপের ফ্রেম `Image-Missing-…` নামে থেকে যায়, তাই লেআউট সরে যায় না।
+- **এটা পেজের HTML ও CSS পড়ে, ব্রাউজারে চালিয়ে দেখে না।** যে পেজ লোড হওয়ার পর JavaScript দিয়ে কনটেন্ট বানায়, সেটা অসম্পূর্ণ আসতে পারে। তখন Chrome-এ পেজ খুলে **File → Save Page As… → Webpage, Complete** দিয়ে সেভ করুন, তারপর সেই `.html` ফাইল দিন।
+- **লগইন লাগে এমন পেজ** পড়া যায় না। উপরের মতো সেভ করে দিন।
+- **ফন্ট** আপনার কম্পিউটারে ইনস্টল থাকতে হবে, তবেই Figma ব্যবহার করতে পারবে।
 
 ---
 
@@ -1483,6 +1593,11 @@ If you want to know about all project contributions, you can visit the ["Contrib
 ## 📊 Project status
 
 ✅ **Stable production** - Tool ready for daily use in design and development teams
+
+🆕 **New — HTML / URL → Figma:**
+- Converts a web page or `.html` file into a Figma design that looks identical, images and icons included
+- Binds your own variables and text styles; repeated elements without a component become new components beside the page
+- Chooses Figma Grid or Auto Layout per container, and lists anything not in your design system in Import Notes
 
 🆕 **New — layer optimization:**
 - Scan → ask → apply: hidden and risky layers are removed only with your confirmation

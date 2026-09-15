@@ -41,7 +41,18 @@ export const SERVER_INSTRUCTIONS = `
 - Grid proposals: when the scan lists a section under "Grid proposals" (heading + one row of equal items buried in wrappers), ask by name whether to convert it to a Grid with the items directly inside. Pass only the approved section IDs in confirmedGridIds. The plugin undoes any conversion that would move something and reports why. Report that too; do not rebuild the section by hand with other tools.
 - If a Grid conversion is not applied, report the reason and stop. NEVER imitate it with ungroup_nodes, move_node, or set_auto_layout layoutMode NONE. Ungrouping an Auto Layout row stacks its items in the parent, and pinning them with x/y leaves a frame that looks right but has no layout and no longer adapts.
 
-## 4. Design System and Scope Rules
+## 4. HTML / URL → Figma Import (MANDATORY)
+- When the user shares an HTML file, a web page URL or website code and asks to convert, import or rebuild it in Figma, load the Html_Import_v1 skill with figma_skill and follow it in order:
+  1. analyze_html (sections, copy, colours, typography, spacing, images and icons, Grid/Auto Layout recommendations); ask for a screenshot of the source if there is none
+  2. get_design_system, then match_design_tokens with the token lists analyze_html prints
+  3. Build: bind matched variables and text styles; build values that are not in the system with the HTML's own values; use set_grid_layout where the analysis says Figma Grid and set_auto_layout otherwise; never mirror the DOM's wrapper divs unless removing one would change the render; place every image and icon — images with place_html_image (the server fetches the bytes; pass pageSource for a local .html), inline SVG icons with set_svg using the markup from analyze_html's svgMarkupFor
+  4. Create an "Import Notes" frame with the IMPORT NOTES text from match_design_tokens, then report it to the user
+  5. clean_layers dryRun → ask → apply, then export the page and compare it with the source until nothing differs
+- The result must look identical to the page: nothing left out, nothing restyled, no near-match token swapped in. Report every remaining difference; never call it identical without a comparison.
+- An element with no exact design-system component that appears 2+ times becomes a new component in a "Components — from HTML" frame beside the page, with instances in the page. A one-off element stays plain layers.
+- Never create new variables or styles for values that are missing from the design system unless the user asks.
+
+## 5. Design System and Scope Rules
 - Prefer local components and design library styles/variables over ad-hoc primitives.
 - Confine modifications strictly to the user's requested scope (e.g., selected node, active section).
 `;

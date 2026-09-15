@@ -7,7 +7,7 @@ const RESOLVED_TYPE = z.enum(["COLOR", "FLOAT", "STRING", "BOOLEAN"]);
 
 const FIELD_HELP =
   "Node property to bind. Numbers: itemSpacing, counterAxisSpacing, paddingTop/Right/Bottom/Left, " +
-  "width, height, minWidth, maxWidth, minHeight, maxHeight, opacity, strokeWeight, cornerRadius " +
+  "gridRowGap, gridColumnGap (Grid frames), width, height, minWidth, maxWidth, minHeight, maxHeight, opacity, strokeWeight, cornerRadius " +
   "(and per-corner), fontSize, lineHeight, letterSpacing, paragraphSpacing, fontWeight. " +
   "Strings: fontFamily, fontStyle, characters. Colours use the paint form: 'fills/0/color', " +
   "'strokes/0/color', 'effects/0/color'.";

@@ -159,4 +159,5 @@ export type FigmaCommand =
   | "analyze_responsive"
   | "make_responsive"
   | "clean_layers"
-  | "validate_responsive";
+  | "validate_responsive"
+  | "set_grid_layout";

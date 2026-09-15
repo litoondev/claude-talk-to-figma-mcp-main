@@ -393,6 +393,88 @@ export function registerModificationTools(server: McpServer): void {
     }
   );
 
+
+  // Grid Layout Tool — a real Figma Grid instead of nested Auto Layout rows
+  const GridTrackSchema = z.object({
+    type: z.enum(["FLEX", "FIXED", "HUG"]).describe("FLEX = equal share (fr), FIXED = px, HUG = fit content"),
+    value: z.coerce.number().positive().optional().describe("px for FIXED, fr weight for FLEX"),
+  });
+
+  server.tool(
+    "set_grid_layout",
+    "Turn a frame into a Figma Grid layout, using the children already inside it in reading order. " +
+      "Use it when the design is a grid: CSS display:grid, a heading above equal cards (give the heading a span " +
+      "across every column so no row wrapper is needed), or equal items that wrap. Each child goes into the cell " +
+      "row auto-flow gives it and is spanned before the next child arrives, because Figma refuses a span over a " +
+      "neighbour that is already placed. If Figma refuses any step, the frame is restored. Rows hug their content; " +
+      "columns are equal FLEX tracks unless the frame's width hugs (then HUG). Bind the gaps to tokens afterwards " +
+      "with apply_variable_bindings (fields gridRowGap, gridColumnGap). Never imitate a grid with ungroup_nodes, " +
+      "move_node or set_auto_layout NONE.",
+    {
+      nodeId: z.string().describe("Frame to turn into a grid. Its children must already be inside it, in reading order."),
+      columns: z.coerce.number().int().min(1).max(24).describe("Number of columns"),
+      rowGap: z.coerce.number().min(0).optional().describe("Gap between rows in px"),
+      columnGap: z.coerce.number().min(0).optional().describe("Gap between columns in px"),
+      columnSizes: coerceJson(z.array(GridTrackSchema)).optional()
+        .describe("One track per column. Default: equal FLEX columns (HUG when the frame's width hugs)."),
+      rowSizes: coerceJson(z.array(GridTrackSchema)).optional().describe("One track per row. Default: HUG."),
+      spans: coerceJson(
+        z.array(
+          z.object({
+            nodeId: z.string().describe("A child of the frame"),
+            columnSpan: z.coerce.number().int().min(1).describe("Columns it spans, e.g. all of them for a section heading"),
+          })
+        )
+      ).optional().describe("Children that span more than one column"),
+    },
+    async ({ nodeId, columns, rowGap, columnGap, columnSizes, rowSizes, spans }) => {
+      try {
+        const r = (await sendCommandToFigma("set_grid_layout", {
+          nodeId,
+          columns,
+          rowGap,
+          columnGap,
+          columnSizes,
+          rowSizes,
+          spans,
+        })) as {
+          name: string;
+          columns: number;
+          rows: number;
+          rowGap: number;
+          columnGap: number;
+          positioning: string;
+          placement: Array<{ id: string; row: number; column: number; columnSpan: number }>;
+        };
+        const spanned = r.placement
+          .filter((p) => p.columnSpan > 1)
+          .map((p) => `${p.id} spans ${p.columnSpan} columns`)
+          .join(", ");
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `Grid on "${r.name}": ${r.columns} columns × ${r.rows} rows, row gap ${r.rowGap}, column gap ${r.columnGap} ` +
+                `(${r.positioning === "ROW_AUTO_FLOW" ? "auto-flow" : "manual placement"}).` +
+                (spanned ? ` ${spanned}.` : "") +
+                " If the gaps come from tokens, bind them with apply_variable_bindings (gridRowGap, gridColumnGap).",
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error setting grid layout: ${error instanceof Error ? error.message : String(error)}`,
+            },
+          ],
+        };
+      }
+    }
+  );
+
   // Layout Sizing Tool — Fill container / Hug contents without touching pixels
   server.tool(
     "set_layout_sizing",

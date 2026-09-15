@@ -88,6 +88,11 @@ export const CORE_TOOLS: readonly string[] = [
   "apply_variable_bindings",
   "get_node_variable_bindings",
   "import_library_variable",
+  // HTML / URL import
+  "analyze_html",
+  "match_design_tokens",
+  "place_html_image",
+  "set_grid_layout",
   // responsive
   "analyze_responsive",
   "make_responsive",

@@ -14,6 +14,7 @@ import { registerConnectionTools } from "./connection-tools";
 import { registerSectionScopeTools } from "./section-scope-tools";
 import { registerActivityTools } from "./activity-tools";
 import { registerDesignSystemTools } from "./design-system-tools";
+import { registerHtmlImportTools } from "./html-import-tools";
 import { registerResponsiveTools } from "./responsive-tools";
 import { registerBatchTools } from "./batch-tools";
 import { registerUsageTools } from "./usage-tools";
@@ -98,6 +99,8 @@ export function registerTools(server: McpServer): void {
     // Registered early because the "reuse before creating" rule requires it to be
     // called before any creation tool.
     registerDesignSystemTools(server);
+    // HTML / URL → Figma import — see tools/html-import-tools.ts
+    registerHtmlImportTools(server);
     // Responsive website generation — see tools/responsive-tools.ts
     registerResponsiveTools(server);
 
@@ -155,6 +158,7 @@ export {
   registerSectionScopeTools,
   registerActivityTools,
   registerDesignSystemTools,
+  registerHtmlImportTools,
   registerResponsiveTools,
   registerBatchTools,
   registerUsageTools,
