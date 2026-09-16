@@ -41,7 +41,16 @@ export interface MockFigmaOptions {
   collections?: MockCollection[];
   variables?: MockVariable[];
   nodes?: any[];
+  /**
+   * Compute geometry the way Figma does — Auto Layout and Grid positions, Hug
+   * sizes, group bounds — and refuse what Figma refuses. Off by default so older
+   * fixtures that declare their own geometry keep working unchanged.
+   */
+  layoutEngine?: boolean;
 }
+
+/** Set by loadPlugin; read when a node is created. */
+const engine = { enabled: false, page: null as any };
 
 /**
  * Build a scene node close enough to Figma's to exercise sizing and binding.
@@ -68,7 +77,8 @@ export function makeNode(spec: any = {}): any {
     layoutPositioning: spec.layoutPositioning ?? "AUTO",
     layoutWrap: spec.layoutWrap ?? "NO_WRAP",
     primaryAxisSizingMode: spec.primaryAxisSizingMode ?? "AUTO",
-    counterAxisSizingMode: spec.counterAxisSizingMode ?? "AUTO",
+    // A new Figma frame hugs its primary axis and fixes its counter axis.
+    counterAxisSizingMode: spec.counterAxisSizingMode ?? (engine.enabled ? "FIXED" : "AUTO"),
     itemSpacing: spec.itemSpacing ?? 0,
     paddingTop: spec.paddingTop ?? 0,
     paddingRight: spec.paddingRight ?? 0,
@@ -97,6 +107,14 @@ export function makeNode(spec: any = {}): any {
     resize(w: number, h: number) {
       this.width = w;
       this.height = h;
+      if (engine.enabled) {
+        // Figma: resizing an Auto Layout frame or a Fill child fixes both axes.
+        this.primaryAxisSizingMode = "FIXED";
+        this.counterAxisSizingMode = "FIXED";
+        this._verticalSizing = "FIXED";
+        this._horizontalSizing = "FIXED";
+        return;
+      }
       // Matches Figma: a literal resize pins the axis it touches.
       if (this.layoutMode === "VERTICAL") this.primaryAxisSizingMode = "FIXED";
       else if (this.layoutMode === "HORIZONTAL") this.counterAxisSizingMode = "FIXED";
@@ -115,6 +133,7 @@ export function makeNode(spec: any = {}): any {
       };
     },
     appendChild(child: any) {
+      const oldParent = child.parent;
       if (child.parent?.children) {
         const oldIndex = child.parent.children.indexOf(child);
         if (oldIndex >= 0) child.parent.children.splice(oldIndex, 1);
@@ -122,8 +141,10 @@ export function makeNode(spec: any = {}): any {
       this.children.push(child);
       child.parent = this;
       child._gridCell = undefined;
+      removeEmptiedGroup(oldParent, this);
     },
     insertChild(index: number, child: any) {
+      const oldParent = child.parent;
       if (child.parent?.children) {
         const oldIndex = child.parent.children.indexOf(child);
         if (oldIndex >= 0) {
@@ -134,6 +155,7 @@ export function makeNode(spec: any = {}): any {
       this.children.splice(index, 0, child);
       child.parent = this;
       child._gridCell = undefined;
+      removeEmptiedGroup(oldParent, this);
     },
     appendChildAt(child: any, row: number, column: number) {
       if (this.layoutMode !== "GRID") throw new Error("appendChildAt needs a GRID frame");
@@ -151,14 +173,16 @@ export function makeNode(spec: any = {}): any {
       child._gridCell = { row, column };
     },
     remove() {
+      const oldParent = this.parent;
       if (this.parent?.children) {
         const index = this.parent.children.indexOf(this);
         if (index >= 0) this.parent.children.splice(index, 1);
       }
       this.parent = null;
       this.removed = true;
+      removeEmptiedGroup(oldParent, null);
     },
-    clone() {
+    clone(nested = false) {
       const subtree: any[] = [];
       const collect = (current: any) => {
         subtree.push(current);
@@ -199,12 +223,22 @@ export function makeNode(spec: any = {}): any {
         textAutoResize: this.textAutoResize,
         textStyleId: this.textStyleId,
         fontSize: this.fontSize,
-          children: (this.children ?? []).map((child: any) => child.clone()),
+          children: (this.children ?? []).map((child: any) => child.clone(true)),
         });
       } finally {
         for (const current of subtree) current.parent = originalParents.get(current);
       }
 
+      if (engine.enabled) {
+        Object.assign(copy, {
+          primaryAxisAlignItems: this.primaryAxisAlignItems,
+          counterAxisAlignItems: this.counterAxisAlignItems,
+          clipsContent: this.clipsContent,
+        });
+        // Figma parents a duplicate to the current page, not beside the original.
+        if (!nested) placeOnPage(copy);
+        return copy;
+      }
       const originalParent = originalParents.get(this);
       if (originalParent?.insertChild) {
         originalParent.insertChild(originalParent.children.indexOf(this) + 1, copy);
@@ -220,6 +254,7 @@ export function makeNode(spec: any = {}): any {
     delete node.children;
   }
 
+  if (spec.rotation !== undefined) node.rotation = spec.rotation;
   if (spec.minHeight !== undefined) node.minHeight = spec.minHeight;
   if (spec.maxHeight !== undefined) node.maxHeight = spec.maxHeight;
   if (spec.maxWidth !== undefined) node.maxWidth = spec.maxWidth;
@@ -332,6 +367,349 @@ export function makeNode(spec: any = {}): any {
     node.children.push(child);
   }
 
+  if (engine.enabled && !spec.absoluteBoundingBox) installLayoutEngine(node, spec);
+
+  return node;
+}
+
+// ─── Layout engine ──────────────────────────────────────────────────────────
+//
+// Just enough of Figma's layout to measure whether a restructure moved anything:
+// horizontal/vertical Auto Layout (padding, gap, MIN/CENTER/MAX, space between,
+// Hug/Fixed/cross-axis Fill), Grid (FIXED/FLEX/HUG tracks, spans, cell
+// alignment), absolute children, and groups, whose children sit in the group's
+// parent coordinate space. Every read is computed from the current tree.
+
+const isLayoutFrame = (node: any) =>
+  !!node && Array.isArray(node.children) && !!node.layoutMode && node.layoutMode !== "NONE";
+const inFlow = (node: any) => node.visible !== false && node.layoutPositioning !== "ABSOLUTE";
+const isPageLike = (node: any) => !node || !node.type || node.type === "PAGE";
+
+function sizingOf(node: any, axis: "h" | "v"): string {
+  const explicit = axis === "h" ? node._horizontalSizing : node._verticalSizing;
+  if (explicit) return explicit;
+  if (node.layoutMode === "HORIZONTAL" || node.layoutMode === "VERTICAL") {
+    const primary = (node.layoutMode === "HORIZONTAL") === (axis === "h");
+    return (primary ? node.primaryAxisSizingMode : node.counterAxisSizingMode) === "AUTO" ? "HUG" : "FIXED";
+  }
+  return "FIXED";
+}
+
+type Rect = { x: number; y: number; width: number; height: number };
+
+function groupLocalUnion(group: any): Rect {
+  const rects = group.children
+    .filter((child: any) => child.visible !== false)
+    .map((child: any) =>
+      child.type === "GROUP" ? groupLocalUnion(child) : { x: child.x, y: child.y, ...intrinsicSize(child) }
+    );
+  if (rects.length === 0) return { x: group.x, y: group.y, width: 0, height: 0 };
+  const x = Math.min(...rects.map((r: Rect) => r.x));
+  const y = Math.min(...rects.map((r: Rect) => r.y));
+  const right = Math.max(...rects.map((r: Rect) => r.x + r.width));
+  const bottom = Math.max(...rects.map((r: Rect) => r.y + r.height));
+  return { x, y, width: right - x, height: bottom - y };
+}
+
+function intrinsicSize(node: any): { width: number; height: number } {
+  if (node.type === "GROUP") {
+    const union = groupLocalUnion(node);
+    return { width: union.width, height: union.height };
+  }
+  if (isLayoutFrame(node)) {
+    const measured = measureLayout(node, null);
+    return { width: measured.width, height: measured.height };
+  }
+  return { width: node.width, height: node.height };
+}
+
+function measureLayout(frame: any, outer: { width: number; height: number } | null) {
+  return frame.layoutMode === "GRID" ? measureGrid(frame, outer) : measureStack(frame, outer);
+}
+
+function measureStack(frame: any, outer: { width: number; height: number } | null) {
+  const vertical = frame.layoutMode === "VERTICAL";
+  const kids = frame.children.filter(inFlow);
+  const sizes = kids.map(intrinsicSize);
+  const mainOf = (s: any) => (vertical ? s.height : s.width);
+  const crossOf = (s: any) => (vertical ? s.width : s.height);
+  const [padMainStart, padMainEnd, padCrossStart, padCrossEnd] = vertical
+    ? [frame.paddingTop, frame.paddingBottom, frame.paddingLeft, frame.paddingRight]
+    : [frame.paddingLeft, frame.paddingRight, frame.paddingTop, frame.paddingBottom];
+  const mainAxis = vertical ? "v" : "h";
+  const crossAxis = vertical ? "h" : "v";
+  for (const kid of kids) {
+    if (sizingOf(kid, mainAxis) === "FILL") throw new Error("layout engine: main-axis Fill is not modelled");
+  }
+  const hugMain = sizingOf(frame, mainAxis) === "HUG";
+  const hugCross = sizingOf(frame, crossAxis) === "HUG";
+  const totalMain = sizes.reduce((sum: number, s: any) => sum + mainOf(s), 0);
+  const fixedMain = vertical ? (outer ? outer.height : frame.height) : (outer ? outer.width : frame.width);
+  const fixedCross = vertical ? (outer ? outer.width : frame.width) : (outer ? outer.height : frame.height);
+  const spaceBetween = frame.primaryAxisAlignItems === "SPACE_BETWEEN" && kids.length > 1;
+  const gap = spaceBetween && !hugMain
+    ? (fixedMain - padMainStart - padMainEnd - totalMain) / (kids.length - 1)
+    : frame.itemSpacing;
+  const mainSize = hugMain
+    ? padMainStart + totalMain + Math.max(0, kids.length - 1) * gap + padMainEnd
+    : fixedMain;
+  const crossContent = kids
+    .filter((kid: any) => sizingOf(kid, crossAxis) !== "FILL")
+    .reduce((max: number, kid: any) => Math.max(max, crossOf(sizes[kids.indexOf(kid)])), 0);
+  const crossSize = hugCross ? padCrossStart + crossContent + padCrossEnd : fixedCross;
+  const innerCross = crossSize - padCrossStart - padCrossEnd;
+
+  const slots = new Map<any, Rect>();
+  let cursor = padMainStart;
+  kids.forEach((kid: any, i: number) => {
+    const main = mainOf(sizes[i]);
+    const fills = sizingOf(kid, crossAxis) === "FILL";
+    const cross = fills ? innerCross : crossOf(sizes[i]);
+    let offset = padCrossStart;
+    if (!fills && frame.counterAxisAlignItems === "CENTER") offset = padCrossStart + (innerCross - cross) / 2;
+    if (!fills && frame.counterAxisAlignItems === "MAX") offset = crossSize - padCrossEnd - cross;
+    slots.set(kid, vertical
+      ? { x: offset, y: cursor, width: cross, height: main }
+      : { x: cursor, y: offset, width: main, height: cross });
+    cursor += main + gap;
+  });
+  return vertical
+    ? { width: crossSize, height: mainSize, slots }
+    : { width: mainSize, height: crossSize, slots };
+}
+
+function alignInTrack(align: string, start: number, track: number, size: number) {
+  if (align === "CENTER") return start + (track - size) / 2;
+  if (align === "MAX") return start + track - size;
+  return start;
+}
+
+function measureGrid(frame: any, outer: { width: number; height: number } | null) {
+  const kids = frame.children.filter(inFlow);
+  const placement = autoFlowPlacement(frame);
+  const sizes = new Map<any, { width: number; height: number }>(kids.map((kid: any) => [kid, intrinsicSize(kid)]));
+  const hugW = sizingOf(frame, "h") === "HUG";
+  const hugH = sizingOf(frame, "v") === "HUG";
+
+  const trackSizes = (tracks: any[], gap: number, available: number | null, measure: (index: number) => number) => {
+    const fixed = tracks.map((track, i) => (track.type === "FIXED" ? track.value : track.type === "HUG" ? measure(i) : 0));
+    const flexTotal = tracks.reduce((sum, track) => sum + (track.type === "FLEX" ? track.value : 0), 0);
+    if (flexTotal === 0) return fixed;
+    if (available === null) throw new Error("layout engine: FLEX tracks need a fixed size");
+    const free = available - gap * (tracks.length - 1) - fixed.reduce((sum, value) => sum + value, 0);
+    return tracks.map((track, i) => (track.type === "FLEX" ? (free * track.value) / flexTotal : fixed[i]));
+  };
+  const cellOf = (kid: any) => {
+    const cell = placement.get(kid);
+    if (!cell || cell.row >= frame.gridRowCount || cell.column >= frame.gridColumnCount) {
+      throw new Error(`layout engine: "${kid.name}" is placed outside the grid`);
+    }
+    return cell;
+  };
+  const widthOuter = hugW ? null : (outer ? outer.width : frame.width) - frame.paddingLeft - frame.paddingRight;
+  const heightOuter = hugH ? null : (outer ? outer.height : frame.height) - frame.paddingTop - frame.paddingBottom;
+  const columns = trackSizes(frame.gridColumnSizes, frame.gridColumnGap, widthOuter, (c) =>
+    Math.max(0, ...kids.filter((kid: any) => cellOf(kid).column === c && (kid.gridColumnSpan ?? 1) === 1).map((kid: any) => sizes.get(kid)!.width))
+  );
+  const rows = trackSizes(frame.gridRowSizes, frame.gridRowGap, heightOuter, (r) =>
+    Math.max(0, ...kids.filter((kid: any) => cellOf(kid).row === r).map((kid: any) => sizes.get(kid)!.height))
+  );
+  const offset = (tracks: number[], gap: number, index: number) =>
+    tracks.slice(0, index).reduce((sum, value) => sum + value, 0) + index * gap;
+
+  const slots = new Map<any, Rect>();
+  for (const kid of kids) {
+    const cell = cellOf(kid);
+    const span = Math.min(kid.gridColumnSpan ?? 1, columns.length - cell.column);
+    const trackX = frame.paddingLeft + offset(columns, frame.gridColumnGap, cell.column);
+    const trackW = columns.slice(cell.column, cell.column + span).reduce((sum, value) => sum + value, 0) + (span - 1) * frame.gridColumnGap;
+    const trackY = frame.paddingTop + offset(rows, frame.gridRowGap, cell.row);
+    const trackH = rows[cell.row];
+    const size = sizes.get(kid)!;
+    const width = sizingOf(kid, "h") === "FILL" ? trackW : size.width;
+    const height = sizingOf(kid, "v") === "FILL" ? trackH : size.height;
+    slots.set(kid, {
+      x: alignInTrack(kid.gridChildHorizontalAlign, trackX, trackW, width),
+      y: alignInTrack(kid.gridChildVerticalAlign, trackY, trackH, height),
+      width,
+      height,
+    });
+  }
+  const width = hugW
+    ? frame.paddingLeft + offset(columns, frame.gridColumnGap, columns.length) - frame.gridColumnGap + frame.paddingRight
+    : outer ? outer.width : frame.width;
+  const height = hugH
+    ? frame.paddingTop + offset(rows, frame.gridRowGap, rows.length) - frame.gridRowGap + frame.paddingBottom
+    : outer ? outer.height : frame.height;
+  return { width, height, slots };
+}
+
+function outerSize(node: any): { width: number; height: number } {
+  if (isLayoutFrame(node.parent) && inFlow(node)) {
+    const slot = slotOf(node);
+    return { width: slot.width, height: slot.height };
+  }
+  return intrinsicSize(node);
+}
+
+function slotOf(node: any): Rect {
+  const slot = measureLayout(node.parent, outerSize(node.parent)).slots.get(node);
+  if (!slot) throw new Error(`layout engine: no slot for "${node.name}"`);
+  return slot;
+}
+
+function engineBox(node: any): Rect {
+  const parent = node.parent;
+  if (isPageLike(parent)) {
+    if (node.type === "GROUP") return groupLocalUnion(node);
+    return { x: node.x, y: node.y, ...outerSize(node) };
+  }
+  if (isLayoutFrame(parent) && inFlow(node)) {
+    const parentBox = engineBox(parent);
+    const slot = slotOf(node);
+    return { x: parentBox.x + slot.x, y: parentBox.y + slot.y, width: slot.width, height: slot.height };
+  }
+  let originX: number;
+  let originY: number;
+  if (parent.type === "GROUP") {
+    const groupBox = engineBox(parent);
+    const union = groupLocalUnion(parent);
+    originX = groupBox.x - union.x;
+    originY = groupBox.y - union.y;
+  } else {
+    const parentBox = engineBox(parent);
+    originX = parentBox.x;
+    originY = parentBox.y;
+  }
+  if (node.type === "GROUP") {
+    const union = groupLocalUnion(node);
+    return { x: originX + union.x, y: originY + union.y, width: union.width, height: union.height };
+  }
+  return { x: originX + node.x, y: originY + node.y, ...intrinsicSize(node) };
+}
+
+function installLayoutEngine(node: any, spec: any) {
+  Object.defineProperty(node, "absoluteBoundingBox", {
+    enumerable: false,
+    configurable: true,
+    get: () => (node.removed ? null : engineBox(node)),
+  });
+  Object.defineProperty(node, "absoluteRenderBounds", {
+    enumerable: false,
+    configurable: true,
+    get: () => {
+      if (node.removed) return null;
+      const box = engineBox(node);
+      const outset = spec.renderOutset ?? 0;
+      return { x: box.x - outset, y: box.y - outset, width: box.width + 2 * outset, height: box.height + 2 * outset };
+    },
+  });
+  Object.defineProperty(node, "absoluteTransform", {
+    enumerable: false,
+    configurable: true,
+    get: () => {
+      const box = engineBox(node);
+      return [[1, 0, box.x], [0, 1, box.y]];
+    },
+  });
+  Object.defineProperty(node, "relativeTransform", {
+    enumerable: false,
+    configurable: true,
+    get: () => [[1, 0, node.x], [0, 1, node.y]],
+    set: (value: number[][]) => {
+      node.x = value[0][2];
+      node.y = value[1][2];
+    },
+  });
+
+  // Figma refuses these outside Auto Layout; so does the engine.
+  let positioning = spec.layoutPositioning ?? "AUTO";
+  Object.defineProperty(node, "layoutPositioning", {
+    enumerable: true,
+    configurable: true,
+    get: () => positioning,
+    set: (value: string) => {
+      if (value === "ABSOLUTE" && !isLayoutFrame(node.parent)) {
+        throw new Error("in set_layoutPositioning: node must be a child of an auto-layout frame");
+      }
+      positioning = value;
+    },
+  });
+  const guardSizing = (axis: "h" | "v") => ({
+    enumerable: false,
+    configurable: true,
+    get: () => {
+      if (!isLayoutFrame(node) && !isLayoutFrame(node.parent)) {
+        throw new Error(`layoutSizing${axis === "h" ? "Horizontal" : "Vertical"} unavailable`);
+      }
+      return sizingOf(node, axis);
+    },
+    set: (value: string) => {
+      if (value === "FILL" && !isLayoutFrame(node.parent)) {
+        throw new Error("FILL can only be set on children of auto-layout frames");
+      }
+      if (value === "HUG" && !isLayoutFrame(node) && node.type !== "TEXT") {
+        throw new Error("HUG can only be set on auto-layout frames and text nodes");
+      }
+      if (axis === "h") node._horizontalSizing = value;
+      else node._verticalSizing = value;
+      if (value === "HUG" && node.layoutMode === "HORIZONTAL") {
+        if (axis === "h") node.primaryAxisSizingMode = "AUTO";
+        else node.counterAxisSizingMode = "AUTO";
+      }
+      if (value === "HUG" && node.layoutMode === "VERTICAL") {
+        if (axis === "v") node.primaryAxisSizingMode = "AUTO";
+        else node.counterAxisSizingMode = "AUTO";
+      }
+    },
+  });
+  Object.defineProperty(node, "layoutSizingHorizontal", guardSizing("h"));
+  Object.defineProperty(node, "layoutSizingVertical", guardSizing("v"));
+}
+
+/** Figma deletes a group the moment its last child leaves. */
+function removeEmptiedGroup(oldParent: any, newParent: any) {
+  if (!engine.enabled || !oldParent || oldParent === newParent) return;
+  if (oldParent.type === "GROUP" && !oldParent.removed && oldParent.children.length === 0) oldParent.remove();
+}
+
+function makePage() {
+  const page: any = { id: "0:1", name: "Page 1", type: "PAGE", selection: [], children: [] };
+  const detach = (child: any) => {
+    const oldParent = child.parent;
+    if (oldParent?.children) {
+      const index = oldParent.children.indexOf(child);
+      if (index >= 0) oldParent.children.splice(index, 1);
+    }
+    return oldParent;
+  };
+  page.appendChild = (child: any) => {
+    const oldParent = detach(child);
+    page.children.push(child);
+    child.parent = page;
+    removeEmptiedGroup(oldParent, page);
+  };
+  page.insertChild = (index: number, child: any) => {
+    const oldParent = child.parent;
+    const oldIndex = oldParent === page ? page.children.indexOf(child) : -1;
+    detach(child);
+    page.children.splice(oldIndex >= 0 && oldIndex < index ? index - 1 : index, 0, child);
+    child.parent = page;
+    removeEmptiedGroup(oldParent, page);
+  };
+  return page;
+}
+
+/** Put a node at the top level of the mock's current page, as Figma does for created and cloned nodes. */
+export function placeOnPage(node: any) {
+  const page = engine.page;
+  if (!page) throw new Error("placeOnPage needs loadPlugin({ layoutEngine: true })");
+  if (node.parent?.children) {
+    const index = node.parent.children.indexOf(node);
+    if (index >= 0) node.parent.children.splice(index, 1);
+  }
+  page.children.push(node);
+  node.parent = page;
   return node;
 }
 
@@ -424,8 +802,11 @@ export function createMockFigma(options: MockFigmaOptions = {}) {
     on: () => undefined,
     notify: () => undefined,
     commitUndo: () => undefined,
-    createFrame: () => makeNode({ name: "Frame" }),
-    currentPage: { selection: [], children: [] },
+    createFrame: () =>
+      options.layoutEngine
+        ? placeOnPage(makeNode({ name: "Frame", fills: [{ type: "SOLID", color: { r: 1, g: 1, b: 1 } }], clipsContent: true }))
+        : makeNode({ name: "Frame" }),
+    currentPage: options.layoutEngine ? makePage() : { selection: [], children: [] },
     root: { children: [] },
     loadAllPagesAsync: async () => undefined,
     clientStorage: {
@@ -479,6 +860,8 @@ export function createMockFigma(options: MockFigmaOptions = {}) {
 export function loadPlugin(options: MockFigmaOptions = {}) {
   const source = fs.readFileSync(PLUGIN_PATH, "utf8");
   const figma = createMockFigma(options);
+  engine.enabled = options.layoutEngine === true;
+  engine.page = engine.enabled ? figma.currentPage : null;
 
   const sandbox: Record<string, unknown> = {
     figma,

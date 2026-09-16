@@ -1264,6 +1264,8 @@ async function handleCommand(command, params) {
       return await validateResponsiveCommand(params);
     case "clean_layers":
       return await cleanLayersCommand(params);
+    case "convert_layout":
+      return await convertLayoutCommand(params);
     case "get_styles":
       return await getStyles();
     case "get_local_components":
@@ -6248,6 +6250,1112 @@ function emptyCleanupReport() {
     gridSkipped: [],
     warnings: [],
   };
+}
+
+// ─── Layout conversion ─────────────────────────────────────────────────────
+//
+// A free-positioned frame or group becomes Auto Layout, or a Grid, that renders
+// where it did. Planning is geometry only: layers are read by their absolute
+// bounding boxes and split into rows and columns wherever their projections
+// leave a gap. Wrappers that do no visual work are dissolved first, so the
+// planner nests only where one gap cannot describe the spacing. Applying is
+// measured: every layer is compared with where it was, and if anything moved
+// the original is put back from a hidden copy.
+
+const LAYOUT_TOLERANCE = 0.5;
+const LAYOUT_LEAF_LIMIT = 400;
+const GRAPHIC_LAYER_TYPES = {
+  VECTOR: true, BOOLEAN_OPERATION: true, STAR: true, POLYGON: true, ELLIPSE: true, LINE: true,
+};
+
+function layoutError(message, extra) {
+  const error = new Error(message);
+  error.layoutReason = true;
+  if (extra) Object.assign(error, extra);
+  return error;
+}
+
+function isLayoutError(error) {
+  return !!(error && error.layoutReason);
+}
+
+function describeError(error) {
+  return error && error.message ? error.message : String(error);
+}
+
+function readRenderBox(node) {
+  try {
+    const box = node.absoluteRenderBounds;
+    if (box) return { x: box.x, y: box.y, width: box.width, height: box.height };
+  } catch (e) { /* not rendered */ }
+  return readBox(node);
+}
+
+function readNumber(node, key) {
+  try {
+    const value = node[key];
+    return typeof value === "number" ? value : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function roundLayout(value) {
+  return Math.round(value * 100) / 100;
+}
+
+function boxEnd(box, axis) {
+  return axis === "x" ? box.x + box.width : box.y + box.height;
+}
+
+function unionBoxes(boxes) {
+  let x = Infinity, y = Infinity, right = -Infinity, bottom = -Infinity;
+  for (const box of boxes) {
+    x = Math.min(x, box.x);
+    y = Math.min(y, box.y);
+    right = Math.max(right, box.x + box.width);
+    bottom = Math.max(bottom, box.y + box.height);
+  }
+  return { x, y, width: right - x, height: bottom - y };
+}
+
+function boxesOverlap(a, b, tolerance) {
+  return (
+    a.x < b.x + b.width - tolerance && b.x < a.x + a.width - tolerance &&
+    a.y < b.y + b.height - tolerance && b.y < a.y + a.height - tolerance
+  );
+}
+
+function boxInside(inner, outer) {
+  return (
+    inner.x >= outer.x - LAYOUT_TOLERANCE && inner.y >= outer.y - LAYOUT_TOLERANCE &&
+    boxEnd(inner, "x") <= boxEnd(outer, "x") + LAYOUT_TOLERANCE &&
+    boxEnd(inner, "y") <= boxEnd(outer, "y") + LAYOUT_TOLERANCE
+  );
+}
+
+function layoutBoxMoved(before, after) {
+  if (!before || !after) return true;
+  return ["x", "y", "width", "height"].some((key) => Math.abs(before[key] - after[key]) > LAYOUT_TOLERANCE);
+}
+
+function spread(values) {
+  return Math.max.apply(null, values) - Math.min.apply(null, values);
+}
+
+function mean(values) {
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+/** Why this frame or group cannot become Auto Layout itself, or null when it can. */
+function layoutConversionBlocker(node) {
+  if (node.type !== "FRAME" && node.type !== "GROUP") {
+    return `a ${String(node.type).toLowerCase()} cannot hold Auto Layout`;
+  }
+  if (isAutoLayout(node)) return "already uses Auto Layout";
+  if (node.visible === false) return "hidden";
+  if (isInsideInstance(node)) return "inside a component instance, whose structure comes from its main component";
+  if (isInsideMainComponent(node)) return "part of a main component";
+  const rotation = readNumber(node, "rotation");
+  if (rotation !== null && Math.abs(rotation) > 0.01) return "rotated";
+  if (node.type === "GROUP") {
+    const opacity = readNumber(node, "opacity");
+    if (opacity !== null && opacity < 1) return "the group has opacity, which a frame would render differently";
+    if (node.blendMode && node.blendMode !== "NORMAL" && node.blendMode !== "PASS_THROUGH") {
+      return "the group has a blend mode";
+    }
+    if (hasVisualPresence(node)) return "the group has an effect";
+    const risks = layerRiskReasons(node, null, false);
+    if (risks.length > 0) return `the group has a ${risks[0]}, which replacing it with a frame would drop`;
+  }
+  const kids = node.children;
+  if (kids.some(isInstrumentation)) return "a plugin highlight is on it — try again once the current command finishes";
+  if (!kids.some((child) => child.visible !== false)) return "no visible layers";
+  if (kids.some((child) => { try { return child.isMask === true; } catch (e) { return false; } })) {
+    return "it holds a mask, which depends on layer order";
+  }
+  if (!readBox(node)) return "it has no measurable bounds";
+  return null;
+}
+
+/** A frame or group that only groups layers: dissolving it changes nothing on the canvas. */
+function isDissolvableWrapper(node) {
+  if (!isContainer(node) || layoutConversionBlocker(node)) return false;
+  if (node.type === "FRAME" && frameHasLayoutPurpose(node)) return false;
+  if (node.children.some((child) => child.visible === false)) return false;
+  if (layerRiskReasons(node, null, false).length > 0) return false;
+  try {
+    if (node.boundVariables && Object.keys(node.boundVariables).length > 0) return false;
+    const refs = node.componentPropertyReferences;
+    if (refs && Object.keys(refs).length > 0) return false;
+  } catch (e) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * The layers a container will lay out, in paint order, with the wrappers they
+ * were dissolved out of. A wrapper records every leaf under it, so a planned
+ * row or column holding exactly those leaves can keep the wrapper's name.
+ */
+function collectLayoutLeaves(container) {
+  const leaves = [];
+  const dissolved = [];
+  const hidden = [];
+  const visit = (parent, owners) => {
+    for (const child of parent.children) {
+      if (child.visible === false) {
+        hidden.push(child);
+        continue;
+      }
+      if (isDissolvableWrapper(child)) {
+        const entry = { node: child, leafIds: [] };
+        dissolved.push(entry);
+        visit(child, owners.concat([entry]));
+        continue;
+      }
+      const box = readBox(child);
+      if (!box) throw layoutError(`"${child.name}" has no measurable bounds`);
+      leaves.push({ node: child, box, render: readRenderBox(child) || box, order: leaves.length });
+      for (const owner of owners) owner.leafIds.push(child.id);
+      if (leaves.length > LAYOUT_LEAF_LIMIT) {
+        throw layoutError(`more than ${LAYOUT_LEAF_LIMIT} layers at one level — select a smaller part of the design`);
+      }
+    }
+  };
+  visit(container, []);
+  return { leaves, dissolved, hidden };
+}
+
+function leafPlan(leaf) {
+  return { kind: "leaf", leaf, box: leaf.box, order: leaf.order };
+}
+
+function planName(plan) {
+  return plan.kind === "leaf" ? plan.leaf.node.name : planName(plan.children[0]);
+}
+
+function planLeaves(plan) {
+  if (plan.kind === "leaf") return [plan.leaf];
+  if (plan.kind === "grid") {
+    return plan.cells.reduce((all, cell) => all.concat(planLeaves(cell.content)), []);
+  }
+  return plan.children.reduce((all, child) => all.concat(planLeaves(child)), []);
+}
+
+/** Visit every row or column in a plan; `isRoot` is true only for the container's own layout. */
+function walkPlanStacks(plan, visit, isRoot) {
+  if (plan.kind === "stack") {
+    visit(plan, isRoot);
+    for (const child of plan.children) walkPlanStacks(child, visit, false);
+  } else if (plan.kind === "grid") {
+    for (const cell of plan.cells) walkPlanStacks(cell.content, visit, false);
+  }
+}
+
+/** Group items whose projections on one axis overlap; each group is a row (y) or column (x) band. */
+function splitIntoBands(items, axis) {
+  const sorted = items.slice().sort((a, b) => a.box[axis] - b.box[axis] || a.order - b.order);
+  const bands = [];
+  for (const item of sorted) {
+    const last = bands[bands.length - 1];
+    const end = boxEnd(item.box, axis);
+    if (last && item.box[axis] < last.end - LAYOUT_TOLERANCE) {
+      last.items.push(item);
+      last.end = Math.max(last.end, end);
+    } else {
+      bands.push({ items: [item], start: item.box[axis], end });
+    }
+  }
+  for (const band of bands) band.items.sort((a, b) => a.order - b.order);
+  return bands;
+}
+
+function stackGaps(units, axis) {
+  const gaps = [];
+  for (let i = 1; i < units.length; i++) gaps.push(units[i].box[axis] - boxEnd(units[i - 1].box, axis));
+  return gaps;
+}
+
+/** MIN, CENTER or MAX when every unit lines up that way across the stack; otherwise a layout error. */
+function crossAlignment(units, axis) {
+  if (units.length < 2) return "MIN";
+  const starts = units.map((unit) => unit.box[axis]);
+  const ends = units.map((unit) => boxEnd(unit.box, axis));
+  if (spread(starts) <= LAYOUT_TOLERANCE) return "MIN";
+  if (spread(units.map((unit, i) => (starts[i] + ends[i]) / 2)) <= LAYOUT_TOLERANCE) return "CENTER";
+  if (spread(ends) <= LAYOUT_TOLERANCE) return "MAX";
+  const first = units[starts.indexOf(Math.min.apply(null, starts))];
+  const last = units[starts.indexOf(Math.max.apply(null, starts))];
+  const sides = axis === "x" ? "left, centre or right" : "top, centre or bottom";
+  const edges = axis === "x" ? "left edges" : "top edges";
+  throw layoutError(
+    `"${planName(first)}" and "${planName(last)}" are not aligned ${sides} ` +
+      `(${edges} ${roundLayout(spread(starts))}px apart)`
+  );
+}
+
+function countPlanStacks(plan) {
+  let count = 0;
+  walkPlanStacks(plan, () => { count++; }, true);
+  return count;
+}
+
+function makeLayoutStack(units, direction) {
+  const axis = direction === "VERTICAL" ? "y" : "x";
+  const gaps = stackGaps(units, axis);
+  return {
+    kind: "stack",
+    direction,
+    gap: gaps.length ? Math.max(0, roundLayout(mean(gaps))) : 0,
+    counterAlign: crossAlignment(units, axis === "y" ? "x" : "y"),
+    children: units,
+    box: unionBoxes(units.map((unit) => unit.box)),
+    order: Math.min.apply(null, units.map((unit) => unit.order)),
+  };
+}
+
+/**
+ * Lay bands out along one axis. One Auto Layout frame has one gap, so when the
+ * gaps differ the closest bands are grouped first — heading with subtitle
+ * before the button row — until a single gap describes what is left.
+ */
+function buildLayoutStack(bands, direction, depth) {
+  const axis = direction === "VERTICAL" ? "y" : "x";
+  let units = bands.map((band) =>
+    band.items.length === 1 ? leafPlan(band.items[0]) : planLayoutGroup(band.items, depth + 1)
+  );
+  while (units.length > 2) {
+    const gaps = stackGaps(units, axis);
+    if (spread(gaps) <= LAYOUT_TOLERANCE) break;
+    const smallest = Math.min.apply(null, gaps);
+    const merged = [];
+    let run = [units[0]];
+    for (let i = 1; i < units.length; i++) {
+      if (gaps[i - 1] <= smallest + LAYOUT_TOLERANCE) {
+        run.push(units[i]);
+      } else {
+        merged.push(run.length === 1 ? run[0] : makeLayoutStack(run, direction));
+        run = [units[i]];
+      }
+    }
+    merged.push(run.length === 1 ? run[0] : makeLayoutStack(run, direction));
+    units = merged;
+  }
+  return makeLayoutStack(units, direction);
+}
+
+/** The nested rows and columns that reproduce these items, with the fewest frames. */
+function planLayoutGroup(items, depth) {
+  if (items.length === 1) return leafPlan(items[0]);
+  if (depth > 16) throw layoutError("the layers nest too deeply to describe with rows and columns");
+  let best = null;
+  let firstError = null;
+  for (const direction of ["VERTICAL", "HORIZONTAL"]) {
+    const bands = splitIntoBands(items, direction === "VERTICAL" ? "y" : "x");
+    if (bands.length < 2) continue;
+    try {
+      const plan = buildLayoutStack(bands, direction, depth);
+      if (!best || countPlanStacks(plan) < countPlanStacks(best)) best = plan;
+    } catch (e) {
+      if (!isLayoutError(e)) throw e;
+      if (!firstError) firstError = e;
+    }
+  }
+  if (best) return best;
+  if (firstError) throw firstError;
+  const names = items.slice(0, 2).map((item) => `"${item.node.name}"`).join(" and ");
+  throw layoutError(`${names} overlap in both directions, so no row or column can hold them`);
+}
+
+/**
+ * Layers that cannot take part in a row or column — overlapping another layer,
+ * or reaching past the container's edge — stay exactly where they are as
+ * absolutely positioned children. The layer overlapping the most others goes
+ * first; on a tie the smaller one, so a badge moves out of the flow rather than
+ * the card it sits on.
+ */
+function pickOverlayLayers(leaves, frameBox) {
+  const overlay = leaves.filter((leaf) => !boxInside(leaf.box, frameBox));
+  let flow = leaves.filter((leaf) => overlay.indexOf(leaf) === -1);
+  for (;;) {
+    const counts = flow.map((leaf) =>
+      flow.filter((other) => other !== leaf && boxesOverlap(leaf.box, other.box, LAYOUT_TOLERANCE)).length
+    );
+    const most = Math.max.apply(null, [0].concat(counts));
+    if (most === 0) break;
+    let pick = -1;
+    flow.forEach((leaf, i) => {
+      if (counts[i] !== most) return;
+      if (pick === -1) {
+        pick = i;
+        return;
+      }
+      const area = leaf.box.width * leaf.box.height;
+      const best = flow[pick].box.width * flow[pick].box.height;
+      if (area < best - 0.01 || (Math.abs(area - best) <= 0.01 && leaf.order > flow[pick].order)) pick = i;
+    });
+    overlay.push(flow[pick]);
+    flow = flow.filter((leaf, i) => i !== pick);
+  }
+  return overlay;
+}
+
+/** Padding that places a stack's children exactly where they sit inside the frame. */
+function stackPadding(stack, frameBox) {
+  const main = stack.direction === "VERTICAL" ? "y" : "x";
+  const cross = main === "y" ? "x" : "y";
+  const children = stack.children;
+  const mainStart = children[0].box[main] - frameBox[main];
+  const mainEnd = boxEnd(frameBox, main) - boxEnd(children[children.length - 1].box, main);
+  // The widest child sets both cross paddings; alignment places the others.
+  const crossStart = Math.min.apply(null, children.map((child) => child.box[cross] - frameBox[cross]));
+  const crossEnd = Math.min.apply(null, children.map((child) => boxEnd(frameBox, cross) - boxEnd(child.box, cross)));
+  const pad = (value) => Math.max(0, roundLayout(value));
+  return main === "y"
+    ? { top: pad(mainStart), bottom: pad(mainEnd), left: pad(crossStart), right: pad(crossEnd) }
+    : { left: pad(mainStart), right: pad(mainEnd), top: pad(crossStart), bottom: pad(crossEnd) };
+}
+
+function planStackBody(flow, frameBox) {
+  const inner = planLayoutGroup(flow, 0);
+  const root = inner.kind === "stack"
+    ? inner
+    : { kind: "stack", direction: "VERTICAL", gap: 0, counterAlign: "MIN", children: [inner], box: inner.box, order: inner.order };
+  root.padding = stackPadding(root, frameBox);
+  // Items pushed to opposite ends (a logo and a menu) are spaced apart, not a fixed distance.
+  if (
+    root.direction === "HORIZONTAL" &&
+    root.children.length > 1 &&
+    root.children.every((child) => child.box.width < root.gap)
+  ) {
+    root.spaceBetween = true;
+  }
+  return root;
+}
+
+function cellAlignment(start, end, trackStart, trackEnd) {
+  if (Math.abs(start - trackStart) <= LAYOUT_TOLERANCE) return "MIN";
+  if (Math.abs((start + end) / 2 - (trackStart + trackEnd) / 2) <= LAYOUT_TOLERANCE) return "CENTER";
+  if (Math.abs(end - trackEnd) <= LAYOUT_TOLERANCE) return "MAX";
+  return null;
+}
+
+/**
+ * Rows are bands along y, columns are bands along x taken from the fullest
+ * rows. A single layer wider than the first column in its own row is a heading
+ * spanning every column. Rows hug their tallest cell, so a staggered row cannot
+ * be reproduced; columns are FLEX when all are the same width, FIXED otherwise.
+ */
+function planGridBody(flow, frameBox) {
+  const rowBands = splitIntoBands(flow, "y");
+  const rows = rowBands.map((band) => ({ band, cells: splitIntoBands(band.items, "x") }));
+  const columnCount = Math.max.apply(null, rows.map((row) => row.cells.length));
+  if (columnCount < 2) throw layoutError("its layers form a single column — use Auto Layout instead of a Grid");
+
+  const full = rows.filter((row) => row.cells.length === columnCount);
+  const columns = [];
+  for (let c = 0; c < columnCount; c++) {
+    columns.push({
+      start: Math.min.apply(null, full.map((row) => row.cells[c].start)),
+      end: Math.max.apply(null, full.map((row) => row.cells[c].end)),
+    });
+  }
+  for (let c = 1; c < columnCount; c++) {
+    if (columns[c].start < columns[c - 1].end - LAYOUT_TOLERANCE) {
+      throw layoutError("its columns shift from one row to the next, so they overlap");
+    }
+  }
+  const columnGaps = columns.slice(1).map((column, i) => column.start - columns[i].end);
+  if (columnGaps.length && spread(columnGaps) > LAYOUT_TOLERANCE) {
+    throw layoutError(`its columns are not evenly spaced (gaps ${columnGaps.map(roundLayout).join(", ")}px)`);
+  }
+  const rowGaps = rowBands.slice(1).map((band, i) => band.start - rowBands[i].end);
+  if (rowGaps.length && spread(rowGaps) > LAYOUT_TOLERANCE) {
+    throw layoutError(`its rows are not evenly spaced (gaps ${rowGaps.map(roundLayout).join(", ")}px)`);
+  }
+  const widths = columns.map((column) => column.end - column.start);
+  const equalColumns = spread(widths) <= LAYOUT_TOLERANCE;
+  const lastColumn = columns[columnCount - 1];
+
+  const cells = [];
+  rows.forEach((row, r) => {
+    const used = {};
+    let tallest = 0;
+    for (const band of row.cells) {
+      const content = band.items.length === 1 ? leafPlan(band.items[0]) : planLayoutGroup(band.items, 1);
+      let column;
+      let span = 1;
+      if (row.cells.length === 1 && band.end > columns[0].end + LAYOUT_TOLERANCE) {
+        if (band.start < columns[0].start - LAYOUT_TOLERANCE || band.end > lastColumn.end + LAYOUT_TOLERANCE) {
+          throw layoutError(`"${planName(content)}" reaches past the outer columns`);
+        }
+        column = 0;
+        span = columnCount;
+      } else {
+        column = columns.findIndex(
+          (track) => band.start >= track.start - LAYOUT_TOLERANCE && band.end <= track.end + LAYOUT_TOLERANCE
+        );
+        if (column === -1) throw layoutError(`"${planName(content)}" does not sit inside one column`);
+        if (used[column]) throw layoutError(`two layers share one column in row ${r + 1}`);
+      }
+      used[column] = true;
+      const trackStart = columns[column].start;
+      const trackEnd = columns[column + span - 1].end;
+      const horizontal = cellAlignment(content.box.x, boxEnd(content.box, "x"), trackStart, trackEnd);
+      if (!horizontal) throw layoutError(`"${planName(content)}" is not aligned left, centre or right in its column`);
+      const vertical = cellAlignment(content.box.y, boxEnd(content.box, "y"), row.band.start, row.band.end);
+      if (!vertical) throw layoutError(`"${planName(content)}" is not aligned top, centre or bottom in its row`);
+      tallest = Math.max(tallest, content.box.height);
+      cells.push({
+        row: r,
+        column,
+        span,
+        content,
+        horizontal,
+        vertical,
+        fillWidth: equalColumns && span === 1 && Math.abs(content.box.width - (trackEnd - trackStart)) <= LAYOUT_TOLERANCE,
+      });
+    }
+    if (Math.abs(tallest - (row.band.end - row.band.start)) > LAYOUT_TOLERANCE) {
+      throw layoutError(`the layers in row ${r + 1} are staggered, so no row height fits them all`);
+    }
+  });
+
+  // Auto-flow places cells in reading order, so it keeps this placement only when no row but the last has a gap.
+  const autoFlow = rows.every((row, r) => {
+    const rowCells = cells.filter((cell) => cell.row === r).sort((a, b) => a.column - b.column);
+    let next = 0;
+    for (const cell of rowCells) {
+      if (cell.column !== next) return false;
+      next += cell.span;
+    }
+    return r === rows.length - 1 || next === columnCount;
+  });
+
+  const pad = (value) => Math.max(0, roundLayout(value));
+  return {
+    kind: "grid",
+    autoFlow,
+    rows: rows.length,
+    columns: columnCount,
+    columnSizes: equalColumns ? null : widths.map(roundLayout),
+    columnGap: columnGaps.length ? pad(mean(columnGaps)) : 0,
+    rowGap: rowGaps.length ? pad(mean(rowGaps)) : 0,
+    cells,
+    padding: {
+      left: pad(columns[0].start - frameBox.x),
+      right: pad(boxEnd(frameBox, "x") - lastColumn.end),
+      top: pad(rowBands[0].start - frameBox.y),
+      bottom: pad(boxEnd(frameBox, "y") - rowBands[rowBands.length - 1].end),
+    },
+    box: unionBoxes(flow.map((leaf) => leaf.box)),
+    order: 0,
+  };
+}
+
+/**
+ * Absolute layers go below or above the flow by how they overlapped it, and
+ * every overlapping pair must still paint in its original order — a new layer
+ * order that puts a shadow over a neighbour is a visual change.
+ */
+function orderOverlayLayers(plan) {
+  const below = [];
+  const above = [];
+  for (const leaf of plan.absolute.slice().sort((a, b) => a.order - b.order)) {
+    const hits = plan.flow.filter((other) => boxesOverlap(leaf.render, other.render, 0.01));
+    if (hits.length > 0 && hits.every((other) => other.order > leaf.order)) below.push(leaf);
+    else above.push(leaf);
+  }
+  const painted = below.concat(planLeaves(plan.body), above);
+  for (let i = 0; i < painted.length; i++) {
+    for (let j = i + 1; j < painted.length; j++) {
+      const lower = painted[i];
+      const upper = painted[j];
+      if (lower.order > upper.order && boxesOverlap(lower.render, upper.render, 0.01)) {
+        throw layoutError(`"${lower.node.name}" would end up underneath "${upper.node.name}" where they overlap`);
+      }
+    }
+  }
+  plan.below = below;
+  plan.above = above;
+}
+
+/** A planned row or column holding exactly a dissolved wrapper's layers keeps that wrapper's name, and its frame. */
+function assignWrapperReuse(plan) {
+  const byLeaves = {};
+  for (const entry of plan.dissolved) {
+    const key = entry.leafIds.slice().sort().join("|");
+    if (!byLeaves[key]) byLeaves[key] = entry;
+  }
+  plan.reused = new Set();
+  walkPlanStacks(plan.body, (stack, isRoot) => {
+    if (isRoot) return;
+    const entry = byLeaves[planLeaves(stack).map((leaf) => leaf.node.id).sort().join("|")];
+    if (!entry || plan.reused.has(entry)) return;
+    plan.reused.add(entry);
+    stack.name = entry.node.name;
+    if (entry.node.type === "FRAME") stack.reuse = entry.node;
+  }, plan.body.kind === "stack");
+}
+
+/** The complete, unapplied plan for one container, or a layout error saying why it cannot convert. */
+function planLayoutConversion(container, mode) {
+  const blocker = layoutConversionBlocker(container);
+  if (blocker) throw layoutError(blocker);
+  const frameBox = readBox(container);
+  const collected = collectLayoutLeaves(container);
+  const leaves = collected.leaves;
+  if (leaves.length === 0) throw layoutError("no visible layers");
+  if (leaves.every((leaf) => GRAPHIC_LAYER_TYPES[leaf.node.type])) {
+    throw layoutError("a drawing made only of vectors and shapes — kept as drawn", { graphic: true });
+  }
+  if (mode === "grid" && collected.hidden.length > 0) {
+    throw layoutError(`${collected.hidden.length} hidden layer(s) would take Grid cells — remove or show them first`);
+  }
+
+  const absolute = pickOverlayLayers(leaves, frameBox);
+  const flow = leaves.filter((leaf) => absolute.indexOf(leaf) === -1);
+  if (flow.length === 0) throw layoutError("every layer overlaps another or reaches past its edges");
+  // One badge on a card is an overlay; half the layers overlapping is a composition.
+  if (absolute.length >= 2 && absolute.length * 2 >= leaves.length) {
+    throw layoutError(
+      `${absolute.length} of its ${leaves.length} layers overlap or reach past its edges — ` +
+        "a free composition, kept as it is"
+    );
+  }
+
+  const plan = {
+    container,
+    mode,
+    frameBox,
+    leaves,
+    flow,
+    absolute,
+    dissolved: collected.dissolved,
+    hidden: collected.hidden,
+    body: mode === "grid" ? planGridBody(flow, frameBox) : planStackBody(flow, frameBox),
+  };
+  orderOverlayLayers(plan);
+  assignWrapperReuse(plan);
+  return plan;
+}
+
+function describeLayoutBody(body) {
+  if (body.kind === "grid") {
+    const tracks = body.columnSizes ? `fixed columns ${body.columnSizes.join("/")}px` : "equal columns";
+    return `${body.columns}-column Grid, ${body.rows} row(s), ${tracks}, gaps ${body.rowGap}/${body.columnGap}px`;
+  }
+  const direction = body.direction === "VERTICAL" ? "vertical" : "horizontal";
+  return `${direction}, ${body.spaceBetween ? "space between" : `gap ${body.gap}px`}`;
+}
+
+function describeLayoutPlan(plan) {
+  let wrappers = 0;
+  let created = 0;
+  walkPlanStacks(plan.body, (stack, isRoot) => {
+    if (isRoot) return;
+    wrappers++;
+    if (!stack.reuse) created++;
+  }, plan.body.kind === "stack");
+  const flattened = plan.dissolved.filter((entry) => !(plan.reused.has(entry) && entry.node.type === "FRAME"));
+  const padding = plan.body.padding;
+  return {
+    id: plan.container.id,
+    name: plan.container.name,
+    type: plan.container.type,
+    mode: plan.mode,
+    layout: describeLayoutBody(plan.body),
+    padding: [padding.top, padding.right, padding.bottom, padding.left],
+    layers: plan.leaves.length,
+    wrappers,
+    wrappersCreated: created,
+    flattened: flattened.map((entry) => entry.node.name),
+    absolute: plan.absolute.map((leaf) => leaf.node.name),
+    layerChange: created - flattened.length,
+  };
+}
+
+/**
+ * Every free-positioned frame or group under node that can convert, as jobs.
+ * A job's layers are searched too, so cards inside a section convert before
+ * the section does. Instances and main components are never entered.
+ */
+function collectLayoutJobs(node, mode, sink, depth) {
+  if (!node || node.removed || depth > 40) return;
+  if (node.visible === false || isInstrumentation(node) || isComponentLike(node)) return;
+  if ((node.type === "FRAME" && !isAutoLayout(node)) || node.type === "GROUP") {
+    try {
+      const plan = planLayoutConversion(node, mode);
+      const job = { node, mode, plan, inner: { jobs: [], blocked: [], graphics: 0 } };
+      for (const leaf of plan.leaves) collectLayoutJobs(leaf.node, "auto_layout", job.inner, depth + 1);
+      sink.jobs.push(job);
+      return;
+    } catch (e) {
+      if (!isLayoutError(e)) throw e;
+      if (e.graphic) {
+        sink.graphics++;
+        return;
+      }
+      sink.blocked.push({ id: node.id, name: node.name, type: node.type, reason: e.message });
+    }
+  }
+  if (isContainer(node)) for (const child of node.children) collectLayoutJobs(child, mode, sink, depth + 1);
+}
+
+function describeLayoutJob(job) {
+  const inner = [];
+  const keptFree = [];
+  const walk = (sink) => {
+    for (const child of sink.jobs) {
+      inner.push({ id: child.node.id, name: child.node.name, layout: describeLayoutBody(child.plan.body) });
+      walk(child.inner);
+    }
+    for (const blocked of sink.blocked) keptFree.push(blocked);
+  };
+  walk(job.inner);
+  return Object.assign(describeLayoutPlan(job.plan), { inner, keptFree });
+}
+
+function applyStackProperties(frame, stack, padding) {
+  frame.primaryAxisAlignItems = stack.spaceBetween ? "SPACE_BETWEEN" : "MIN";
+  frame.counterAxisAlignItems = stack.counterAlign;
+  frame.itemSpacing = stack.spaceBetween ? 0 : stack.gap;
+  frame.paddingTop = padding.top;
+  frame.paddingRight = padding.right;
+  frame.paddingBottom = padding.bottom;
+  frame.paddingLeft = padding.left;
+}
+
+function stackTokenFields(stack, padding) {
+  const fields = stack.spaceBetween ? [] : [["itemSpacing", stack.gap]];
+  return fields.concat([
+    ["paddingTop", padding.top], ["paddingRight", padding.right],
+    ["paddingBottom", padding.bottom], ["paddingLeft", padding.left],
+  ]);
+}
+
+/** Build a planned row or column: `insert` puts the frame in its parent before its children move in. */
+function buildLayoutWrapper(stack, insert, built) {
+  let wrapper = stack.reuse;
+  if (!wrapper) {
+    wrapper = figma.createFrame();
+    wrapper.fills = [];
+    wrapper.clipsContent = false;
+  }
+  insert(wrapper);
+  wrapper.name = stack.name || (stack.direction === "VERTICAL" ? "Column" : "Row");
+  wrapper.layoutMode = stack.direction;
+  const noPadding = { top: 0, right: 0, bottom: 0, left: 0 };
+  applyStackProperties(wrapper, stack, noPadding);
+  placeStackChildren(wrapper, stack, built);
+  writeLayoutSizing(wrapper, "h", "HUG");
+  writeLayoutSizing(wrapper, "v", "HUG");
+  built.push({ node: wrapper, fields: stack.spaceBetween ? [] : [["itemSpacing", stack.gap]] });
+  return wrapper;
+}
+
+function placeStackChildren(frame, stack, built) {
+  stack.children.forEach((child, i) => {
+    if (child.kind === "leaf") frame.insertChild(i, child.leaf.node);
+    else buildLayoutWrapper(child, (wrapper) => frame.insertChild(i, wrapper), built);
+  });
+}
+
+function pinOverlay(frame, leaf, transform, origin) {
+  leaf.node.layoutPositioning = "ABSOLUTE";
+  leaf.node.x = transform[0][2] - origin.x;
+  leaf.node.y = transform[1][2] - origin.y;
+}
+
+/**
+ * Turn a group into a frame in the same slot. Groups cannot hold Auto Layout;
+ * the blocker already refused groups whose opacity, blend, effect or prototype
+ * settings a frame would not carry over.
+ */
+function replaceGroupWithFrame(group, parent, index) {
+  const box = readBox(group);
+  const x = group.x;
+  const y = group.y;
+  const frame = figma.createFrame();
+  parent.insertChild(index, frame);
+  frame.name = group.name;
+  frame.fills = [];
+  frame.clipsContent = false;
+  if (isAbsolutePositionedLayer(group)) frame.layoutPositioning = "ABSOLUTE";
+  frame.x = x;
+  frame.y = y;
+  frame.resize(Math.max(0.01, box.width), Math.max(0.01, box.height));
+  return frame;
+}
+
+/** Apply a plan to frame. Returns the frames whose gap and padding may bind to tokens. */
+function buildLayoutPlan(frame, plan) {
+  const built = [];
+  const body = plan.body;
+  const origin = plan.frameBox;
+  const transforms = plan.absolute.map((leaf) => leaf.node.absoluteTransform);
+  const overlayTransform = (leaf) => transforms[plan.absolute.indexOf(leaf)];
+  const sizing = { h: readLayoutSizing(frame, "h"), v: readLayoutSizing(frame, "v") };
+
+  if (body.kind === "grid") {
+    // Grid cells are claimed by whatever the frame already holds, so the layers wait outside.
+    const holder = figma.createFrame();
+    holder.visible = false;
+    holder.name = `${frame.name} (layout staging)`;
+    try {
+      for (const child of frame.children.slice()) holder.appendChild(child);
+      frame.layoutMode = "GRID";
+      frame.resize(origin.width, origin.height);
+      frame.gridAutoTracks = "NONE";
+      frame.gridItemsPositioning = "MANUAL";
+      frame.gridRowCount = body.rows;
+      frame.gridColumnCount = body.columns;
+      frame.gridColumnSizes.forEach((track, i) => {
+        if (body.columnSizes) {
+          track.type = "FIXED";
+          track.value = body.columnSizes[i];
+        } else {
+          track.type = "FLEX";
+          track.value = 1;
+        }
+      });
+      frame.gridRowSizes.forEach((track) => { track.type = "HUG"; });
+      frame.gridRowGap = body.rowGap;
+      frame.gridColumnGap = body.columnGap;
+      frame.paddingTop = body.padding.top;
+      frame.paddingRight = body.padding.right;
+      frame.paddingBottom = body.padding.bottom;
+      frame.paddingLeft = body.padding.left;
+      // An absolute layer passes through a cell on its way in, so it goes before the cells fill.
+      for (const leaf of plan.below.concat(plan.above)) {
+        frame.appendChild(leaf.node);
+        pinOverlay(frame, leaf, overlayTransform(leaf), origin);
+      }
+      for (const cell of body.cells) {
+        let node;
+        if (cell.content.kind === "leaf") {
+          node = cell.content.leaf.node;
+          frame.appendChildAt(node, cell.row, cell.column);
+        } else {
+          node = buildLayoutWrapper(cell.content, (wrapper) => frame.appendChildAt(wrapper, cell.row, cell.column), built);
+        }
+        // A span is set while its row holds nothing else; Figma refuses to span over a placed neighbour.
+        if (cell.span > 1) node.gridColumnSpan = cell.span;
+        node.gridChildHorizontalAlign = cell.horizontal;
+        node.gridChildVerticalAlign = cell.vertical;
+        if (cell.fillWidth) writeLayoutSizing(node, "h", "FILL");
+      }
+      for (const leaf of plan.below.slice().reverse()) frame.insertChild(0, leaf.node);
+      for (const leaf of plan.above) frame.appendChild(leaf.node);
+      if (body.autoFlow) {
+        try {
+          frame.gridItemsPositioning = "ROW_AUTO_FLOW";
+          frame.gridAutoTracks = "ROWS";
+        } catch (e) {
+          // Manual placement renders the same; auto-flow only makes later edits easier.
+          try { frame.gridItemsPositioning = "MANUAL"; } catch (ignored) { /* already manual */ }
+        }
+      }
+      removeEmptiedWrappers(plan);
+      if (holder.children.length > 0) throw layoutError(`"${holder.children[0].name}" had no place in the Grid`);
+    } finally {
+      if (!holder.removed) {
+        for (const child of holder.children.slice()) frame.appendChild(child);
+        holder.remove();
+      }
+    }
+    built.push({
+      node: frame,
+      fields: [
+        ["gridRowGap", body.rowGap], ["gridColumnGap", body.columnGap],
+        ["paddingTop", body.padding.top], ["paddingRight", body.padding.right],
+        ["paddingBottom", body.padding.bottom], ["paddingLeft", body.padding.left],
+      ],
+    });
+  } else {
+    frame.layoutMode = body.direction;
+    // A literal resize pins both axes at the original size; the content-driven axis is released below.
+    frame.resize(origin.width, origin.height);
+    applyStackProperties(frame, body, body.padding);
+    placeStackChildren(frame, body, built);
+    let index = 0;
+    for (const leaf of plan.below) {
+      frame.insertChild(index++, leaf.node);
+      pinOverlay(frame, leaf, overlayTransform(leaf), origin);
+    }
+    for (const leaf of plan.above) {
+      frame.appendChild(leaf.node);
+      pinOverlay(frame, leaf, overlayTransform(leaf), origin);
+    }
+    built.push({ node: frame, fields: stackTokenFields(body, body.padding) });
+  }
+
+  // Height follows the content unless the parent stretches it; width keeps its Fill or Fixed behaviour.
+  writeLayoutSizing(frame, "v", sizing.v === "FILL" ? "FILL" : "HUG");
+  if (sizing.h === "FILL") writeLayoutSizing(frame, "h", "FILL");
+  return built;
+}
+
+function removeEmptiedWrappers(plan) {
+  for (const entry of plan.dissolved.slice().reverse()) {
+    const node = entry.node;
+    if (node.removed) continue;
+    if (plan.reused.has(entry) && node.type === "FRAME") continue;
+    if (isContainer(node) && node.children.length === 0) node.remove();
+  }
+}
+
+function findMovedLayer(tracked) {
+  for (const entry of tracked) {
+    if (entry.node.removed) return { node: entry.node, removed: true };
+    if (layoutBoxMoved(entry.box, readBox(entry.node))) return { node: entry.node, removed: false };
+  }
+  return null;
+}
+
+/** Put the untouched copy in the original's slot. True when it renders where the original did. */
+function restoreFromBackup(state) {
+  try {
+    if (state.frame !== state.original && !state.frame.removed) state.frame.remove();
+    if (!state.original.removed) state.original.remove();
+    state.parent.insertChild(Math.min(state.index, state.parent.children.length), state.backup);
+    state.backup.name = state.name;
+    if (!isAutoLayout(state.parent) || isAbsolutePositionedLayer(state.backup)) {
+      state.backup.relativeTransform = state.transform;
+    }
+    state.backup.visible = true;
+    return !layoutBoxMoved(state.box, readBox(state.backup));
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * Convert one container in place. A hidden copy is taken first; if Figma
+ * refuses a step or any layer ends up somewhere else, the copy takes the
+ * original's place, so a failed conversion leaves the design as it was.
+ */
+async function applyLayoutPlan(plan) {
+  const original = plan.container;
+  const parent = original.parent;
+  if (!parent) return { ok: false, reason: "it has no parent to convert inside" };
+  const index = parent.children.indexOf(original);
+  const name = original.name;
+  const transform = original.relativeTransform;
+  const tracked = plan.leaves.map((leaf) => ({ node: leaf.node, box: leaf.box }));
+
+  let backup;
+  try {
+    backup = original.clone();
+    backup.visible = false;
+    backup.name = `${name} (layout backup)`;
+  } catch (e) {
+    return { ok: false, reason: `a safety copy could not be made (${describeError(e)}), so nothing was changed` };
+  }
+
+  if (typeof figma.commitUndo === "function") figma.commitUndo();
+  let frame = original;
+  try {
+    if (original.type === "GROUP") frame = replaceGroupWithFrame(original, parent, index);
+    const built = buildLayoutPlan(frame, plan);
+    removeEmptiedWrappers(plan);
+    if (frame !== original && !original.removed && original.children.length === 0) original.remove();
+    const moved = findMovedLayer(tracked.concat([{ node: frame, box: plan.frameBox }]));
+    if (moved) {
+      throw layoutError(`"${moved.node.name}" would ${moved.removed ? "disappear" : "move or change size"}`);
+    }
+    backup.remove();
+    if (typeof figma.commitUndo === "function") figma.commitUndo();
+    return { ok: true, frame, built };
+  } catch (e) {
+    const why = isLayoutError(e) ? e.message : `Figma refused a step (${describeError(e)})`;
+    const restored = restoreFromBackup({ original, frame, backup, parent, index, name, transform, box: plan.frameBox });
+    return {
+      ok: false,
+      reason: restored
+        ? `${why}, so it was put back exactly as it was (the layers inside it now have new IDs)`
+        : `${why}, and putting it back did not fully succeed — a hidden copy named "${name} (layout backup)" ` +
+          "is on the page; undo (Cmd+Z) to recover",
+    };
+  }
+}
+
+/** Every alias in a variable resolved; the number when all modes agree, else null. */
+async function resolveConstantFloat(index, variable, depth) {
+  if (!variable || depth > 8) return null;
+  const values = variable.valuesByMode || {};
+  let result = null;
+  for (const modeId of Object.keys(values)) {
+    let value = values[modeId];
+    if (value && typeof value === "object" && value.type === "VARIABLE_ALIAS") {
+      const target = index.byId[value.id] || (await figma.variables.getVariableByIdAsync(value.id));
+      value = await resolveConstantFloat(index, target, depth + 1);
+    }
+    if (typeof value !== "number") return null;
+    if (result !== null && Math.abs(result - value) > 0.001) return null;
+    result = value;
+  }
+  return result;
+}
+
+/**
+ * The file's spacing scale by value: `Gap/<n>` before `spacing/<n>`, and only
+ * tokens that resolve to the same number in every mode — binding one must not
+ * make a measured gap change at another breakpoint. Two tokens of the same
+ * rank for one value are ambiguous and bind nothing.
+ */
+async function buildSpacingTokens() {
+  if (!figma.variables || typeof figma.variables.getLocalVariableCollectionsAsync !== "function") return null;
+  let index;
+  try {
+    index = await buildVariableIndex();
+  } catch (e) {
+    return null;
+  }
+  const byValue = {};
+  for (const variable of index.all) {
+    if (variable.resolvedType !== "FLOAT") continue;
+    const match = /^(gap|spacing)\/[^/]+$/i.exec(variable.name);
+    if (!match || !isScopeCompatible(variable, ["GAP"])) continue;
+    const value = await resolveConstantFloat(index, variable, 0);
+    if (value === null) continue;
+    const rank = match[1].toLowerCase() === "gap" ? 0 : 1;
+    const key = String(roundLayout(value));
+    const current = byValue[key];
+    if (!current || rank < current.rank) byValue[key] = { variable, rank, ambiguous: false };
+    else if (rank === current.rank) current.ambiguous = true;
+  }
+  return byValue;
+}
+
+async function bindLayoutTokens(built, tokens, report) {
+  for (const entry of built) {
+    for (const field of entry.fields) {
+      const key = field[0];
+      const value = field[1];
+      if (!(value > 0) || boundVariableId(entry.node, key)) continue;
+      const hit = tokens ? tokens[String(roundLayout(value))] : null;
+      if (hit && !hit.ambiguous) {
+        try {
+          entry.node.setBoundVariable(key, hit.variable);
+          report.tokensBound.push(`${entry.node.name}: ${key} → ${hit.variable.name}`);
+          continue;
+        } catch (e) { /* reported as unbound below */ }
+      }
+      report.tokensMissing.push({ id: entry.node.id, name: entry.node.name, field: key, value: roundLayout(value) });
+    }
+  }
+}
+
+async function executeLayoutJob(job, tokens, report) {
+  for (const child of job.inner.jobs) await executeLayoutJob(child, tokens, report);
+  for (const blocked of job.inner.blocked) report.keptFree.push(blocked);
+  const node = job.node;
+  if (node.removed) {
+    report.skipped.push({ id: node.id, name: node.name, reason: "it no longer exists" });
+    return;
+  }
+  let plan;
+  try {
+    // Converting its layers first may have replaced some of them, so plan again.
+    plan = planLayoutConversion(node, job.mode);
+  } catch (e) {
+    if (!isLayoutError(e)) throw e;
+    report.skipped.push({ id: node.id, name: node.name, reason: e.message });
+    return;
+  }
+  const summary = describeLayoutPlan(plan);
+  const result = await applyLayoutPlan(plan);
+  if (!result.ok) {
+    report.skipped.push({ id: node.id, name: node.name, reason: result.reason });
+    return;
+  }
+  summary.id = result.frame.id;
+  report.converted.push(summary);
+  await bindLayoutTokens(result.built, tokens, report);
+}
+
+async function resolveLayoutTargets(params) {
+  if (params.nodeId) {
+    const node = await getNodeByIdSafe(params.nodeId);
+    if (!node) throw new Error(`Node not found with ID: ${params.nodeId}`);
+    return { targets: [node], scope: "node" };
+  }
+  const selection = figma.currentPage.selection || [];
+  if (params.scope === "page" || selection.length === 0) return { targets: [figma.currentPage], scope: "page" };
+  const selected = new Set(selection);
+  const targets = selection.filter((node) => {
+    for (let p = node.parent; p; p = p.parent) if (selected.has(p)) return false;
+    return true;
+  });
+  return { targets, scope: "selection" };
+}
+
+/**
+ * Convert free-positioned frames and groups to Auto Layout or a Grid.
+ *
+ * Interactive, like clean_layers: a dry run lists every convertible container
+ * with the layout it would get and every one that cannot convert with the
+ * reason; the apply run converts only the IDs the user confirmed. With nothing
+ * selected the whole current page is scanned.
+ */
+async function convertLayoutCommand(params) {
+  const opts = params || {};
+  const mode = opts.mode === "grid" ? "grid" : "auto_layout";
+  const resolved = await resolveLayoutTargets(opts);
+  const targets = resolved.targets;
+  const targetInfo = targets.map((t) => ({ id: t.id, name: t.name, type: t.type }));
+  const sink = { jobs: [], blocked: [], graphics: 0 };
+  for (const target of targets) collectLayoutJobs(target, mode, sink, 0);
+
+  if (opts.dryRun) {
+    return {
+      dryRun: true,
+      mode,
+      scope: resolved.scope,
+      targets: targetInfo,
+      proposals: sink.jobs.map(describeLayoutJob),
+      blocked: sink.blocked,
+      graphicsSkipped: sink.graphics,
+    };
+  }
+
+  const confirmed = new Set(Array.isArray(opts.confirmedIds) ? opts.confirmedIds : []);
+  const report = { converted: [], skipped: [], keptFree: [], pending: [], tokensBound: [], tokensMissing: [] };
+  const tokens = opts.bindTokens === false ? null : await buildSpacingTokens();
+  const handled = new Set();
+  const markHandled = (job) => {
+    handled.add(job.node.id);
+    job.inner.jobs.forEach(markHandled);
+  };
+  // A confirmed job converts with everything inside it; an unconfirmed one may still hold a confirmed card.
+  const run = async (jobs, topLevel) => {
+    for (const job of jobs) {
+      if (confirmed.has(job.node.id)) {
+        markHandled(job);
+        await executeLayoutJob(job, tokens, report);
+        continue;
+      }
+      const before = handled.size;
+      await run(job.inner.jobs, false);
+      if (topLevel && handled.size === before) report.pending.push(describeLayoutJob(job));
+    }
+  };
+  await run(sink.jobs, true);
+  for (const id of confirmed) {
+    if (!handled.has(id)) {
+      const blocked = sink.blocked.find((entry) => entry.id === id);
+      report.skipped.push({
+        id,
+        name: blocked ? blocked.name : id,
+        reason: blocked ? blocked.reason : "not found in scope as a free-positioned frame or group that can convert",
+      });
+    }
+  }
+
+  return Object.assign({ dryRun: false, mode, scope: resolved.scope, targets: targetInfo }, report);
 }
 
 // ─── Command entry points ──────────────────────────────────────────────────

@@ -119,6 +119,7 @@ export const CORE_TOOLS: readonly string[] = [
   "analyze_responsive",
   "make_responsive",
   "clean_layers",
+  "convert_layout",
   "validate_responsive",
 ];
 

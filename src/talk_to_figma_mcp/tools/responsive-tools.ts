@@ -69,8 +69,67 @@ interface CleanLayersResult {
   warnings: string[];
 }
 
+interface LayoutConversionSummary {
+  id: string;
+  name: string;
+  type: string;
+  mode: "auto_layout" | "grid";
+  layout: string;
+  padding: [number, number, number, number];
+  layers: number;
+  wrappers: number;
+  wrappersCreated: number;
+  flattened: string[];
+  absolute: string[];
+  layerChange: number;
+  inner?: Array<{ id: string; name: string; layout: string }>;
+  keptFree?: LayoutBlocked[];
+}
+
+interface LayoutBlocked {
+  id: string;
+  name: string;
+  type?: string;
+  reason: string;
+}
+
+interface ConvertLayoutResult {
+  dryRun: boolean;
+  mode: "auto_layout" | "grid";
+  scope: "node" | "selection" | "page";
+  targets: Array<{ id: string; name: string; type?: string }>;
+  proposals?: LayoutConversionSummary[];
+  blocked?: LayoutBlocked[];
+  graphicsSkipped?: number;
+  converted?: LayoutConversionSummary[];
+  skipped?: LayoutBlocked[];
+  keptFree?: LayoutBlocked[];
+  pending?: LayoutConversionSummary[];
+  tokensBound?: string[];
+  tokensMissing?: Array<{ id: string; name: string; field: string; value: number }>;
+}
+
 /** Entries listed with IDs, so the model can pass confirmed ones back. */
 const CLEANUP_ENTRY_LIMIT = 40;
+
+function describeLayoutConversion(s: LayoutConversionSummary): string {
+  const [top, right, bottom, left] = s.padding;
+  const parts = [`${s.layout}, padding ${top}/${right}/${bottom}/${left}px`];
+  if (s.wrappersCreated) parts.push(`${s.wrappersCreated} new row/column frame(s)`);
+  if (s.flattened.length) parts.push(`flattens ${s.flattened.map((n) => `"${n}"`).slice(0, 3).join(", ")}${s.flattened.length > 3 ? ", …" : ""}`);
+  if (s.absolute.length) parts.push(`keeps ${s.absolute.map((n) => `"${n}"`).slice(0, 3).join(", ")}${s.absolute.length > 3 ? ", …" : ""} in place as absolute`);
+  if (s.inner?.length) parts.push(`converts ${s.inner.length} frame(s) inside first`);
+  return `"${s.name}" [id ${s.id}] — ${parts.join("; ")}`;
+}
+
+function appendBlocked(lines: string[], heading: string, entries?: LayoutBlocked[]): void {
+  if (!entries?.length) return;
+  lines.push(`\n${heading} (${entries.length}):`);
+  for (const e of entries.slice(0, CLEANUP_ENTRY_LIMIT)) lines.push(`  "${e.name}" [id ${e.id}] — ${e.reason}`);
+  if (entries.length > CLEANUP_ENTRY_LIMIT) {
+    lines.push(`  … ${entries.length - CLEANUP_ENTRY_LIMIT} more — scan a smaller selection to see them`);
+  }
+}
 
 function describeCleanupTargets(r: CleanLayersResult): string {
   const targets = r.targets?.length ? r.targets : [r.frame];
@@ -990,6 +1049,146 @@ export function registerResponsiveTools(server: McpServer): void {
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         return { content: [{ type: "text", text: `Could not clean layers: ${detail}` }] };
+      }
+    }
+  );
+
+  // ── 3b. convert_layout ──────────────────────────────────────────────────
+  server.tool(
+    "convert_layout",
+    "Convert free-positioned frames and groups (layers placed by x/y, no Auto Layout) into Auto Layout " +
+      "or a Grid that renders EXACTLY where the layers were, with as few frames as possible. " +
+      "Reads every layer's position and size, splits them into rows and columns, calculates gap and " +
+      "padding, dissolves groups and frames that only held layers, and nests a row/column frame only " +
+      "where one gap cannot describe the spacing. A layer overlapping another (a badge on a card) stays " +
+      "in place as absolute. Height becomes Hug; width keeps Fixed or Fill. Measured gap and padding bind " +
+      "to the file's spacing scale (Gap/<n>, spacing/<n>) when a token has that exact value in every mode. " +
+      "REFUSES rather than approximates: layers not aligned left/centre/right, uneven Grid spacing, " +
+      "compositions where most layers overlap, rotated frames, masks, instances and main components are " +
+      "reported with the reason and left unchanged. Vector drawings are skipped. " +
+      "INTERACTIVE: run dryRun first — it lists proposals with IDs — ask the user, then apply with only the " +
+      "approved IDs in confirmedIds. Every conversion is measured; if anything would move, the original is " +
+      "put back. Use it only when the user asked to convert to Auto Layout or Grid. With nothing selected " +
+      "it scans the whole current page.",
+    {
+      nodeId: z
+        .string()
+        .optional()
+        .describe("Frame, group or section to convert. Defaults to the selection, or the whole page when nothing is selected."),
+      scope: z
+        .enum(["selection", "page"])
+        .optional()
+        .describe("'page' scans the whole current page even when something is selected. Ignored when nodeId is given."),
+      mode: z
+        .enum(["auto_layout", "grid"])
+        .optional()
+        .describe(
+          "'auto_layout' (default): horizontal/vertical stacks. 'grid': the container becomes a Figma Grid " +
+            "(rows × columns, a heading may span all columns); frames inside it still use Auto Layout."
+        ),
+      dryRun: z
+        .boolean()
+        .optional()
+        .describe("Report what would convert and what cannot, with IDs and reasons, without modifying anything. Always run this first."),
+      confirmedIds: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "IDs from the scan's proposals the user approved. A proposal converts with every frame inside it; " +
+            "an inner frame's ID converts only that frame. Anything not listed is left as it is."
+        ),
+      bindTokens: z
+        .boolean()
+        .optional()
+        .describe("Bind converted gap and padding to matching spacing tokens. Default true."),
+    },
+    async ({ nodeId, scope, mode, dryRun, confirmedIds, bindTokens }) => {
+      try {
+        const r = (await sendCommandToFigma("convert_layout", {
+          nodeId,
+          scope: scope ?? "selection",
+          mode: mode ?? "auto_layout",
+          dryRun: dryRun ?? false,
+          confirmedIds: confirmedIds ?? [],
+          bindTokens: bindTokens ?? true,
+        })) as ConvertLayoutResult;
+
+        const modeLabel = r.mode === "grid" ? "Grid" : "Auto Layout";
+        const where =
+          r.scope === "page"
+            ? "the whole current page (nothing was selected)"
+            : describeCleanupTargets({ targets: r.targets, frame: r.targets[0] } as CleanLayersResult);
+        const lines: string[] = [];
+
+        if (r.dryRun) {
+          const proposals = r.proposals ?? [];
+          lines.push(`${modeLabel} conversion scan — ${where}. Nothing modified.`);
+          if (proposals.length) {
+            lines.push(`\nCan convert with no visual change (${proposals.length}):`);
+            for (const p of proposals.slice(0, CLEANUP_ENTRY_LIMIT)) {
+              lines.push(`  ${describeLayoutConversion(p)}`);
+              for (const inner of (p.inner ?? []).slice(0, 8)) lines.push(`      inside: "${inner.name}" [id ${inner.id}] — ${inner.layout}`);
+              for (const kept of (p.keptFree ?? []).slice(0, 8)) lines.push(`      stays free-positioned: "${kept.name}" [id ${kept.id}] — ${kept.reason}`);
+            }
+          } else {
+            lines.push("\nNothing here can convert without changing the design.");
+          }
+          appendBlocked(lines, "Cannot convert without a visual change — left as it is", r.blocked);
+          if (r.graphicsSkipped) lines.push(`\n${r.graphicsSkipped} vector drawing(s) skipped — kept as drawn.`);
+
+          lines.push("\nNEXT STEP:");
+          if (proposals.length) {
+            lines.push("  Ask the user before converting, in their language, naming each proposal, e.g.");
+            const first = proposals[0];
+            lines.push(
+              `  • "\\"${first.name}\\" can become ${modeLabel} (${first.layout}) with the design unchanged` +
+                `${first.flattened.length ? ` (${first.flattened.length} wrapper layer(s) removed)` : ""}. Convert it?"`
+            );
+            lines.push("  Then call convert_layout again without dryRun, with only the approved IDs in confirmedIds.");
+            if (r.blocked?.length) {
+              lines.push("  Tell the user why the others cannot convert. Do not rebuild them by hand with set_auto_layout or move_node.");
+            }
+          } else if (r.blocked?.length) {
+            lines.push("  Tell the user the reasons above. Do not force a conversion by hand with set_auto_layout or move_node.");
+          }
+        } else {
+          const converted = r.converted ?? [];
+          lines.push(`${modeLabel} conversion — ${where}: ${converted.length} converted.`);
+          if (converted.length) {
+            lines.push(`\nConverted, every layer measured where it was (${converted.length}):`);
+            for (const c of converted.slice(0, CLEANUP_ENTRY_LIMIT)) lines.push(`  ${describeLayoutConversion(c)}`);
+          }
+          appendBlocked(lines, "Not converted — left exactly as it was", r.skipped);
+          appendBlocked(lines, "Kept free-positioned inside converted frames", r.keptFree);
+          if (r.pending?.length) {
+            lines.push(`\nNot converted — not confirmed (${r.pending.length}):`);
+            for (const p of r.pending.slice(0, 15)) lines.push(`  ${describeLayoutConversion(p)}`);
+          }
+          if (r.tokensBound?.length) {
+            lines.push(`\nBound to spacing tokens (${r.tokensBound.length}):`);
+            for (const t of r.tokensBound.slice(0, 25)) lines.push(`  ${t}`);
+            if (r.tokensBound.length > 25) lines.push(`  … ${r.tokensBound.length - 25} more`);
+          }
+          const missing = r.tokensMissing ?? [];
+          if (missing.length) {
+            const values = Array.from(new Set(missing.map((m) => m.value))).sort((a, b) => a - b);
+            lines.push(`\nNo spacing token with an exact value — kept as manual values (${missing.length}):`);
+            for (const m of missing.slice(0, 25)) lines.push(`  "${m.name}" [id ${m.id}] ${m.field} = ${m.value}px`);
+            if (missing.length > 25) lines.push(`  … ${missing.length - 25} more`);
+            lines.push(
+              `\nAsk the user: "I cannot find an existing local variable for ${values.map((v) => `${v}px`).join(", ")}. ` +
+                "Should I keep the manual values or add new tokens?\" Do not create tokens without a yes."
+            );
+          }
+          if (r.skipped?.length) {
+            lines.push("\nReport the reasons for anything not converted. Do not imitate the conversion by hand.");
+          }
+        }
+
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        return { content: [{ type: "text", text: `Could not convert the layout: ${detail}` }] };
       }
     }
   );

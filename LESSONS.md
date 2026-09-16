@@ -55,3 +55,16 @@ Read at the start of every change. Sweep at QA.
 - **Guard:** a parser added to accept a *new* input form must not become a validator of the old one. Branch on the new form (does it look like a URL?) and pass anything else through untouched. Let the remote service be the authority on whether an identifier exists.
 - **QA test:** run the full suite, not just the new file. Any new input-parsing helper gets one test asserting that an unrecognised-but-previously-working value is passed through unchanged.
 
+## L8 — A boundary rule chosen by reasoning, then tested with a fixture that agreed with it
+
+- **Looked like:** `convert_layout` was meant to refuse free compositions. The rule was "refuse when *more than* half the layers overlap". The first collage fixture was invented, and 2 of its 4 layers overlapped. That is exactly half, so it slipped through to alignment checks and was refused for the wrong reason. The real 9-layer "Real Smiles Image Group" from the designer's file is what the rule was for.
+- **Root cause:** the boundary (`>` vs `>=`) was picked by thinking about the typical case, and nothing checked the case sitting on the boundary. A single badge on a card (1 of 2) and a collage (2 of 4) are both "half"; the rule has to tell them apart by count, not only by ratio.
+- **Guard:** a threshold that decides refuse/accept gets one fixture on each side of the boundary *and* one on it, and at least one of them is copied from the real file the rule was written for. The rule is now "2 or more overlays making up at least half"; a single overlay is always allowed.
+- **QA test:** for every numeric cut-off, list the boundary value in the test names (e.g. "1 of 2 overlays → allowed", "2 of 4 → composition").
+
+## L9 — A mock object missing part of the real API made a working path look broken
+
+- **Looked like:** the rollback test failed with "putting it back did not fully succeed". The plugin's restore called `parent.insertChild` on the page, which real Figma pages have and the harness page (a plain `{ selection, children }` object) did not. The same run showed a `rotation: 180` fixture was not rotated, because `makeNode` never copied `rotation`.
+- **Root cause:** the harness models the properties earlier features read. A new feature that touches more of the API (page insertion, rotation) runs into the gaps, and the gap looks like a product bug, or worse, a mock silently ignores a field and a guard is never exercised.
+- **Guard:** before relying on a harness object for a new code path, list every property and method the path uses and confirm the mock has each. Behaviour the mock cannot assume (where `clone()` puts the copy, what a new frame's fills are, whether an emptied group survives) is probed live first. This session confirmed `clone()` parents to the page, not beside the original, so the engine mode models that.
+- **QA test:** a failing test is first reproduced against the real API (or its documented contract) before the plugin code is changed to make it pass.

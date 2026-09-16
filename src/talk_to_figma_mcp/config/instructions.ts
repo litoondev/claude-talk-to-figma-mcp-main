@@ -41,6 +41,15 @@ export const SERVER_INSTRUCTIONS = `
 - Grid proposals: when the scan lists a section under "Grid proposals" (heading + one row of equal items buried in wrappers), ask by name whether to convert it to a Grid with the items directly inside. Pass only the approved section IDs in confirmedGridIds. The plugin undoes any conversion that would move something and reports why. Report that too; do not rebuild the section by hand with other tools.
 - If a Grid conversion is not applied, report the reason and stop. NEVER imitate it with ungroup_nodes, move_node, or set_auto_layout layoutMode NONE. Ungrouping an Auto Layout row stacks its items in the parent, and pinning them with x/y leaves a frame that looks right but has no layout and no longer adapts.
 
+## 3b. Convert to Auto Layout / Grid — Scan, Ask, Then Apply (MANDATORY)
+- When the user asks to convert a static (free-positioned) design, selection or page to Auto Layout or Grid, use convert_layout — mode "auto_layout" or "grid" as the user asked:
+  1. **Scan** — convert_layout with dryRun: true (nodeId or the selection; nothing selected scans the whole page). Nothing is modified.
+  2. **Ask** — name each proposal and its layout, and say which layers cannot convert and why, in the user's language.
+  3. **Apply** — convert_layout without dryRun, with only the approved IDs in confirmedIds.
+- Hidden or empty layers the user wants removed first: run clean_layers' scan → ask → apply before converting.
+- A layer reported as not convertible stays as it is. NEVER force it with set_auto_layout, move_node or manual x/y — the tool refuses exactly when the result would look different.
+- If the apply result lists spacing values with no token, ask whether to keep the manual values or add tokens. Never create tokens without a yes.
+
 ## 4. HTML / URL → Figma Import (MANDATORY)
 - When the user shares an HTML file, a web page URL or website code and asks to convert, import or rebuild it in Figma, load the Html_Import_v1 skill with figma_skill and follow it in order:
   1. analyze_html (sections, copy, colours, typography, spacing, images and icons, Grid/Auto Layout recommendations); ask for a screenshot of the source if there is none
