@@ -6944,11 +6944,19 @@ async function setCornerRadius(params) {
 // Accepts a TextNode or a TextSublayer (sticky / shape-with-text).
 async function loadFontsForTextNode(target) {
   if (!target || !("fontName" in target)) return;
+  // Figma rejects a font it cannot load with no message at all (seen live), so
+  // name the font here or the caller only ever sees "undefined".
+  const load = async (fontName) => {
+    try {
+      await figma.loadFontAsync({ family: fontName.family, style: fontName.style });
+    } catch (err) {
+      throw new Error(
+        `The font "${fontName.family} ${fontName.style}" used by this text is not available. Install it or change the font before editing the text.`
+      );
+    }
+  };
   if (target.fontName !== figma.mixed) {
-    await figma.loadFontAsync({
-      family: target.fontName.family,
-      style: target.fontName.style,
-    });
+    await load(target.fontName);
     return;
   }
   const seen = new Set();
@@ -6956,7 +6964,7 @@ async function loadFontsForTextNode(target) {
     const key = `${segment.fontName.family}|${segment.fontName.style}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    await figma.loadFontAsync(segment.fontName);
+    await load(segment.fontName);
   }
 }
 
@@ -6974,69 +6982,223 @@ function safeFontName(node) {
 // the segments before the write and replay them over the new string.
 const PRESERVED_TEXT_PROPS = [
   "fontName",
+  "fontWeight",
   "fontSize",
   "fills",
   "fillStyleId",
+  "textStyleId",
   "textCase",
   "textDecoration",
   "letterSpacing",
   "lineHeight",
 ];
 
-function captureTextSegments(node) {
+function captureTextSegments(node, options) {
   try {
     const segments = node.getStyledTextSegments(PRESERVED_TEXT_PROPS);
-    // A single segment means uniform styling — Figma preserves that on its own.
+    // A single segment means uniform styling — Figma preserves that on its own,
+    // unless the caller needs the base style to lay bold ranges over.
+    if (options && options.includeUniform) return segments.length ? segments : null;
     return segments.length > 1 ? segments : null;
   } catch (err) {
     return null;
   }
 }
 
-async function restoreTextSegments(node, segments, previousLength) {
-  if (!segments || !segments.length || !previousLength) return false;
-  const length = node.characters.length;
-  if (!length) return false;
+// **bold**, <b>…</b> and <strong>…</strong> mark the ranges that should be bold.
+// Returns null when the text holds no complete marker pair, so ordinary copy
+// with a stray "**" is written exactly as given.
+function parseTextFormatting(text) {
+  if (typeof text !== "string" || !/\*\*|<(b|strong)>/i.test(text)) return null;
+  const pattern = /\*\*([\s\S]+?)\*\*|<(b|strong)>([\s\S]*?)<\/\2>/gi;
+  const bold = [];
+  let plain = "";
+  let last = 0;
+  let matched = false;
+  let match;
+  while ((match = pattern.exec(text))) {
+    matched = true;
+    plain += text.slice(last, match.index);
+    const inner = match[1] !== undefined ? match[1] : match[3];
+    const previous = bold[bold.length - 1];
+    if (inner.length && previous && previous.end === plain.length) {
+      previous.end += inner.length;
+    } else if (inner.length) {
+      bold.push({ start: plain.length, end: plain.length + inner.length });
+    }
+    plain += inner;
+    last = pattern.lastIndex;
+  }
+  if (!matched) return null;
+  return { text: plain + text.slice(last), bold };
+}
 
-  // Same length: replay the ranges verbatim. Different length: scale them, so a
-  // "$8.5K one-time" → "$22K one-time" edit keeps the bold amount bold.
-  const map = (index) =>
-    length === previousLength
-      ? Math.min(index, length)
-      : Math.min(Math.round((index / previousLength) * length), length);
+// Where an index of the old string lands in the new one. Text before the first
+// change keeps its index and text after the last change keeps its distance from
+// the end, so a style boundary next to unchanged words stays next to them. Only
+// a boundary inside the rewritten middle is scaled, then moved to the nearest
+// word edge so a style never splits a word.
+function createTextIndexMap(previous, next) {
+  const max = Math.min(previous.length, next.length);
+  let prefix = 0;
+  while (prefix < max && previous[prefix] === next[prefix]) prefix++;
+  let suffix = 0;
+  while (
+    suffix < max - prefix &&
+    previous[previous.length - 1 - suffix] === next[next.length - 1 - suffix]
+  ) {
+    suffix++;
+  }
+  const oldMiddleEnd = previous.length - suffix;
+  const newMiddleEnd = next.length - suffix;
 
-  for (const segment of segments) {
-    const start = map(segment.start);
-    // The final segment absorbs any trailing characters the mapping rounds off.
-    const end = segment.end >= previousLength ? length : map(segment.end);
-    if (end <= start) continue;
-    try {
-      await figma.loadFontAsync(segment.fontName);
+  return (index) => {
+    if (index <= prefix) return index;
+    if (index >= oldMiddleEnd) return index - oldMiddleEnd + newMiddleEnd;
+    const scaled =
+      prefix +
+      Math.round(((index - prefix) / (oldMiddleEnd - prefix)) * (newMiddleEnd - prefix));
+    return snapToWordEdge(next, scaled, prefix, newMiddleEnd);
+  };
+}
+
+function snapToWordEdge(text, index, min, max) {
+  const insideWord = (i) => i > 0 && i < text.length && /\S/.test(text[i - 1]) && /\S/.test(text[i]);
+  if (!insideWord(index)) return index;
+  for (let step = 1; index - step >= min || index + step <= max; step++) {
+    if (index - step >= min && !insideWord(index - step)) return index - step;
+    if (index + step <= max && !insideWord(index + step)) return index + step;
+  }
+  return index;
+}
+
+// Apply one captured segment's style to a range. A text style carries size,
+// line height, spacing and case: replaying those as raw values would detach the
+// range from the design system. So a styled range is re-linked to its style,
+// and only the font the designer set on top of it (e.g. Bold) is replayed.
+async function applySegmentStyle(node, start, end, segment, warnings) {
+  try {
+    await figma.loadFontAsync(segment.fontName);
+    if (segment.textStyleId && typeof node.setRangeTextStyleIdAsync === "function") {
+      await node.setRangeTextStyleIdAsync(start, end, segment.textStyleId);
+      node.setRangeFontName(start, end, segment.fontName);
+    } else {
       node.setRangeFontName(start, end, segment.fontName);
       node.setRangeFontSize(start, end, segment.fontSize);
       node.setRangeTextCase(start, end, segment.textCase);
       node.setRangeTextDecoration(start, end, segment.textDecoration);
       node.setRangeLetterSpacing(start, end, segment.letterSpacing);
       node.setRangeLineHeight(start, end, segment.lineHeight);
-      // A bound fill style outranks raw fills; restoring both would drop the
-      // style link and hard-code the color.
-      if (segment.fillStyleId) {
-        node.setRangeFillStyleId(start, end, segment.fillStyleId);
-      } else if (segment.fills) {
-        node.setRangeFills(start, end, segment.fills);
-      }
-    } catch (err) {
-      console.warn(
-        `Could not restore styling for range ${start}-${end} on "${node.name}":`,
-        err && err.message
-      );
     }
+    // A bound fill style outranks raw fills; restoring both would drop the
+    // style link and hard-code the color.
+    if (segment.fillStyleId) {
+      if (typeof node.setRangeFillStyleIdAsync === "function") {
+        await node.setRangeFillStyleIdAsync(start, end, segment.fillStyleId);
+      } else {
+        node.setRangeFillStyleId(start, end, segment.fillStyleId);
+      }
+    } else if (segment.fills) {
+      node.setRangeFills(start, end, segment.fills);
+    }
+  } catch (err) {
+    warnings.push(
+      `Styling for characters ${start}–${end} of "${node.name}" could not be restored: ${err && err.message ? err.message : String(err)}`
+    );
+  }
+}
+
+async function restoreTextSegments(node, segments, previousText, warnings) {
+  if (!segments || !segments.length || !previousText) return false;
+  const nextText = node.characters;
+  if (!nextText.length) return false;
+
+  const map = createTextIndexMap(previousText, nextText);
+  for (const segment of segments) {
+    const start = segment.start === 0 ? 0 : map(segment.start);
+    // The final segment absorbs whatever follows the last mapped boundary.
+    const end = segment.end >= previousText.length ? nextText.length : map(segment.end);
+    if (end <= start) continue;
+    await applySegmentStyle(node, start, end, segment, warnings);
   }
   return true;
 }
 
+// Loading candidate styles is the only reliable test: loadFontAsync rejects for
+// a style the family does not have.
+async function resolveBoldFont(fontName) {
+  const italic = /italic/i.test(fontName.style);
+  const candidates = italic
+    ? ["Bold Italic", "SemiBold Italic", "Semi Bold Italic", "ExtraBold Italic"]
+    : ["Bold", "SemiBold", "Semi Bold", "ExtraBold", "Extra Bold"];
+  for (const style of candidates) {
+    const font = { family: fontName.family, style };
+    try {
+      await figma.loadFontAsync(font);
+      return font;
+    } catch (err) {
+      // Not installed — try the next weight.
+    }
+  }
+  return null;
+}
+
+// Lay the marked ranges over the node's own hierarchy: the lightest existing
+// segment is the base for the whole string, and the node's own bold segment (its
+// font, size and colour) styles each marked range. A node with no bold segment
+// gets its family's Bold.
+async function applyMarkupFormatting(node, segments, boldRanges, warnings) {
+  const length = node.characters.length;
+  if (!length) return;
+
+  const weightOf = (segment) => (typeof segment.fontWeight === "number" ? segment.fontWeight : 400);
+  const list = segments || [];
+  const base = list.reduce(
+    (best, segment) =>
+      !best ||
+      weightOf(segment) < weightOf(best) ||
+      (weightOf(segment) === weightOf(best) && segment.end - segment.start > best.end - best.start)
+        ? segment
+        : best,
+    null
+  );
+  const heaviest = list.reduce((best, segment) => (!best || weightOf(segment) > weightOf(best) ? segment : best), null);
+  const boldSegment = base && heaviest && weightOf(heaviest) > weightOf(base) ? heaviest : null;
+
+  if (base) await applySegmentStyle(node, 0, length, base, warnings);
+  if (!boldRanges.length) return;
+
+  let boldFont = null;
+  if (!boldSegment) {
+    const baseFont = base ? base.fontName : node.fontName !== figma.mixed ? node.fontName : null;
+    boldFont = baseFont ? await resolveBoldFont(baseFont) : null;
+    if (!boldFont) {
+      warnings.push(
+        `No bold style of "${baseFont ? baseFont.family : "this font"}" could be loaded, so the marked text keeps the regular weight.`
+      );
+      return;
+    }
+  }
+
+  for (const range of boldRanges) {
+    const end = Math.min(range.end, length);
+    if (end <= range.start) continue;
+    if (boldSegment) {
+      await applySegmentStyle(node, range.start, end, boldSegment, warnings);
+    } else {
+      try {
+        node.setRangeFontName(range.start, end, boldFont);
+      } catch (err) {
+        warnings.push(
+          `Bold could not be applied to characters ${range.start}–${end} of "${node.name}": ${err && err.message ? err.message : String(err)}`
+        );
+      }
+    }
+  }
+}
+
 async function setTextContent(params) {
-  const { nodeId, text } = params || {};
+  const { nodeId, text, formatting = "markdown" } = params || {};
 
   if (!nodeId) {
     throw new Error("Missing nodeId parameter");
@@ -7044,6 +7206,10 @@ async function setTextContent(params) {
 
   if (text === undefined) {
     throw new Error("Missing text parameter");
+  }
+
+  if (formatting !== "markdown" && formatting !== "plain") {
+    throw new Error(`formatting must be "markdown" or "plain", not "${formatting}"`);
   }
 
   const node = await getNodeByIdSafe(nodeId);
@@ -7058,23 +7224,36 @@ async function setTextContent(params) {
   try {
     await loadFontsForTextNode(node);
 
-    const previousLength = node.characters.length;
-    const segments = captureTextSegments(node);
+    const previousText = node.characters;
+    const parsed = formatting === "markdown" ? parseTextFormatting(text) : null;
+    const intended = parsed ? parsed.text : text;
+    const warnings = [];
+    let mode;
 
-    await setCharacters(node, text);
+    if (parsed) {
+      const segments = captureTextSegments(node, { includeUniform: true });
+      await setCharacters(node, intended);
+      await applyMarkupFormatting(node, segments, parsed.bold, warnings);
+      mode = "markup";
+    } else {
+      const segments = captureTextSegments(node);
+      await setCharacters(node, intended);
+      mode = (await restoreTextSegments(node, segments, previousText, warnings)) ? "preserved" : "uniform";
+    }
 
-    const stylingPreserved = await restoreTextSegments(
-      node,
-      segments,
-      previousLength
-    );
+    if (node.characters !== intended) {
+      warnings.push(`Figma did not accept the new text for "${node.name}"; it still reads "${node.characters}".`);
+    }
 
     return {
       id: node.id,
       name: node.name,
       characters: node.characters,
       fontName: safeFontName(node),
-      stylingPreserved,
+      stylingPreserved: mode !== "uniform",
+      formatting: mode,
+      boldRanges: parsed ? parsed.bold : [],
+      warnings,
     };
   } catch (error) {
     throw new Error(`Error setting text content: ${error.message}`);
@@ -7867,9 +8046,10 @@ async function setMultipleTextContents(params) {
         // node, a timeout, a closed plugin) left the text stranded orange —
         // and the JSON round-trip dropped bound colour variables even when it
         // succeeded. Text writes now leave colour alone.
-        await setTextContent({
+        const written = await setTextContent({
           nodeId: replacement.nodeId,
-          text: replacement.text
+          text: replacement.text,
+          formatting: replacement.formatting || params.formatting || "markdown"
         });
 
         console.log(`Successfully replaced text in node: ${replacement.nodeId}`);
@@ -7877,7 +8057,9 @@ async function setMultipleTextContents(params) {
           success: true,
           nodeId: replacement.nodeId,
           originalText: originalText,
-          translatedText: replacement.text
+          translatedText: written.characters,
+          formatting: written.formatting,
+          warnings: written.warnings
         };
       } catch (error) {
         console.error(`Error replacing text in node ${replacement.nodeId}: ${error.message}`);

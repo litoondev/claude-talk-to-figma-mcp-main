@@ -12,23 +12,44 @@ export function registerTextTools(server: McpServer): void {
   // Set Text Content Tool
   server.tool(
     "set_text_content",
-    "Set the text content of an existing text node in Figma",
+    "Set the text content of an existing text node in Figma, keeping its mixed styling. When part of the new text " +
+      "must be bold (a bold lead-in, a bold price), wrap that part in **double asterisks** (or <b>/<strong>), e.g. " +
+      "\"**Braces work at any age,** though treatment can take longer.\" The markers are removed and only those ranges " +
+      "get the node's own bold style; the rest keeps its regular style and text style link. Without markers, styles " +
+      "stay attached to the unchanged start and end of the text, so rewriting the middle can move a style boundary: " +
+      "send markers whenever the weight hierarchy matters.",
     {
       nodeId: z.string().describe("The ID of the text node to modify"),
-      text: z.string().describe("New text content"),
+      text: z.string().describe("New text content. **bold**, <b>bold</b> or <strong>bold</strong> marks bold ranges."),
+      formatting: z
+        .enum(["markdown", "plain"])
+        .optional()
+        .describe("\"markdown\" (default) reads **bold** / <b> / <strong>; \"plain\" writes the text exactly as given, asterisks included."),
     },
-    async ({ nodeId, text }) => {
+    async ({ nodeId, text, formatting }) => {
       try {
         const result = await sendCommandToFigma("set_text_content", {
           nodeId,
           text,
+          ...(formatting ? { formatting } : {}),
         });
-        const typedResult = result as { name: string };
+        const typedResult = result as {
+          name: string;
+          characters?: string;
+          formatting?: "markup" | "preserved" | "uniform";
+          boldRanges?: Array<{ start: number; end: number }>;
+          warnings?: string[];
+        };
+        const lines = [`Updated text content of node "${typedResult.name}" to "${typedResult.characters ?? text}"`];
+        if (typedResult.formatting === "markup") {
+          lines.push(`Bold applied to ${typedResult.boldRanges?.length ?? 0} marked range(s).`);
+        }
+        for (const warning of typedResult.warnings ?? []) lines.push(`⚠ ${warning}`);
         return {
           content: [
             {
               type: "text",
-              text: `Updated text content of node "${typedResult.name}" to "${text}"`,
+              text: lines.join("\n"),
             },
           ],
         };
@@ -48,7 +69,8 @@ export function registerTextTools(server: McpServer): void {
   // Set Multiple Text Contents Tool
   server.tool(
     "set_multiple_text_contents",
-    "Set multiple text contents parallelly in a node",
+    "Set multiple text contents in a node, keeping each text node's mixed styling. Mark bold parts with " +
+      "**double asterisks** (or <b>/<strong>) exactly as for set_text_content; only those ranges get the node's bold style.",
     {
       nodeId: z
         .string()
@@ -57,12 +79,16 @@ export function registerTextTools(server: McpServer): void {
         .array(
           z.object({
             nodeId: z.string().describe("The ID of the text node"),
-            text: z.string().describe("The replacement text"),
+            text: z.string().describe("The replacement text. **bold**, <b> or <strong> marks bold ranges."),
           })
         ))
         .describe("Array of text node IDs and their replacement texts"),
+      formatting: z
+        .enum(["markdown", "plain"])
+        .optional()
+        .describe("\"markdown\" (default) reads **bold** / <b> / <strong>; \"plain\" writes every text exactly as given."),
     },
-    async ({ nodeId, text }, extra) => {
+    async ({ nodeId, text, formatting }, extra) => {
       try {
         if (!text || text.length === 0) {
           return {
@@ -89,6 +115,7 @@ export function registerTextTools(server: McpServer): void {
         const result = await sendCommandToFigma("set_multiple_text_contents", {
           nodeId,
           text,
+          ...(formatting ? { formatting } : {}),
         });
 
         // Cast the result to a specific type to work with it safely
@@ -105,6 +132,8 @@ export function registerTextTools(server: McpServer): void {
             error?: string;
             originalText?: string;
             translatedText?: string;
+            formatting?: "markup" | "preserved" | "uniform";
+            warnings?: string[];
           }>;
         }
 
@@ -128,6 +157,13 @@ export function registerTextTools(server: McpServer): void {
         if (failedResults.length > 0) {
           detailedResponse = `\n\nNodes that failed:\n${failedResults.map(item =>
             `- ${item.nodeId}: ${item.error || "Unknown error"}`
+          ).join('\n')}`;
+        }
+        // A write can succeed while its styling does not; say so per node.
+        const warned = detailedResults.filter(item => item.success && item.warnings && item.warnings.length);
+        if (warned.length > 0) {
+          detailedResponse += `\n\nFormatting warnings:\n${warned.map(item =>
+            item.warnings!.map(w => `- ${item.nodeId}: ${w}`).join('\n')
           ).join('\n')}`;
         }
 

@@ -465,7 +465,9 @@ items clearly identified.`,
        suitable
 
 6. Mofifying existing elements:
-  - use set_text_content() to modify text content.
+  - use set_text_content() to modify text content. When the text mixes weights
+    (a bold lead-in, a bold price), wrap the bold part in **double asterisks**;
+    the markers are removed and only that part is bold.
 
 7. Visual Hierarchy:
    - Position elements in logical reading order (top to bottom)

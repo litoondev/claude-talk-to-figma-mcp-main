@@ -40,3 +40,10 @@ Read at the start of every change. Sweep at QA.
 - **Root cause:** the items were moved into the section before it became a Grid. Figma auto-placed the first card beside the heading, then refused to span the heading over it. The harness mock stored `gridColumnSpan` as a plain field, so the order of steps was never tested.
 - **Guard:** when a feature depends on an API's *constraints* (overlap, count limits, sizing rules), the mock enforces the constraint with the API's own error text. Before calling a Figma structural change done, run the real function once on a temporary duplicate through the relay (`execute_code`, clone, delete in `finally`) with the user's permission.
 - **QA test:** a harness-fidelity test asserts the mock refuses what Figma refuses. The live temporary-copy trace must report `ok: true`.
+
+## L6 — An error path that reads `.message` of whatever was thrown
+
+- **Looked like:** a batch text replacement test left its first node unchanged. The node used Lato Bold, `loadFontAsync` for it rejected, and `setTextContent`'s catch read `error.message` of `undefined`. The real cause, a missing font, became a TypeError, and the whole replacement failed with a message that named nothing.
+- **Root cause:** Figma rejects some API promises with no Error object at all. Confirmed live: `loadFontAsync` for a style the family does not have rejects with a value whose message prints as "undefined". Catch blocks written for Error objects either crash or report "undefined".
+- **Guard:** wrap Figma API calls whose failure the user has to understand (font loads, style links) and rethrow an Error that names what failed. In a catch, never read `err.message` bare; use `err && err.message ? err.message : String(err)`.
+- **QA test:** the harness mock rejects the way Figma does (`Promise.reject(undefined)`), and each feature has one test asserting the user-facing message names the font, style or node.

@@ -75,8 +75,8 @@ Complete reference of the tools Claude can use to interact with Figma.
 
 | Command | Purpose | Usage example |
 |---------|---------|---------------|
-| `set_text_content` | Update text | Copy changes |
-| `set_multiple_text_contents` | Batch update | Multi-element editing |
+| `set_text_content` | Update text, keeping mixed styles; `**bold**` marks the bold part | Copy changes |
+| `set_multiple_text_contents` | Batch update, same `**bold**` rule | Multi-element editing |
 | `set_text_align` | H/V alignment | Align text or fix RTL languages |
 | `set_font_name` | Typography | Apply brand font |
 | `set_font_size` | Text size | Create hierarchy |
