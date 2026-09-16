@@ -1212,6 +1212,14 @@ of those tools get used. A profile trims what is advertised:
 Nothing is ever lost. A tool a profile withholds is still callable through
 `figma_batch` by name.
 
+**Comments are an exception to `standard`.** The eight REST comment and account
+tools (`get_file_comments`, `get_my_comments`, `reply_to_comment`, …) are
+withheld only while no `FIGMA_ACCESS_TOKEN` is configured. Setting a token is
+what tells the server you intend to use comments, so it advertises them — about
+1,800 extra tokens per message. Without that, the model is never shown the tools
+and will tell you it cannot read Figma comments, which is true of what it can
+see but not of what the server can do.
+
 Set it in the extension's settings (**Tool profile**), or with the
 `FIGMA_MCP_PROFILE` environment variable for a manual install.
 

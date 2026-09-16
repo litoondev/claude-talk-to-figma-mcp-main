@@ -3,7 +3,7 @@
   "name": "claude-talk-to-figma-mcp",
   "display_name": "Claude Talk to Figma",
   "description": "A Model Context Protocol (MCP) plugin that allows Claude Desktop and other AI tools to interact directly with Figma, enabling powerful AI-assisted design capabilities.",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": {
     "name": "Xúlio Zé",
     "url": "https://github.com/arinspunk"
@@ -26,7 +26,7 @@
     "figma_tool_profile": {
       "type": "string",
       "title": "Tool profile",
-      "description": "How many tools to advertise to the model. The tool list is re-sent on every request, so a smaller profile costs fewer tokens per message and leaves more context for the design. 'core' (~48 tools) covers layout, text, colour, variables and the responsive workflow. 'standard' (~87 tools, default) adds everything except FigJam, REST comments and activity tracking. 'full' advertises all 115. Nothing is ever lost: a withheld tool is still callable through figma_batch.",
+      "description": "How many tools to advertise to the model. The tool list is re-sent on every request, so a smaller profile costs fewer tokens per message and leaves more context for the design. 'core' (~48 tools) covers layout, text, colour, variables and the responsive workflow. 'standard' (~87 tools, default) adds everything except FigJam and activity tracking; the REST comment tools are included whenever a Figma access token is configured. 'full' advertises all 115. Nothing is ever lost: a withheld tool is still callable through figma_batch.",
       "default": "standard",
       "required": false
     },

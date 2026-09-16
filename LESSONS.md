@@ -47,3 +47,11 @@ Read at the start of every change. Sweep at QA.
 - **Root cause:** Figma rejects some API promises with no Error object at all. Confirmed live: `loadFontAsync` for a style the family does not have rejects with a value whose message prints as "undefined". Catch blocks written for Error objects either crash or report "undefined".
 - **Guard:** wrap Figma API calls whose failure the user has to understand (font loads, style links) and rethrow an Error that names what failed. In a catch, never read `err.message` bare; use `err && err.message ? err.message : String(err)`.
 - **QA test:** the harness mock rejects the way Figma does (`Promise.reject(undefined)`), and each feature has one test asserting the user-facing message names the font, style or node.
+
+## L7 — A parser that validated input it was only meant to pass through
+
+- **Looked like:** adding Figma-URL support to the comment tools broke 8 existing integration tests. `reply_to_comments` returned "Could not read a Figma file key from \"FILE_A\"" for a file key that had worked before the change.
+- **Root cause:** `toFileKey` decided what a *valid* bare key looks like (`[A-Za-z0-9]{10,}`) and rejected everything else. The job was only to extract a key when given a URL. Real Figma keys match that shape, so the pattern looked right, but test fixtures, older key forms and any key with punctuation do not — and the rejection happened locally, before the API ever got a chance to give an authoritative answer.
+- **Guard:** a parser added to accept a *new* input form must not become a validator of the old one. Branch on the new form (does it look like a URL?) and pass anything else through untouched. Let the remote service be the authority on whether an identifier exists.
+- **QA test:** run the full suite, not just the new file. Any new input-parsing helper gets one test asserting that an unrecognised-but-previously-working value is passed through unchanged.
+

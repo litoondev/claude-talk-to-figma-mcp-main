@@ -17,7 +17,29 @@
  * anything omitted is still reachable through `figma_batch`.
  */
 
+import { hasFigmaToken } from "../utils/figma-rest";
+
 export type ProfileName = "core" | "standard" | "full";
+
+/**
+ * The REST comment/account tools.
+ *
+ * These are withheld from `standard` for schema cost, but that cost only buys
+ * anything when the user has no way to call them. When FIGMA_ACCESS_TOKEN is
+ * configured the user has explicitly set comments up, and hiding the tools made
+ * the model report — correctly, from what it could see — that it had no way to
+ * read Figma comments. So the exclusion is conditional on the token.
+ */
+export const REST_COMMENT_TOOLS: readonly string[] = [
+  "get_figma_account",
+  "get_current_file",
+  "list_figma_files",
+  "get_file_comments",
+  "get_my_comments",
+  "reply_to_comment",
+  "reply_to_comments",
+  "delete_comment",
+];
 
 /**
  * The minimum set that covers the common loop: inspect the design system,
@@ -113,15 +135,9 @@ export const STANDARD_EXCLUDED: readonly string[] = [
   "create_shape_with_text",
   "create_connector",
   "create_section",
-  // REST comments / account
-  "get_figma_account",
-  "get_current_file",
-  "list_figma_files",
-  "get_file_comments",
-  "get_my_comments",
-  "reply_to_comment",
-  "reply_to_comments",
-  "delete_comment",
+  // REST comments / account — only when no FIGMA_ACCESS_TOKEN is configured;
+  // see REST_COMMENT_TOOLS and makeToolFilter.
+  ...REST_COMMENT_TOOLS,
   // activity tracking
   "get_activity_log",
   "set_activity_overlay",
@@ -159,5 +175,9 @@ export function makeToolFilter(profile: ProfileName = getProfile()): (name: stri
     return (name) => allowed.has(name);
   }
   const denied = new Set(STANDARD_EXCLUDED);
+  // A configured token is the signal that this session intends to use comments.
+  if (hasFigmaToken()) {
+    for (const name of REST_COMMENT_TOOLS) denied.delete(name);
+  }
   return (name) => !denied.has(name);
 }

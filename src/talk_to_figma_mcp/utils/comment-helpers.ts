@@ -50,6 +50,19 @@ export interface ThreadFilterOptions {
   since?: string;
   /** Only threads whose last message is NOT from `authorId` (i.e. awaiting me). */
   onlyAwaitingReply?: boolean;
+  /**
+   * Single thread selector: keep only the thread whose root — or any reply —
+   * has this comment id. This is what a pasted comment permalink resolves to.
+   */
+  commentId?: string;
+  /**
+   * Only threads pinned to this node id (colon form, e.g. "2971:45373").
+   *
+   * Matches the pin exactly. A comment pinned to a child of the node is pinned
+   * to the child, so it will not match the parent frame — Figma records one
+   * node per pin and the REST payload carries no ancestry.
+   */
+  nodeId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -168,6 +181,17 @@ export function threadInvolvesAuthor(
   return thread.replies.some((reply) => reply.user?.id === authorId);
 }
 
+/**
+ * Is this comment id the thread's root or one of its replies?
+ *
+ * Figma's comment permalinks can point at a reply, so matching the root alone
+ * would drop the thread the user just pasted.
+ */
+export function threadHasComment(thread: CommentThread, commentId: string): boolean {
+  if (thread.rootId === commentId) return true;
+  return thread.replies.some((reply) => reply.id === commentId);
+}
+
 /** Apply the standard set of thread filters. */
 export function filterThreads(
   threads: readonly CommentThread[],
@@ -179,11 +203,20 @@ export function filterThreads(
     includeResolved = false,
     since,
     onlyAwaitingReply = false,
+    commentId,
+    nodeId,
   } = options;
 
   const sinceMs = since ? Date.parse(since) : undefined;
 
   return threads.filter((thread) => {
+    // Checked before `includeResolved`: asking for one specific thread by id
+    // means you want that thread, resolved or not.
+    if (commentId && !threadHasComment(thread, commentId)) return false;
+    if (commentId) return true;
+
+    if (nodeId && thread.nodeId !== nodeId) return false;
+
     if (!includeResolved && thread.resolved) return false;
     if (authorId && !threadInvolvesAuthor(thread, authorId, authorScope)) return false;
 

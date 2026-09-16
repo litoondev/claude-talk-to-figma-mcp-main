@@ -16,6 +16,7 @@ import {
   type FigmaComment,
   type FigmaFileSummary,
 } from "../utils/figma-rest";
+import { parseFigmaUrl, toFileKey } from "../utils/figma-url";
 import {
   filterThreads,
   formatThreadDigest,
@@ -92,9 +93,16 @@ async function resolveConnectedFile(): Promise<ResolvedFile> {
   return { key: response.fileKey, name: response.fileName ?? undefined };
 }
 
-/** Use the caller's fileKey when given, otherwise fall back to the open file. */
+/**
+ * Use the caller's fileKey when given, otherwise fall back to the open file.
+ *
+ * Accepts a full Figma URL as well as a bare key, because that is what gets
+ * pasted into chat. Throws with a readable message on an unparseable string
+ * rather than sending it to the REST API to come back as a bare 404.
+ */
 async function fileKeyOrConnected(fileKey?: string): Promise<ResolvedFile> {
-  if (fileKey?.trim()) return { key: fileKey.trim() };
+  const key = toFileKey(fileKey);
+  if (key) return { key };
   return resolveConnectedFile();
 }
 
@@ -122,7 +130,11 @@ async function resolveFileScope(input: {
     if (!existing || (!existing.name && file.name)) byKey.set(file.key, file);
   };
 
-  for (const key of input.fileKeys ?? []) add({ key });
+  for (const entry of input.fileKeys ?? []) {
+    // Entries may be pasted URLs rather than bare keys.
+    const key = toFileKey(entry);
+    if (key) add({ key });
+  }
 
   const projectIds = [...(input.projectIds ?? [])];
 
@@ -284,7 +296,25 @@ export function registerCommentTools(server: McpServer): void {
         .string()
         .optional()
         .describe(
-          "Figma file key from figma.com/design/<FILE_KEY>/<name>. Omit to use the file currently open in Figma."
+          "Figma file key from figma.com/design/<FILE_KEY>/<name>, or the full URL. Omit to use the file currently open in Figma."
+        ),
+      url: z
+        .string()
+        .optional()
+        .describe(
+          "A pasted Figma link. The file key is read from it, and a numeric '#<id>' fragment (a comment permalink) narrows the result to that single thread. Use this when the user pastes a link and says 'read this comment'."
+        ),
+      commentId: z
+        .string()
+        .optional()
+        .describe(
+          "Return only the thread containing this comment id (root or reply). Usually supplied via `url` instead."
+        ),
+      nodeId: z
+        .string()
+        .optional()
+        .describe(
+          "Only threads pinned to this node, e.g. '2971:45373'. Taken from a URL's node-id automatically when `url` is given without a comment fragment. Matches the pin exactly — a comment on a child of a frame is pinned to the child, not the frame."
         ),
       includeResolved: coerceBoolean
         .optional()
@@ -306,9 +336,21 @@ export function registerCommentTools(server: McpServer): void {
         .optional()
         .describe("'text' for a readable digest (default), 'json' for structured data."),
     },
-    async ({ fileKey, includeResolved, authorId, authorScope, since, format = "text" }) => {
+    async ({ fileKey, url, commentId, nodeId, includeResolved, authorId, authorScope, since, format = "text" }) => {
       try {
-        const target = await fileKeyOrConnected(fileKey);
+        // A pasted link supplies both the file and, for a comment permalink,
+        // the thread — so "read this comment" needs no further questions.
+        const fromUrl = url ? parseFigmaUrl(url) : {};
+        const target = await fileKeyOrConnected(fileKey ?? fromUrl.fileKey);
+        const wantedComment = commentId ?? fromUrl.commentId;
+        // A link's node-id only scopes the result when it is not already
+        // narrowed to one thread by a comment fragment.
+        const wantedNode = nodeId ?? (wantedComment ? undefined : fromUrl.nodeId);
+
+        if (url && !fromUrl.fileKey && !fileKey) {
+          logger.warn(`No file key found in the supplied URL: ${url}`);
+        }
+
         const comments = await listFileComments(target.key);
         const all = groupIntoThreads(comments, target.name);
         const threads = filterThreads(all, {
@@ -316,12 +358,40 @@ export function registerCommentTools(server: McpServer): void {
           authorScope,
           includeResolved,
           since,
+          commentId: wantedComment,
+          nodeId: wantedNode,
         });
 
         const where = target.name ? `${target.name} (${target.key})` : target.key;
-        const source = fileKey ? "" : " — resolved from the file open in Figma";
+        const source = fileKey || fromUrl.fileKey ? "" : " — resolved from the file open in Figma";
+
+        // A permalink that matches nothing is the one case worth an explicit
+        // explanation: silently returning "0 threads" reads like an empty file.
+        if (wantedNode && threads.length === 0) {
+          return ok(
+            `⚠️ No comments are pinned to node ${wantedNode} in ${where}.\n\n` +
+              `The file has ${all.length} thread(s) / ${comments.length} comment(s). ` +
+              `Pins match one node exactly, so a comment placed on a child of this frame ` +
+              `is recorded against the child. Call get_file_comments without nodeId to see all threads.`
+          );
+        }
+
+        if (wantedComment && threads.length === 0) {
+          return ok(
+            `⚠️ No comment with id ${wantedComment} was found in ${where}.\n\n` +
+              `The file has ${all.length} thread(s) / ${comments.length} comment(s). ` +
+              `The comment may have been deleted, or the link may point at a different file. ` +
+              `Call get_file_comments without a url/commentId to list what is there.`
+          );
+        }
+
+        const scope = wantedComment
+          ? ` for comment ${wantedComment}`
+          : wantedNode
+            ? ` pinned to node ${wantedNode}`
+            : "";
         const header =
-          `✅ ${threads.length} thread(s) matched in ${where}${source} ` +
+          `✅ ${threads.length} thread(s) matched${scope} in ${where}${source} ` +
           `(${all.length} total thread(s), ${comments.length} comment(s)).`;
 
         const body =
@@ -331,7 +401,7 @@ export function registerCommentTools(server: McpServer): void {
 
         return ok(`${header}\n\n${body}`);
       } catch (error) {
-        return fail(`Error reading comments for file ${fileKey}`, error);
+        return fail(`Error reading comments for file ${fileKey ?? url ?? "(open file)"}`, error);
       }
     }
   );
@@ -354,7 +424,7 @@ export function registerCommentTools(server: McpServer): void {
         .describe("Project ids to include."),
       fileKeys: coerceJson(z.array(z.string()))
         .optional()
-        .describe("Explicit file keys to include, in addition to any team/project expansion."),
+        .describe("Explicit file keys (or full Figma URLs) to include, in addition to any team/project expansion."),
       authorId: z
         .string()
         .optional()
