@@ -346,6 +346,85 @@
         cursor: pointer;
       }
       .mcp-plugin__link:hover { opacity: 1; }
+
+      /* ── Command history & reuse ───────────────────────────────────────── */
+      .mcp-plugin__activity-row {
+        transition: background-color 0.15s ease;
+      }
+      .mcp-plugin__activity-row.has-command {
+        cursor: pointer;
+      }
+      .mcp-plugin__activity-row.has-command:hover {
+        background-color: rgba(115, 35, 146, 0.08);
+      }
+      .dark .mcp-plugin__activity-row.has-command:hover {
+        background-color: rgba(84, 103, 247, 0.12);
+      }
+      .mcp-plugin__activity-row.has-command::after {
+        content: attr(data-copy-hint);
+        position: absolute;
+        bottom: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        background-color: #223005;
+        color: #fff;
+        padding: 4px 8px;
+        border-radius: 4px;
+        font-size: 9px;
+        font-weight: normal;
+        white-space: nowrap;
+        opacity: 0;
+        visibility: hidden;
+        transition: opacity 0.15s, visibility 0.15s;
+        pointer-events: none;
+        z-index: 100;
+      }
+      .dark .mcp-plugin__activity-row.has-command::after {
+        background-color: #3d3d3d;
+      }
+      .mcp-plugin__activity-row.has-command:hover::after {
+        opacity: 1;
+        visibility: visible;
+      }
+      .mcp-plugin__activity-row {
+        position: relative;
+      }
+
+      /* ── Recent commands quick access ──────────────────────────────────── */
+      .mcp-plugin__recent-command-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 4px 8px;
+        border-radius: 3px;
+        font-size: 10px;
+        background: #fff;
+        border: 1px solid #ddd;
+        color: #400B55;
+        cursor: pointer;
+        transition: all 0.15s ease;
+        white-space: nowrap;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .dark .mcp-plugin__recent-command-btn {
+        background: #2a2a2a;
+        border-color: #444;
+        color: #ddd;
+      }
+      .mcp-plugin__recent-command-btn:hover {
+        background: #732392;
+        color: #fff;
+        border-color: #732392;
+      }
+      .dark .mcp-plugin__recent-command-btn:hover {
+        background: #5467F7;
+        border-color: #5467F7;
+        color: #fff;
+      }
+      .mcp-plugin__recent-command-btn::before {
+        content: "📋";
+        font-size: 9px;
+      }
     </style>
   </head>
   <body class="dark">
@@ -400,6 +479,13 @@
               <span class="dot"></span><span id="activity-chip-text">Idle</span>
             </span>
             <button id="btn-clear-activity" class="mcp-plugin__link" type="button">Clear</button>
+          </div>
+
+          <div id="recent-commands" class="mcp-plugin__recent-commands" style="display: none; margin-bottom: 8px; padding: 8px; border-radius: 4px; background: rgba(115, 35, 146, 0.06); border-left: 3px solid #732392;">
+            <div style="font-size: 10px; font-weight: 600; margin-bottom: 6px; opacity: 0.7; text-transform: uppercase;">📌 Recent Commands</div>
+            <div id="recent-commands-list" style="display: flex; flex-wrap: wrap; gap: 4px;">
+              <!-- Populated dynamically -->
+            </div>
           </div>
 
           <div id="activity-list" class="mcp-plugin__activity-list">
@@ -478,6 +564,9 @@
           // Rendered activity entries, newest last. Bounded so a long session
           // cannot grow the panel's DOM without limit.
           this.activity = { entries: [], max: 100, elapsedTimer: null };
+
+          // Track unique recent commands for quick access (latest first, max 10)
+          this.recentCommands = { list: [], max: 10 };
 
           this.init();
         }
@@ -734,12 +823,32 @@
           }
           this.activity.state = state || this.activity.state;
 
+          // Track completed commands for quick access
+          if (entry.command && entry.kind === "completed") {
+            this.trackRecentCommand(entry.command);
+          }
+
           this.renderActivity();
           this.renderActivityChip();
         }
 
+        /**
+         * Track a command in the recent commands list (no duplicates, most recent first)
+         */
+        trackRecentCommand(command) {
+          // Remove if already exists
+          this.recentCommands.list = this.recentCommands.list.filter(c => c !== command);
+          // Add to front
+          this.recentCommands.list.unshift(command);
+          // Limit to max
+          if (this.recentCommands.list.length > this.recentCommands.max) {
+            this.recentCommands.list.pop();
+          }
+        }
+
         clearActivity() {
           this.activity.entries = [];
+          this.recentCommands.list = []; // Also clear recent commands
           this.renderActivity();
         }
 
@@ -781,7 +890,13 @@
                 (names.length > 4 ? ` +${names.length - 4} more` : "") + "</span>"
               : "";
 
-            return `<div class="mcp-plugin__activity-row ${this.escapeHtml(e.kind)}">` +
+            // Add class and data attribute if command exists (for click to copy)
+            const hasCommand = e.command && (e.kind === "completed" || e.kind === "started");
+            const classAttr = hasCommand ? ` has-command` : "";
+            const dataAttr = hasCommand ? ` data-copy-hint="Click to copy command"` : "";
+            const dataCommand = hasCommand ? ` data-command="${this.escapeHtml(e.command)}"` : "";
+
+            return `<div class="mcp-plugin__activity-row ${this.escapeHtml(e.kind)}${classAttr}"${dataAttr}${dataCommand}>` +
               `<span class="t">${this.formatClock(e.ts)}</span>` +
               `<span class="i">${icons[e.kind] || "·"}</span>` +
               `<span class="m">${this.escapeHtml(e.message)}</span>` +
@@ -790,8 +905,68 @@
             "</div>";
           }).join("");
 
+          // Add click handlers to rows with commands
+          this.ui.activityList.querySelectorAll(".mcp-plugin__activity-row.has-command").forEach((row) => {
+            row.addEventListener("click", (e) => {
+              const command = row.getAttribute("data-command");
+              if (command) {
+                this.copyCommandToClipboard(command);
+              }
+            });
+          });
+
+          // Render recent commands panel
+          this.renderRecentCommands();
+
           // Pin to the newest entry.
           this.ui.activityList.scrollTop = this.ui.activityList.scrollHeight;
+        }
+
+        /**
+         * Render the recent commands quick-access panel
+         */
+        renderRecentCommands() {
+          const recentPanel = document.getElementById("recent-commands");
+          const recentList = document.getElementById("recent-commands-list");
+
+          if (!this.recentCommands.list.length) {
+            recentPanel.style.display = "none";
+            return;
+          }
+
+          recentPanel.style.display = "block";
+          recentList.innerHTML = this.recentCommands.list.map((cmd) => {
+            const displayText = cmd.length > 20 ? cmd.substring(0, 20) + "…" : cmd;
+            return `<button class="mcp-plugin__recent-command-btn" title="${this.escapeHtml(cmd)}" data-command="${this.escapeHtml(cmd)}">${this.escapeHtml(displayText)}</button>`;
+          }).join("");
+
+          // Add click handlers
+          recentList.querySelectorAll(".mcp-plugin__recent-command-btn").forEach((btn) => {
+            btn.addEventListener("click", (e) => {
+              e.preventDefault();
+              const command = btn.getAttribute("data-command");
+              if (command) {
+                this.copyCommandToClipboard(command);
+              }
+            });
+          });
+        }
+
+        /**
+         * Copy a command to clipboard in a format ready for Claude chat
+         */
+        copyCommandToClipboard(command) {
+          // Format the command as a proper prompt for Claude
+          const prompt = `${command}`;
+          this.copyToClipboard(prompt);
+
+          // Show success notification
+          parent.postMessage({
+            pluginMessage: {
+              type: "notify",
+              message: `✓ Command copied: ${command}`,
+            },
+          }, "*");
         }
 
         renderActivityChip() {
