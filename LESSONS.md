@@ -68,3 +68,18 @@ Read at the start of every change. Sweep at QA.
 - **Root cause:** the harness models the properties earlier features read. A new feature that touches more of the API (page insertion, rotation) runs into the gaps, and the gap looks like a product bug, or worse, a mock silently ignores a field and a guard is never exercised.
 - **Guard:** before relying on a harness object for a new code path, list every property and method the path uses and confirm the mock has each. Behaviour the mock cannot assume (where `clone()` puts the copy, what a new frame's fills are, whether an emptied group survives) is probed live first. This session confirmed `clone()` parents to the page, not beside the original, so the engine mode models that.
 - **QA test:** a failing test is first reproduced against the real API (or its documented contract) before the plugin code is changed to make it pass.
+
+## L7 — A rollback path that reads the node it just replaced
+
+- **Looked like:** on a real file every `convert_layout` apply failed with `in get_name: The node with id "4006:107851" does not exist`. The section got a new ID each time, and Claude Desktop called it a Figma sync issue and kept retrying: 107774 → 107805 → 107819 → 107851.
+- **Root cause:** a failed conversion puts the section back from a hidden copy, and the copy is a new node. The code then read `.name` from the removed original, and from a removed layer when it built the "would disappear" message. Figma throws on any property of a removed node except `id` and `removed`. The throw hid the real reason the conversion failed, and nothing reported the replacement's ID. The harness let removed nodes be read, so no test could fail.
+- **Guard:** read names and other properties before a step that can remove or replace a node. Any path that swaps a node returns the replacement (`newId` in the reply), and callers continue on it (`clean_layers` finishes on the copy). The server tells the model that a put-back is not a sync problem and not to retry.
+- **QA test:** the harness throws `in get_<prop>: The node with id … does not exist` for reads of a removed node. Every rollback test asserts the reason text and `newId`.
+
+
+## L8 — A harness rule written from an assumption, not observed in Figma
+
+- **Looked like:** every test passed, but on the real Page Header / 04 the conversion was put back with "Title would move". Claude Desktop told the designer their Title layers were misaligned. They were not.
+- **Root cause:** the harness modelled `resize()` as "fixes both axes", and nothing modelled what switching a row to a column does to sizing. Replayed live on a temporary copy: a Fixed-width row became a Hug-width column, and `resize()` to the size it already had changed nothing. The plugin relied on that resize, so removing the empty wrapper shrank the section from 1859 to 889px. The harness also let a Hug frame ignore its Fill children, which Figma does not do.
+- **Guard:** set sizing explicitly (`pinFrameSize`) and never rely on a side effect of another call. Each harness behaviour that decides geometry carries a "confirmed live" note, and one without it is treated as a guess.
+- **QA test:** when a real conversion is put back, replay its steps on a temporary copy through the relay (`execute_code`, clone, delete in `finally`), snapshotting boxes and sizing after each step. Then encode the observed behaviour in the harness before fixing the plugin, so the fixture fails first.

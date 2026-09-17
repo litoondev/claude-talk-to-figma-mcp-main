@@ -445,27 +445,84 @@ describe("Grid mode", () => {
     expectUnmoved(before);
   });
 
-  it("refuses unevenly spaced columns", async () => {
+  it("uses Auto Layout, with the reason, when the columns are not evenly spaced", async () => {
     const { section } = gridSection();
     section.children[3].x += 10; // the third card of the first row
     section.children[6].x += 10;
     const r = await scan("grid", { mode: "grid" });
-    expect(r.blocked[0].reason).toBe("its columns are not evenly spaced (gaps 40, 50px)");
+    expect(r.proposals.map((p: any) => p.mode)).not.toContain("grid");
+    for (const p of r.proposals) expect(p.gridRefusal).toBe("its columns are not evenly spaced (gaps 40, 50px)");
   });
 
-  it("refuses a single column and points to Auto Layout", async () => {
+  it("uses Auto Layout for a single column and says why it is not a Grid", async () => {
     onPage(makeNode({ id: "list", name: "List", width: 300, height: 200, children: [text("A", 0, 0, 100, 20), text("B", 0, 40, 100, 20)] }));
     const r = await scan("list", { mode: "grid" });
-    expect(r.blocked[0].reason).toBe("its layers form a single column — use Auto Layout instead of a Grid");
+    expect(r.proposals[0]).toMatchObject({ mode: "auto_layout", layout: "vertical, gap 20px",
+      gridRefusal: "its layers form a single column — use Auto Layout instead of a Grid" });
   });
 
-  it("refuses hidden layers, which would claim Grid cells", async () => {
-    const { section } = gridSection();
-    const hidden = block("Draft", 0, 0, 10, 10, { visible: false });
+  it("keeps a hidden layer as a hidden absolute layer where it was, outside the Grid cells", async () => {
+    const { section, heading, cards } = gridSection();
+    const hidden = block("Draft", 600, 10, 10, 10, { visible: false });
     section.children.push(hidden);
     hidden.parent = section;
-    const r = await scan("grid", { mode: "grid" });
-    expect(r.blocked[0].reason).toMatch(/^1 hidden layer\(s\) would take Grid cells/);
+    const before = snapshot([section, heading, ...cards]);
+
+    const r = await apply("grid", { mode: "grid" });
+
+    expect(r.skipped).toEqual([]);
+    expect(section.layoutMode).toBe("GRID");
+    expect(hidden).toMatchObject({ parent: section, visible: false, layoutPositioning: "ABSOLUTE", x: 600, y: 10 });
+    expectUnmoved(before);
+  });
+
+  it("uses an empty spacer row instead of a wrapper when the heading sits further from the cards", async () => {
+    const heading = text("Heading", 40, 40, 920, 50);
+    const sub = text("Sub", 40, 106, 920, 24); // 16 below the heading
+    const cards = [0, 1, 2].map((c) => block(`Card ${c + 1}`, 40 + c * 320, 178, 280, 240)); // 48 below the sub
+    const section = makeNode({ id: "spaced", name: "Features", width: 1000, height: 458, fills: [{ type: "SOLID" }], children: [heading, sub, ...cards] });
+    onPage(section);
+    const before = snapshot([section, heading, sub, ...cards]);
+
+    const dry = await scan("spaced", { mode: "grid" });
+    expect(dry.proposals[0]).toMatchObject({ mode: "grid", wrappersCreated: 0,
+      layout: "3-column Grid, 4 row(s), spacer row(s) 16px, equal columns, gaps 16/40px" });
+
+    const r = await apply("spaced", { mode: "grid" });
+
+    expect(r.skipped).toEqual([]);
+    expect(section.children).toEqual([heading, sub, ...cards]);
+    expect(section.gridRowSizes.map((t: any) => t.type)).toEqual(["HUG", "HUG", "FIXED", "HUG"]);
+    expect(section.gridItemsPositioning).toBe("MANUAL");
+    expectUnmoved(before);
+  });
+
+  it("refuses a larger row gap a spacer row cannot reproduce (less than twice the row gap)", async () => {
+    const section = makeNode({ id: "tight", name: "Tight", width: 1000, height: 400, children: [
+      text("Heading", 40, 40, 920, 50),
+      ...[0, 1, 2].map((c) => block(`A${c}`, 40 + c * 320, 110, 280, 100)), // 20 below
+      ...[0, 1, 2].map((c) => block(`B${c}`, 40 + c * 320, 240, 280, 100)), // 30 below: 30 < 2 × 20
+    ] });
+    onPage(section);
+    const r = await scan("tight", { mode: "grid" });
+    expect(r.proposals.every((p: any) => p.mode !== "grid")).toBe(true);
+    expect(r.proposals[0].gridRefusal).toBe("its rows are not evenly spaced (gaps 20, 30px)");
+  });
+
+  it("chooses the Grid when it leaves no more layers than Auto Layout", async () => {
+    const icons = makeNode({ id: "icons", name: "Icons", width: 400, height: 60, children: [
+      block("Logo A", 20, 10, 40, 40), block("Logo B", 72, 10, 40, 40),
+    ] });
+    onPage(icons);
+    const r = await scan("icons", { mode: "grid" });
+    expect(r.proposals[0]).toMatchObject({ mode: "grid", gridRefusal: null });
+  });
+
+  it("uses Auto Layout for two items at opposite ends of one row", async () => {
+    onPage(makeNode({ id: "pair", name: "Row", width: 1000, height: 40, children: [text("Label", 0, 0, 100, 40), text("Value", 800, 0, 200, 40)] }));
+    const r = await scan("pair", { mode: "grid" });
+    expect(r.proposals[0]).toMatchObject({ mode: "auto_layout", layout: "horizontal, space between",
+      gridRefusal: "its items are spaced apart, not laid out in columns — a row" });
   });
 });
 
@@ -530,9 +587,12 @@ describe("safety", () => {
 
     expect(r.converted).toEqual([]);
     expect(r.skipped[0].reason).toBe(
-      '"D" would move or change size, so it was put back exactly as it was (the layers inside it now have new IDs)'
+      '"D" would move or change size, so it was put back exactly as it was'
     );
     const [restored] = figma.currentPage.children;
+    // The copy that took its place is a new node, and the reply says which.
+    expect(r.skipped[0].newId).toBe(restored.id);
+    expect(r.skipped[0].newId).not.toBe(r.skipped[0].id);
     expect(figma.currentPage.children).toHaveLength(1);
     expect(restored.layoutMode).toBe("NONE");
     expect(restored.children.map((c: any) => c.y)).toEqual(ys);
@@ -553,9 +613,12 @@ describe("safety", () => {
 
     expect(r.converted).toEqual([]);
     expect(r.skipped[0].reason).toBe(
-      "Figma refused a step (frame limit reached), so it was put back exactly as it was (the layers inside it now have new IDs)"
+      "Figma refused a step (frame limit reached), so it was put back exactly as it was"
     );
     const [restored] = figma.currentPage.children;
+    // The copy that took its place is a new node, and the reply says which.
+    expect(r.skipped[0].newId).toBe(restored.id);
+    expect(r.skipped[0].newId).not.toBe(r.skipped[0].id);
     expect(figma.currentPage.children).toHaveLength(1);
     expect(restored).toMatchObject({ name: "Card", visible: true, layoutMode: "NONE" });
     expect(box(restored)).toEqual(before);
@@ -657,5 +720,186 @@ describe("layout engine fidelity (behaviour confirmed live in Figma)", () => {
     frame.layoutMode = "VERTICAL";
     expect(box(frame)).toEqual({ x: 0, y: 0, width: 400, height: 60 });
     expect(box(b)).toEqual({ x: 0, y: 40, width: 60, height: 20 });
+  });
+});
+
+// ─── Rebuilding layouts that already use Auto Layout ──────────────────────
+
+/**
+ * The real "# Work Process" tree (probed read-only earlier, see
+ * grid-conversion.test.ts): a padded section holding a heading and a row of
+ * four Card instances, each card inside two transparent Auto Layout frames.
+ * Gap and padding are bound to the file's variables.
+ */
+describe("Auto Layout already in place: structural wrappers are removed", () => {
+  const variable = (id: string, name: string, value: number) => ({
+    id, name, resolvedType: "FLOAT" as const, scopes: ["GAP"], variableCollectionId: "c", valuesByMode: { m: value },
+  });
+  const alias = (id: string) => ({ type: "VARIABLE_ALIAS", id });
+
+  beforeEach(() =>
+    setup({
+      collections: [{ id: "c", name: "Spacing", modes: [{ modeId: "m", name: "Desk" }], variableIds: ["v:gap", "v:col", "v:lr", "v:tb"] }],
+      variables: [variable("v:gap", "Row Gap", 40), variable("v:col", "Column Gap", 16), variable("v:lr", "Left-Right", 100), variable("v:tb", "Top-Bottom", 120)],
+    })
+  );
+
+  function workProcess() {
+    const cards = [1, 2, 3, 4].map((n) =>
+      makeNode({
+        id: `card${n}`, name: "Card", type: "INSTANCE", layoutMode: "VERTICAL", width: 298, height: 380,
+        layoutSizingHorizontal: "FILL", layoutSizingVertical: "FIXED", fills: [{ type: "SOLID" }],
+        children: [makeNode({ name: "BG", type: "RECTANGLE", layoutPositioning: "ABSOLUTE", width: 298, height: 1 })],
+      })
+    );
+    const wrapped = cards.map((c, i) => {
+      const inner = makeNode({ id: `inner${i}`, name: `Frame 214723918${i}`, layoutMode: "HORIZONTAL", width: 298, height: 380,
+        layoutSizingHorizontal: "FILL", layoutSizingVertical: "HUG", children: [c] });
+      return makeNode({ id: `outer${i}`, name: `Frame 214723919${i}`, layoutMode: "HORIZONTAL", width: 298, height: 380,
+        layoutSizingHorizontal: "FILL", layoutSizingVertical: "HUG", children: [inner] });
+    });
+    const heading = makeNode({
+      id: "heading", name: "Text_Container", type: "INSTANCE", layoutMode: "VERTICAL", width: 773, height: 100,
+      layoutSizingHorizontal: "HUG", layoutSizingVertical: "HUG", children: [text("Title", 0, 0, 773, 100)],
+    });
+    const row = makeNode({
+      id: "row", name: "Container", layoutMode: "HORIZONTAL", width: 1240, height: 380, itemSpacing: 16,
+      layoutSizingHorizontal: "FILL", layoutSizingVertical: "HUG", boundVariables: { itemSpacing: alias("v:col") }, children: wrapped,
+    });
+    const section = makeNode({
+      id: "wp", name: "# Work Process", layoutMode: "VERTICAL", width: 1440, height: 780, itemSpacing: 40,
+      paddingTop: 120, paddingRight: 100, paddingBottom: 120, paddingLeft: 100, counterAxisAlignItems: "CENTER",
+      layoutSizingHorizontal: "FIXED", layoutSizingVertical: "HUG", fills: [{ type: "SOLID" }],
+      boundVariables: { itemSpacing: alias("v:gap"), paddingLeft: alias("v:lr"), paddingRight: alias("v:lr"), paddingTop: alias("v:tb"), paddingBottom: alias("v:tb") },
+      children: [heading, row],
+    });
+    onPage(section);
+    return { section, heading, row, cards, wrapped };
+  }
+
+  it("proposes rebuilding the section with the eight card wrappers removed", async () => {
+    const { section, row } = workProcess();
+
+    const r = await scan("wp");
+
+    expect(r.blocked).toEqual([]);
+    expect(r.proposals).toHaveLength(1);
+    expect(r.proposals[0]).toMatchObject({ id: "wp", rebuild: true, layout: "vertical, gap 40px", padding: [120, 100, 120, 100], wrappersCreated: 0, layerChange: -8 });
+    expect(r.proposals[0].flattened).toHaveLength(8);
+    expect(row.children).toHaveLength(4); // nothing modified
+    expect(section.children).toHaveLength(2);
+  });
+
+  it("Auto Layout: heading and one row holding the cards directly, tokens and Fill kept, nothing moved", async () => {
+    const { section, heading, row, cards, wrapped } = workProcess();
+    const before = snapshot([section, heading, row, ...cards]);
+
+    const r = await apply("wp");
+
+    expect(r.skipped).toEqual([]);
+    expect(section.children).toEqual([heading, row]);
+    expect(row.children).toEqual(cards);
+    expect(wrapped.every((w) => w.removed)).toBe(true);
+    expect(row).toMatchObject({ layoutMode: "HORIZONTAL", itemSpacing: 16 });
+    expect(row.layoutSizingHorizontal).toBe("FILL");
+    expect(row.boundVariables.itemSpacing).toEqual(alias("v:col"));
+    expect(section.boundVariables).toMatchObject({ itemSpacing: alias("v:gap"), paddingLeft: alias("v:lr"), paddingTop: alias("v:tb") });
+    expect(r.tokensMissing).toEqual([]);
+    expectUnmoved(before);
+    expect(figma.currentPage.children).toEqual([section]);
+  });
+
+  it("Grid: the cards sit directly in the section and the row and column gaps keep their variables", async () => {
+    const { section, heading, row, cards } = workProcess();
+    const before = snapshot([section, heading, ...cards]);
+
+    const r = await apply("wp", { mode: "grid" });
+
+    expect(r.skipped).toEqual([]);
+    expect(section.layoutMode).toBe("GRID");
+    expect(section.children).toEqual([heading, ...cards]);
+    expect(row.removed).toBe(true);
+    expect(heading.gridColumnSpan).toBe(4);
+    expect(section.boundVariables).toMatchObject({ gridRowGap: alias("v:gap"), gridColumnGap: alias("v:col"), paddingLeft: alias("v:lr") });
+    expect(r.tokensMissing).toEqual([]);
+    expectUnmoved(before);
+  });
+
+  it("does not propose an Auto Layout frame with nothing to remove, and does not list it as blocked", async () => {
+    const title = text("Title", 0, 0, 252, 30, { layoutSizingHorizontal: "FIXED", layoutSizingVertical: "FIXED" });
+    const body = text("Body", 0, 38, 252, 60, { layoutSizingHorizontal: "FIXED", layoutSizingVertical: "FIXED" });
+    const clean = makeNode({ id: "clean", name: "Card", layoutMode: "VERTICAL", itemSpacing: 8, width: 252, height: 98,
+      layoutSizingHorizontal: "HUG", layoutSizingVertical: "HUG", children: [title, body] });
+    onPage(clean);
+
+    const r = await scan("clean");
+
+    expect(r.proposals).toEqual([]);
+    expect(r.blocked).toEqual([]);
+  });
+
+  /** Heading and paragraph each in their own Auto Layout frame (the pattern the spec forbids). */
+  function doubleWrappedCard(extra: any = {}) {
+    const heading = text("Heading", 0, 0, 252, 30, { layoutSizingHorizontal: "FILL", layoutSizingVertical: "HUG" });
+    const paragraph = text("Paragraph", 0, 0, 252, 60, { layoutSizingHorizontal: "FILL", layoutSizingVertical: "HUG" });
+    const wrap = (id: string, child: any, h: number, more: any = {}) =>
+      makeNode({ id, name: `Frame ${id}`, layoutMode: "VERTICAL", width: 252, height: h,
+        layoutSizingHorizontal: "FILL", layoutSizingVertical: "HUG", children: [child], ...more });
+    const headingWrap = wrap("hw", heading, 30, extra.headingWrap);
+    const paragraphWrap = wrap("pw", paragraph, 60);
+    const button = block("Button", 0, 0, 120, 40, { layoutSizingHorizontal: "FIXED", layoutSizingVertical: "FIXED" });
+    const cardNode = makeNode({
+      id: "card", name: "Card", layoutMode: "VERTICAL", itemSpacing: 16, paddingTop: 24, paddingRight: 24, paddingBottom: 24, paddingLeft: 24,
+      width: 300, height: 226, layoutSizingHorizontal: "FIXED", layoutSizingVertical: "HUG", fills: [{ type: "SOLID" }],
+      children: [headingWrap, paragraphWrap, button],
+    });
+    onPage(cardNode);
+    return { cardNode, heading, paragraph, button, headingWrap, paragraphWrap };
+  }
+
+  it("removes one-layer Auto Layout wrappers: heading, paragraph and button sit in the card, text keeps Fill", async () => {
+    const c = doubleWrappedCard();
+    const before = snapshot([c.cardNode, c.heading, c.paragraph, c.button]);
+
+    const r = await apply("card");
+
+    expect(r.skipped).toEqual([]);
+    expect(c.cardNode.children).toEqual([c.heading, c.paragraph, c.button]);
+    expect(c.headingWrap.removed).toBe(true);
+    expect(c.paragraphWrap.removed).toBe(true);
+    expect(c.heading.layoutSizingHorizontal).toBe("FILL");
+    expect(c.paragraph.layoutSizingHorizontal).toBe("FILL");
+    expect(c.cardNode).toMatchObject({ itemSpacing: 16, paddingTop: 24 });
+    expectUnmoved(before);
+  });
+
+  it("removes a clipping wrapper when nothing inside it is cut off", async () => {
+    const c = doubleWrappedCard({ headingWrap: { clipsContent: true, cornerRadius: 0 } });
+    const r = await apply("card");
+    expect(r.skipped).toEqual([]);
+    expect(c.headingWrap.removed).toBe(true);
+  });
+
+  it("keeps a wrapper that paints something (a fill) as a layer of its own", async () => {
+    const c = doubleWrappedCard({ headingWrap: { fills: [{ type: "SOLID" }] } });
+    const r = await apply("card");
+    expect(r.skipped).toEqual([]);
+    expect(c.headingWrap.removed).toBe(false);
+    expect(c.paragraphWrap.removed).toBe(true);
+    expect(c.cardNode.children).toEqual([c.headingWrap, c.paragraph, c.button]);
+  });
+
+  it("keeps a wrapper whose width is bound to a variable", async () => {
+    const c = doubleWrappedCard({ headingWrap: { boundVariables: { width: alias("v:lr") } } });
+    const r = await scan("card");
+    expect(r.proposals[0].flattened).toEqual(["Frame pw"]);
+  });
+
+  it("refuses to rebuild a frame whose first layer paints on top", async () => {
+    const c = doubleWrappedCard();
+    c.cardNode.itemReverseZIndex = true;
+    const r = await scan("card");
+    expect(r.proposals).toEqual([]);
+    expect(r.blocked[0].reason).toMatch(/first layer on top/);
   });
 });

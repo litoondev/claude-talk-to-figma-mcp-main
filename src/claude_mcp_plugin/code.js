@@ -5836,137 +5836,7 @@ function flagExcessiveNesting(root, report, maxDepth) {
   walk(root, 0, [root.name]);
 }
 
-// ─── Grid conversion ───────────────────────────────────────────────────────
-//
-// A vertical section holding heading(s) and one row of N equal items is a grid
-// assembled from Auto Layout: the row frame, and any wrapper around each item,
-// exist only to make it render. As a real Grid the section holds the headings
-// (each spanning every column) and the items directly. Converting is only ever
-// a proposal — it runs for a section whose ID the user confirmed — and the
-// result is measured against the layout it replaces and undone if anything
-// moved.
-
-const GRID_TOLERANCE = 1;
-const GRID_ALIGN = { MIN: "MIN", CENTER: "CENTER", MAX: "MAX" };
-const SECTION_SPACING_FIELDS = ["itemSpacing", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft"];
-
-/** A horizontal row that only spaces its children: no paint, padding, wrap, constraint, or binding but its gap. */
-function isPlainGridRow(node) {
-  if (!node || node.type !== "FRAME" || node.layoutMode !== "HORIZONTAL") return false;
-  if (node.layoutWrap === "WRAP" || node.primaryAxisAlignItems === "SPACE_BETWEEN") return false;
-  if (hasVisualPresence(node) || node.clipsContent) return false;
-  if (node.cornerRadius !== undefined && node.cornerRadius !== 0) return false;
-  if (typeof node.opacity === "number" && node.opacity < 1) return false;
-  if (node.blendMode && node.blendMode !== "NORMAL" && node.blendMode !== "PASS_THROUGH") return false;
-  if (node.paddingTop || node.paddingRight || node.paddingBottom || node.paddingLeft) return false;
-  for (const key of ["minWidth", "maxWidth", "minHeight", "maxHeight"]) {
-    if (typeof node[key] === "number") return false;
-  }
-  try {
-    if (Object.keys(node.boundVariables || {}).some((field) => field !== "itemSpacing")) return false;
-  } catch (e) {
-    return false;
-  }
-  return layerRiskReasons(node, null, false).length === 0;
-}
-
-/** Peel transparent wrappers off a row item. Null when the item cannot be a grid cell. */
-function unwrapGridCell(node) {
-  if (!node || node.visible === false || isAbsolutePositionedLayer(node) || isInstrumentation(node)) return null;
-  const wrappers = [];
-  let current = node;
-  while (
-    !isComponentLike(current) &&
-    isContainer(current) &&
-    current.children.length === 1 &&
-    layerRiskReasons(current, null, false).length === 0 &&
-    (isTransparentAutoLayoutWrapper(current) ||
-      (!isAutoLayout(current) &&
-        !frameHasLayoutPurpose(current) &&
-        childFillsWrapper(current, current.children[0])))
-  ) {
-    // A wrapper around hidden content renders empty — it is not an item to grid.
-    if (current.children[0].visible === false) return null;
-    wrappers.push(current);
-    current = current.children[0];
-  }
-  return { leaf: current, wrappers };
-}
-
-/**
- * The plan for turning a section into a Grid, or null when it is not a
- * heading + equal-row section, or when a Grid could not reproduce it exactly.
- */
-function detectGridCandidate(section) {
-  if (!section || section.removed || section.type !== "FRAME" || section.layoutMode !== "VERTICAL") return null;
-  if (typeof section.gridColumnCount !== "number") return null; // this editor has no Grid layout
-  if (section.visible === false || isInsideInstance(section) || isInsideMainComponent(section)) return null;
-  if (section.primaryAxisAlignItems === "SPACE_BETWEEN" || section.counterAxisAlignItems === "BASELINE") return null;
-  // FLEX columns are not valid on a grid whose width hugs its content.
-  if (readLayoutSizing(section, "h") === "HUG") return null;
-  if (readLayoutSizing(section, "v") !== "HUG" && section.primaryAxisAlignItems !== "MIN") return null;
-
-  const kids = section.children;
-  if (kids.length === 0) return null;
-  if (kids.some((c) => c.visible === false || isAbsolutePositionedLayer(c) || isInstrumentation(c))) return null;
-
-  const row = kids[kids.length - 1];
-  if (!isPlainGridRow(row)) return null;
-  const headers = kids.slice(0, -1);
-  // One heading only: several may land side by side when the section becomes a Grid, and
-  // Figma refuses a span over a neighbour. Not yet verified against real placement.
-  if (headers.length > 1) return null;
-  if (headers.some((h) => isPlainGridRow(h) || readLayoutSizing(h, "v") === "FILL")) return null;
-
-  const cells = row.children.map(unwrapGridCell);
-  if (cells.length < 2 || cells.some((cell) => !cell)) return null;
-
-  const width = cells[0].leaf.width;
-  const height = cells[0].leaf.height;
-  if (cells.some((cell) => Math.abs(cell.leaf.width - width) > GRID_TOLERANCE)) return null;
-  const sameHeight = cells.every((cell) => Math.abs(cell.leaf.height - height) <= GRID_TOLERANCE);
-  if (!sameHeight && row.counterAxisAlignItems !== "MIN") return null;
-
-  // Equal FLEX columns reproduce the row only when its items and gaps fill it exactly…
-  const gap = row.itemSpacing;
-  if (typeof gap !== "number") return null;
-  if (Math.abs(cells.length * width + (cells.length - 1) * gap - row.width) > GRID_TOLERANCE) return null;
-  // …and the row fills the section's content box.
-  const contentWidth = section.width - (section.paddingLeft || 0) - (section.paddingRight || 0);
-  if (Math.abs(row.width - contentWidth) > GRID_TOLERANCE) return null;
-
-  return { section, row, headers, cells, columns: cells.length };
-}
-
-function describeGridCandidate(plan) {
-  const leaves = plan.cells.map((cell) => cell.leaf);
-  const leafNames = Array.from(new Set(leaves.map((leaf) => leaf.name)));
-  const wrapperNames = [];
-  for (const cell of plan.cells) for (const wrapper of cell.wrappers) wrapperNames.push(wrapper.name);
-  return {
-    id: plan.section.id,
-    name: plan.section.name,
-    columns: plan.columns,
-    headers: plan.headers.map((header) => header.name),
-    items: leaves.map((leaf) => leaf.name),
-    itemName: leafNames.length === 1 ? leafNames[0] : null,
-    removes: [plan.row.name].concat(wrapperNames),
-  };
-}
-
-/** Every heading + equal-row section under root, root included, outermost first. */
-function findGridCandidates(root) {
-  const plans = [];
-  const walk = (node, depth) => {
-    if (!node || node.removed || depth > 16) return;
-    if (node.type === "INSTANCE" || node.visible === false || isInstrumentation(node)) return;
-    const plan = detectGridCandidate(node);
-    if (plan) plans.push(plan);
-    if (isContainer(node)) for (const child of node.children) walk(child, depth + 1);
-  };
-  walk(root, 0);
-  return plans;
-}
+// ─── Shared node readers ───────────────────────────────────────────────────
 
 function readBox(node) {
   try {
@@ -5977,12 +5847,6 @@ function readBox(node) {
   }
 }
 
-/** False when either side has no geometry to compare. */
-function boxMoved(before, after) {
-  if (!before || !after) return false;
-  return ["x", "y", "width", "height"].some((key) => Math.abs(before[key] - after[key]) > GRID_TOLERANCE);
-}
-
 function boundVariableId(node, field) {
   try {
     const alias = node.boundVariables && node.boundVariables[field];
@@ -5990,12 +5854,6 @@ function boundVariableId(node, field) {
   } catch (e) {
     return null;
   }
-}
-
-async function bindVariableById(node, field, variableId) {
-  if (!variableId) return;
-  const variable = await figma.variables.getVariableByIdAsync(variableId);
-  if (variable) node.setBoundVariable(field, variable);
 }
 
 function readSizingPair(node) {
@@ -6013,191 +5871,6 @@ function restoreSizing(node, saved) {
     }
   }
   return ok;
-}
-
-/**
- * Convert one planned section to a Grid. The old row stays in the section, out
- * of the flow, until every heading and item is confirmed to render where it
- * did; then it is deleted along with its emptied wrappers. Anything else puts
- * the section back.
- */
-async function convertSectionToGrid(plan) {
-  const { section, row, headers, cells, columns } = plan;
-  const leaves = cells.map((cell) => cell.leaf);
-  const tracked = [section].concat(headers, leaves);
-  const before = tracked.map(readBox);
-  const snapshot = {
-    layoutMode: section.layoutMode,
-    itemSpacing: section.itemSpacing,
-    padding: {
-      paddingTop: section.paddingTop,
-      paddingRight: section.paddingRight,
-      paddingBottom: section.paddingBottom,
-      paddingLeft: section.paddingLeft,
-    },
-    primary: section.primaryAxisAlignItems,
-    counter: section.counterAxisAlignItems,
-    sizing: readSizingPair(section),
-    bindings: SECTION_SPACING_FIELDS.map((field) => [field, boundVariableId(section, field)]),
-    rowIndex: section.children.indexOf(row),
-    rowSizing: readSizingPair(row),
-    headerSizing: headers.map(readSizingPair),
-    leafSizing: leaves.map(readSizingPair),
-    cellIndex: cells.map((cell) => row.children.indexOf(cell.wrappers[0] || cell.leaf)),
-  };
-  const rowGap = section.itemSpacing;
-  const columnGap = row.itemSpacing;
-  const columnGapVariable = boundVariableId(row, "itemSpacing");
-
-  if (typeof figma.commitUndo === "function") figma.commitUndo();
-  try {
-    row.layoutPositioning = "ABSOLUTE";
-
-    // The heading takes its full-width span while it still has its row to itself.
-    // With the items already placed beside it, Figma refuses the span as an overlap.
-    section.layoutMode = "GRID";
-    section.gridColumnCount = columns;
-    section.gridAutoTracks = "ROWS";
-    section.gridItemsPositioning = "ROW_AUTO_FLOW";
-    for (const header of headers) header.gridColumnSpan = columns;
-
-    leaves.forEach((leaf, i) => {
-      // A filling item would fill the wrong parent mid-move — freeze it first.
-      for (const axis of ["h", "v"]) {
-        if (snapshot.leafSizing[i][axis] === "FILL") writeLayoutSizing(leaf, axis, "FIXED");
-      }
-      section.insertChild(headers.length + i, leaf);
-    });
-    for (const track of section.gridColumnSizes) {
-      track.type = "FLEX";
-      track.value = 1;
-    }
-    for (const track of section.gridRowSizes) track.type = "HUG";
-    section.gridRowGap = rowGap;
-    section.gridColumnGap = columnGap;
-    await bindVariableById(section, "gridRowGap", snapshot.bindings[0][1]);
-    await bindVariableById(section, "gridColumnGap", columnGapVariable);
-
-    // Padding and sizing should survive a layout-mode change; make certain they did.
-    for (const field of Object.keys(snapshot.padding)) {
-      if (section[field] !== snapshot.padding[field]) section[field] = snapshot.padding[field];
-    }
-    for (const [field, variableId] of snapshot.bindings) {
-      if (field !== "itemSpacing" && variableId && boundVariableId(section, field) !== variableId) {
-        await bindVariableById(section, field, variableId);
-      }
-    }
-    restoreSizing(section, snapshot.sizing);
-
-    const headerAlign = GRID_ALIGN[snapshot.counter] || "AUTO";
-    headers.forEach((header, i) => {
-      if (snapshot.headerSizing[i].h === "FILL") writeLayoutSizing(header, "h", "FILL");
-      else header.gridChildHorizontalAlign = headerAlign;
-      restoreSizing(header, { v: snapshot.headerSizing[i].v });
-    });
-    const itemAlign = GRID_ALIGN[row.counterAxisAlignItems] || "AUTO";
-    leaves.forEach((leaf, i) => {
-      writeLayoutSizing(leaf, "h", "FILL");
-      if (snapshot.leafSizing[i].v === "FILL") writeLayoutSizing(leaf, "v", "FILL");
-      else {
-        restoreSizing(leaf, { v: snapshot.leafSizing[i].v });
-        leaf.gridChildVerticalAlign = itemAlign;
-      }
-    });
-
-    const after = tracked.map(readBox);
-    const moved = tracked.findIndex((node, i) => boxMoved(before[i], after[i]));
-    if (moved >= 0) {
-      const error = new Error(`"${tracked[moved].name}" would move or resize as a Grid`);
-      error.layoutMoved = true;
-      throw error;
-    }
-
-    row.remove();
-    if (typeof figma.commitUndo === "function") figma.commitUndo();
-    return { ok: true };
-  } catch (e) {
-    const detail = e && e.message ? e.message : String(e);
-    const restored = await restoreSectionFromGrid(plan, snapshot);
-    const reason = e && e.layoutMoved ? detail : `Figma refused a step (${detail})`;
-    return {
-      ok: false,
-      reason: restored
-        ? `${reason}, so the section was left as it was`
-        : `${reason}, and restoring it did not fully succeed — check the section or undo (Cmd+Z)`,
-    };
-  }
-}
-
-/** Put a section back the way convertSectionToGrid found it. True when every step succeeded. */
-async function restoreSectionFromGrid(plan, snapshot) {
-  const { section, row, headers, cells } = plan;
-  let ok = true;
-  const attempt = (step) => {
-    try {
-      step();
-    } catch (e) {
-      ok = false;
-    }
-  };
-
-  attempt(() => { section.layoutMode = snapshot.layoutMode; });
-  attempt(() => { section.itemSpacing = snapshot.itemSpacing; });
-  attempt(() => { section.primaryAxisAlignItems = snapshot.primary; });
-  attempt(() => { section.counterAxisAlignItems = snapshot.counter; });
-  for (const field of Object.keys(snapshot.padding)) {
-    attempt(() => { section[field] = snapshot.padding[field]; });
-  }
-  for (const [field, variableId] of snapshot.bindings) {
-    if (!variableId) continue;
-    try {
-      await bindVariableById(section, field, variableId);
-    } catch (e) {
-      ok = false;
-    }
-  }
-
-  cells.forEach((cell, i) => attempt(() => {
-    if (cell.wrappers.length > 0) cell.wrappers[cell.wrappers.length - 1].insertChild(0, cell.leaf);
-    else row.insertChild(Math.min(snapshot.cellIndex[i], row.children.length), cell.leaf);
-  }));
-  attempt(() => { row.layoutPositioning = "AUTO"; });
-  attempt(() => section.insertChild(Math.min(snapshot.rowIndex, section.children.length), row));
-
-  if (!restoreSizing(section, snapshot.sizing)) ok = false;
-  if (!restoreSizing(row, snapshot.rowSizing)) ok = false;
-  headers.forEach((header, i) => { if (!restoreSizing(header, snapshot.headerSizing[i])) ok = false; });
-  cells.forEach((cell, i) => { if (!restoreSizing(cell.leaf, snapshot.leafSizing[i])) ok = false; });
-  return ok;
-}
-
-/**
- * Convert the confirmed sections under root; list the rest as proposals.
- * Deepest first, so converting an outer section never invalidates an inner plan.
- */
-async function applyGridConversions(root, gate, report, handled) {
-  const plans = findGridCandidates(root);
-  const pending = [];
-  for (let i = plans.length - 1; i >= 0; i--) {
-    const section = plans[i].section;
-    if (!gate.gridIds.has(section.id)) {
-      pending.unshift(describeGridCandidate(plans[i]));
-      continue;
-    }
-    handled.add(section.id);
-    const plan = detectGridCandidate(section);
-    if (!plan) {
-      cleanupList(report, "gridSkipped").push({
-        id: section.id, name: section.name, reason: "no longer a heading + equal-row section",
-      });
-      continue;
-    }
-    const summary = describeGridCandidate(plan);
-    const result = await convertSectionToGrid(plan);
-    if (result.ok) cleanupList(report, "gridConverted").push(summary);
-    else cleanupList(report, "gridSkipped").push({ id: section.id, name: section.name, reason: result.reason });
-  }
-  for (const proposal of pending) cleanupList(report, "gridCandidates").push(proposal);
 }
 
 /**
@@ -6352,12 +6025,15 @@ function layoutConversionBlocker(node) {
   if (node.type !== "FRAME" && node.type !== "GROUP") {
     return `a ${String(node.type).toLowerCase()} cannot hold Auto Layout`;
   }
-  if (isAutoLayout(node)) return "already uses Auto Layout";
+  if (node.layoutMode === "GRID") return "already a Grid";
   if (node.visible === false) return "hidden";
   if (isInsideInstance(node)) return "inside a component instance, whose structure comes from its main component";
   if (isInsideMainComponent(node)) return "part of a main component";
   const rotation = readNumber(node, "rotation");
   if (rotation !== null && Math.abs(rotation) > 0.01) return "rotated";
+  if (isAutoLayout(node) && node.itemReverseZIndex === true) {
+    return "its Auto Layout paints the first layer on top, which a rebuilt layer order would not keep";
+  }
   if (node.type === "GROUP") {
     const opacity = readNumber(node, "opacity");
     if (opacity !== null && opacity < 1) return "the group has opacity, which a frame would render differently";
@@ -6378,14 +6054,44 @@ function layoutConversionBlocker(node) {
   return null;
 }
 
+/** Gap and padding fields, by the kind of token that can stand for them. */
+const SPACING_FIELD_FAMILY = {
+  itemSpacing: "gap", counterAxisSpacing: "gap", gridRowGap: "gap", gridColumnGap: "gap",
+  paddingLeft: "padding-x", paddingRight: "padding-x", paddingTop: "padding-y", paddingBottom: "padding-y",
+};
+
+/**
+ * A frame drawn for structure alone — Auto Layout or not. Nothing about it
+ * renders: no paint, no effect, no opacity, and any clipping cuts nothing off.
+ * Its gap and padding only position the layers, and the rebuilt layout measures
+ * those positions, so removing it changes nothing on the canvas.
+ */
+function isStructuralFrame(node) {
+  if (node.children.some((child) => isAbsolutePositionedLayer(child))) return false;
+  if (hasVisualPresence(node)) return false;
+  if (typeof node.opacity === "number" && node.opacity < 1) return false;
+  if (node.blendMode && node.blendMode !== "NORMAL" && node.blendMode !== "PASS_THROUGH") return false;
+  if (node.clipsContent) {
+    if (typeof node.cornerRadius !== "number" || node.cornerRadius > 0) return false;
+    const frame = readBox(node);
+    if (!frame) return false;
+    for (const child of node.children) {
+      const render = readRenderBox(child);
+      if (!render || !boxInside(render, frame)) return false;
+    }
+  }
+  return true;
+}
+
 /** A frame or group that only groups layers: dissolving it changes nothing on the canvas. */
 function isDissolvableWrapper(node) {
   if (!isContainer(node) || layoutConversionBlocker(node)) return false;
-  if (node.type === "FRAME" && frameHasLayoutPurpose(node)) return false;
-  if (node.children.some((child) => child.visible === false)) return false;
+  if (node.type === "FRAME" && !isStructuralFrame(node)) return false;
   if (layerRiskReasons(node, null, false).length > 0) return false;
   try {
-    if (node.boundVariables && Object.keys(node.boundVariables).length > 0) return false;
+    // A spacing token on a wrapper is carried to the rebuilt frame that takes over its value.
+    const bound = node.boundVariables ? Object.keys(node.boundVariables) : [];
+    if (bound.some((field) => !SPACING_FIELD_FAMILY[field])) return false;
     const refs = node.componentPropertyReferences;
     if (refs && Object.keys(refs).length > 0) return false;
   } catch (e) {
@@ -6399,25 +6105,28 @@ function isDissolvableWrapper(node) {
  * were dissolved out of. A wrapper records every leaf under it, so a planned
  * row or column holding exactly those leaves can keep the wrapper's name.
  */
-function collectLayoutLeaves(container) {
+function collectLayoutLeaves(container, keepDirect) {
   const leaves = [];
   const dissolved = [];
   const hidden = [];
   const visit = (parent, owners) => {
     for (const child of parent.children) {
       if (child.visible === false) {
-        hidden.push(child);
+        hidden.push({ node: child, transform: child.absoluteTransform });
         continue;
       }
-      if (isDissolvableWrapper(child)) {
-        const entry = { node: child, leafIds: [] };
+      // Kept direct layers are the rows and columns the designer drew; a wrapper around one layer is still removed.
+      const kept = !!keepDirect && parent === container && isContainer(child) && !isPassThroughWrapper(child) &&
+        (keepDirect === "cells" || (isRowOfItems(child) && becomesGrid(child)));
+      if (!kept && isDissolvableWrapper(child)) {
+        const entry = { node: child, leafIds: [], sizing: readSizingPair(child) };
         dissolved.push(entry);
         visit(child, owners.concat([entry]));
         continue;
       }
       const box = readBox(child);
       if (!box) throw layoutError(`"${child.name}" has no measurable bounds`);
-      leaves.push({ node: child, box, render: readRenderBox(child) || box, order: leaves.length });
+      leaves.push({ node: child, box, render: readRenderBox(child) || box, order: leaves.length, sizing: readSizingPair(child) });
       for (const owner of owners) owner.leafIds.push(child.id);
       if (leaves.length > LAYOUT_LEAF_LIMIT) {
         throw layoutError(`more than ${LAYOUT_LEAF_LIMIT} layers at one level — select a smaller part of the design`);
@@ -6426,6 +6135,38 @@ function collectLayoutLeaves(container) {
   };
   visit(container, []);
   return { leaves, dissolved, hidden };
+}
+
+/** Layers side by side: a row that may become a Grid of its own. */
+function isRowOfItems(node) {
+  const items = [];
+  for (const child of node.children) {
+    if (child.visible === false) continue;
+    const box = readBox(child);
+    if (box) items.push({ box, order: items.length });
+  }
+  return items.length > 1 && splitIntoBands(items, "x").length > 1;
+}
+
+/** Whether a Grid describes this container's layers, the way planForRequest would build it. */
+function becomesGrid(node) {
+  for (const keepDirect of ["cells", false]) {
+    try {
+      if (!gridMisfit(planLayoutConversion(node, "grid", keepDirect))) return true;
+    } catch (e) {
+      if (!isLayoutError(e)) throw e;
+    }
+  }
+  return false;
+}
+
+/** A wrapper exactly the size of its one visible layer: it draws no row or column of its own. */
+function isPassThroughWrapper(node) {
+  const visible = node.children.filter((child) => child.visible !== false);
+  if (visible.length !== 1) return false;
+  const outer = readBox(node);
+  const inner = readBox(visible[0]);
+  return !!outer && !!inner && !layoutBoxMoved(outer, inner);
 }
 
 function leafPlan(leaf) {
@@ -6643,6 +6384,35 @@ function cellAlignment(start, end, trackStart, trackEnd) {
 }
 
 /**
+ * One Grid row gap describes the smallest gap between rows. A larger gap gets
+ * an empty FIXED spacer row between the two rows instead of a wrapper frame —
+ * the spacer sits between two row gaps, so it adds the gap minus twice the row
+ * gap. A gap between the two is refused: no track reproduces it.
+ */
+function planRowTracks(rowGaps) {
+  const sizes = [{ type: "HUG" }];
+  const bandTrack = [0];
+  if (rowGaps.length === 0) return { sizes, bandTrack, gap: 0, spacers: 0 };
+  const smallest = Math.max(0, Math.min.apply(null, rowGaps));
+  const near = rowGaps.filter((gap) => gap <= smallest + LAYOUT_TOLERANCE);
+  const gap = roundLayout(mean(near));
+  let spacers = 0;
+  for (const rowGap of rowGaps) {
+    if (rowGap > smallest + LAYOUT_TOLERANCE) {
+      const spacer = rowGap - 2 * gap;
+      if (spacer < -LAYOUT_TOLERANCE) {
+        throw layoutError(`its rows are not evenly spaced (gaps ${rowGaps.map(roundLayout).join(", ")}px)`);
+      }
+      sizes.push({ type: "FIXED", value: Math.max(0, roundLayout(spacer)) });
+      spacers++;
+    }
+    bandTrack.push(sizes.length);
+    sizes.push({ type: "HUG" });
+  }
+  return { sizes, bandTrack, gap, spacers };
+}
+
+/**
  * Rows are bands along y, columns are bands along x taken from the fullest
  * rows. A single layer wider than the first column in its own row is a heading
  * spanning every column. Rows hug their tallest cell, so a staggered row cannot
@@ -6672,9 +6442,7 @@ function planGridBody(flow, frameBox) {
     throw layoutError(`its columns are not evenly spaced (gaps ${columnGaps.map(roundLayout).join(", ")}px)`);
   }
   const rowGaps = rowBands.slice(1).map((band, i) => band.start - rowBands[i].end);
-  if (rowGaps.length && spread(rowGaps) > LAYOUT_TOLERANCE) {
-    throw layoutError(`its rows are not evenly spaced (gaps ${rowGaps.map(roundLayout).join(", ")}px)`);
-  }
+  const rowTracks = planRowTracks(rowGaps);
   const widths = columns.map((column) => column.end - column.start);
   const equalColumns = spread(widths) <= LAYOUT_TOLERANCE;
   const lastColumn = columns[columnCount - 1];
@@ -6709,13 +6477,16 @@ function planGridBody(flow, frameBox) {
       if (!vertical) throw layoutError(`"${planName(content)}" is not aligned top, centre or bottom in its row`);
       tallest = Math.max(tallest, content.box.height);
       cells.push({
-        row: r,
+        row: rowTracks.bandTrack[r],
         column,
         span,
         content,
         horizontal,
         vertical,
         fillWidth: equalColumns && span === 1 && Math.abs(content.box.width - (trackEnd - trackStart)) <= LAYOUT_TOLERANCE,
+        // A panel that stretched to its row's height keeps stretching.
+        fillHeight: content.kind === "leaf" && content.leaf.sizing && content.leaf.sizing.v === "FILL" &&
+          Math.abs(content.box.height - (row.band.end - row.band.start)) <= LAYOUT_TOLERANCE,
       });
     }
     if (Math.abs(tallest - (row.band.end - row.band.start)) > LAYOUT_TOLERANCE) {
@@ -6724,8 +6495,8 @@ function planGridBody(flow, frameBox) {
   });
 
   // Auto-flow places cells in reading order, so it keeps this placement only when no row but the last has a gap.
-  const autoFlow = rows.every((row, r) => {
-    const rowCells = cells.filter((cell) => cell.row === r).sort((a, b) => a.column - b.column);
+  const autoFlow = !rowTracks.spacers && rows.every((row, r) => {
+    const rowCells = cells.filter((cell) => cell.row === rowTracks.bandTrack[r]).sort((a, b) => a.column - b.column);
     let next = 0;
     for (const cell of rowCells) {
       if (cell.column !== next) return false;
@@ -6738,11 +6509,12 @@ function planGridBody(flow, frameBox) {
   return {
     kind: "grid",
     autoFlow,
-    rows: rows.length,
+    rows: rowTracks.sizes.length,
+    rowSizes: rowTracks.sizes,
     columns: columnCount,
     columnSizes: equalColumns ? null : widths.map(roundLayout),
     columnGap: columnGaps.length ? pad(mean(columnGaps)) : 0,
-    rowGap: rowGaps.length ? pad(mean(rowGaps)) : 0,
+    rowGap: rowTracks.gap,
     cells,
     padding: {
       left: pad(columns[0].start - frameBox.x),
@@ -6782,6 +6554,23 @@ function orderOverlayLayers(plan) {
   plan.above = above;
 }
 
+/**
+ * Space between that the designer set on the container, or on a removed wrapper
+ * holding exactly these layers in the same direction, stays space between:
+ * measured, it is only a gap that happens to fit today's width.
+ */
+function keepSpaceBetween(plan) {
+  const body = plan.body;
+  if (body.kind !== "stack" || body.spaceBetween || body.children.length < 2) return;
+  const ids = plan.flow.map((leaf) => leaf.node.id).sort().join("|");
+  const sources = [plan.container].concat(
+    plan.dissolved.filter((entry) => entry.leafIds.slice().sort().join("|") === ids).map((entry) => entry.node)
+  );
+  if (sources.some((node) => node.layoutMode === body.direction && node.primaryAxisAlignItems === "SPACE_BETWEEN")) {
+    body.spaceBetween = true;
+  }
+}
+
 /** A planned row or column holding exactly a dissolved wrapper's layers keeps that wrapper's name, and its frame. */
 function assignWrapperReuse(plan) {
   const byLeaves = {};
@@ -6800,19 +6589,95 @@ function assignWrapperReuse(plan) {
   }, plan.body.kind === "stack");
 }
 
+/**
+ * The spacing tokens the designer already bound on the container and the
+ * wrappers it absorbs, by kind and value. A rebuilt gap or padding with the same
+ * value takes the same token, so a Row Gap or Left-Right variable survives.
+ */
+function collectSpacingBindings(nodes) {
+  const found = {};
+  for (const node of nodes) {
+    for (const field of Object.keys(SPACING_FIELD_FAMILY)) {
+      const id = boundVariableId(node, field);
+      const value = id ? readNumber(node, field) : null;
+      if (value === null) continue;
+      const key = `${SPACING_FIELD_FAMILY[field]}|${roundLayout(value)}`;
+      if (!found[key]) found[key] = { id, ambiguous: false };
+      else if (found[key].id !== id) found[key].ambiguous = true;
+    }
+  }
+  return found;
+}
+
+/**
+ * Why a planned Grid is not how an expert would lay these layers out, or null:
+ * items pushed apart in one row (label and value, logo and menu) are a row.
+ */
+function gridMisfit(plan) {
+  const body = plan.body;
+  if (body.rows > 1) return null;
+  const widths = body.cells.map((cell) => cell.content.box.width);
+  // Columns are separated by a gutter; a gap wider than an item spaces the items apart,
+  // and a Grid would fix that distance at today's width.
+  if (body.columnGap > Math.min.apply(null, widths)) {
+    return "its items are spaced apart, not laid out in columns — a row";
+  }
+  return null;
+}
+
+/**
+ * The plan for what the user asked. For a Grid both Grid variants are planned —
+ * the container's own layers as cells (columns a designer drew) and the layers
+ * inside its wrappers — and the one leaving fewer layers wins; a tie goes to
+ * the designer's cells. Counts are compared only between Grids: a Grid's cells
+ * are converted in turn, so a count at this level undercounts what a Grid
+ * removes. Where no Grid describes the layers (one column, items spaced apart)
+ * the container gets Auto Layout with the reason, keeping rows that are Grids
+ * of their own as layers so each is converted in turn.
+ */
+function planForRequest(container, mode) {
+  if (mode !== "grid") return planLayoutConversion(container, "auto_layout", false);
+  const candidates = [];
+  let refusal = null;
+  let flowError = null;
+  const attempt = (planMode, keepDirect) => {
+    try {
+      const plan = planLayoutConversion(container, planMode, keepDirect);
+      const misfit = planMode === "grid" ? gridMisfit(plan) : null;
+      if (misfit) refusal = refusal || misfit;
+      else candidates.push(plan);
+      return true;
+    } catch (e) {
+      if (!isLayoutError(e) || e.graphic) throw e;
+      if (planMode === "grid") refusal = refusal || e.message;
+      else flowError = flowError || e;
+      return false;
+    }
+  };
+  attempt("grid", "cells");
+  attempt("grid", false);
+  if (candidates.length > 0) {
+    const layers = (plan) => describeLayoutPlan(plan).layerChange;
+    let best = candidates[0];
+    for (const plan of candidates) if (layers(plan) < layers(best)) best = plan;
+    return best;
+  }
+  if (!attempt("auto_layout", "rows")) attempt("auto_layout", false);
+  if (candidates.length === 0) throw flowError || layoutError(refusal);
+  candidates[0].gridRefusal = refusal;
+  return candidates[0];
+}
+
 /** The complete, unapplied plan for one container, or a layout error saying why it cannot convert. */
-function planLayoutConversion(container, mode) {
+function planLayoutConversion(container, mode, keepDirect) {
   const blocker = layoutConversionBlocker(container);
   if (blocker) throw layoutError(blocker);
   const frameBox = readBox(container);
-  const collected = collectLayoutLeaves(container);
+  const collected = collectLayoutLeaves(container, keepDirect);
   const leaves = collected.leaves;
   if (leaves.length === 0) throw layoutError("no visible layers");
   if (leaves.every((leaf) => GRAPHIC_LAYER_TYPES[leaf.node.type])) {
     throw layoutError("a drawing made only of vectors and shapes — kept as drawn", { graphic: true });
-  }
-  if (mode === "grid" && collected.hidden.length > 0) {
-    throw layoutError(`${collected.hidden.length} hidden layer(s) would take Grid cells — remove or show them first`);
   }
 
   const absolute = pickOverlayLayers(leaves, frameBox);
@@ -6829,6 +6694,7 @@ function planLayoutConversion(container, mode) {
   const plan = {
     container,
     mode,
+    keepDirect,
     frameBox,
     leaves,
     flow,
@@ -6837,15 +6703,19 @@ function planLayoutConversion(container, mode) {
     hidden: collected.hidden,
     body: mode === "grid" ? planGridBody(flow, frameBox) : planStackBody(flow, frameBox),
   };
+  keepSpaceBetween(plan);
   orderOverlayLayers(plan);
   assignWrapperReuse(plan);
+  plan.spacingBindings = collectSpacingBindings([container].concat(plan.dissolved.map((entry) => entry.node)));
   return plan;
 }
 
 function describeLayoutBody(body) {
   if (body.kind === "grid") {
     const tracks = body.columnSizes ? `fixed columns ${body.columnSizes.join("/")}px` : "equal columns";
-    return `${body.columns}-column Grid, ${body.rows} row(s), ${tracks}, gaps ${body.rowGap}/${body.columnGap}px`;
+    const spacers = body.rowSizes.filter((track) => track.type === "FIXED").map((track) => track.value);
+    const spacerText = spacers.length ? `, spacer row(s) ${spacers.join("/")}px` : "";
+    return `${body.columns}-column Grid, ${body.rows} row(s)${spacerText}, ${tracks}, gaps ${body.rowGap}/${body.columnGap}px`;
   }
   const direction = body.direction === "VERTICAL" ? "vertical" : "horizontal";
   return `${direction}, ${body.spaceBetween ? "space between" : `gap ${body.gap}px`}`;
@@ -6866,6 +6736,8 @@ function describeLayoutPlan(plan) {
     name: plan.container.name,
     type: plan.container.type,
     mode: plan.mode,
+    gridRefusal: plan.gridRefusal || null,
+    rebuild: isAutoLayout(plan.container),
     layout: describeLayoutBody(plan.body),
     padding: [padding.top, padding.right, padding.bottom, padding.left],
     layers: plan.leaves.length,
@@ -6885,23 +6757,60 @@ function describeLayoutPlan(plan) {
 function collectLayoutJobs(node, mode, sink, depth) {
   if (!node || node.removed || depth > 40) return;
   if (node.visible === false || isInstrumentation(node) || isComponentLike(node)) return;
-  if ((node.type === "FRAME" && !isAutoLayout(node)) || node.type === "GROUP") {
-    try {
-      const plan = planLayoutConversion(node, mode);
-      const job = { node, mode, plan, inner: { jobs: [], blocked: [], graphics: 0 } };
-      for (const leaf of plan.leaves) collectLayoutJobs(leaf.node, "auto_layout", job.inner, depth + 1);
-      sink.jobs.push(job);
+  if (node.type === "FRAME" || node.type === "GROUP") {
+    // An image frame or an icon drawing holds nothing to lay out.
+    if (node.children.length === 0) return;
+    if (isDrawing(node)) {
+      sink.graphics++;
       return;
+    }
+    // Frames already in Auto Layout are rebuilt where that removes wrappers or makes a Grid.
+    const rebuild = isAutoLayout(node);
+    const target = isLayoutTarget(node, sink);
+    const hasWrappers = node.children.some(isDissolvableWrapper);
+    const worth = !rebuild || target || hasWrappers || mode === "grid";
+    try {
+      const plan = worth ? planForRequest(node, mode) : null;
+      if (plan && (!rebuild || plan.mode === "grid" || describeLayoutPlan(plan).layerChange < 0)) {
+        const job = { node, name: node.name, mode, plan, inner: { jobs: [], blocked: [], graphics: 0 } };
+        for (const leaf of plan.leaves) collectLayoutJobs(leaf.node, mode, job.inner, depth + 1);
+        sink.jobs.push(job);
+        return;
+      }
     } catch (e) {
       if (!isLayoutError(e)) throw e;
       if (e.graphic) {
         sink.graphics++;
         return;
       }
-      sink.blocked.push({ id: node.id, name: node.name, type: node.type, reason: e.message });
+      // An Auto Layout frame nobody pointed at, with nothing to remove, is already fine.
+      if (!rebuild || target || hasWrappers) {
+        sink.blocked.push({ id: node.id, name: node.name, type: node.type, reason: e.message });
+      }
     }
   }
   if (isContainer(node)) for (const child of node.children) collectLayoutJobs(child, mode, sink, depth + 1);
+}
+
+/** A frame or group made only of vector shapes: an icon, kept as drawn. */
+function isDrawing(node) {
+  let budget = 200;
+  const visit = (n) => {
+    if (budget-- <= 0) return false;
+    if (GRAPHIC_LAYER_TYPES[n.type]) return true;
+    if ((n.type === "GROUP" || n.type === "FRAME") && n.children.length > 0 && !(n.type === "FRAME" && hasVisualPresence(n))) {
+      return n.children.every(visit);
+    }
+    return false;
+  };
+  return visit(node);
+}
+
+/** The selected layer itself, or a top-level frame when the whole page is the scope. */
+function isLayoutTarget(node, sink) {
+  if (!sink.targets) return false;
+  if (sink.targets.has(node)) return true;
+  return !!node.parent && node.parent.type === "PAGE" && sink.targets.has(node.parent);
 }
 
 function describeLayoutJob(job) {
@@ -6909,7 +6818,7 @@ function describeLayoutJob(job) {
   const keptFree = [];
   const walk = (sink) => {
     for (const child of sink.jobs) {
-      inner.push({ id: child.node.id, name: child.node.name, layout: describeLayoutBody(child.plan.body) });
+      inner.push({ id: child.node.id, name: child.node.name, layout: describeLayoutBody(child.plan.body), gridRefusal: child.plan.gridRefusal || null });
       walk(child.inner);
     }
     for (const blocked of sink.blocked) keptFree.push(blocked);
@@ -6918,14 +6827,45 @@ function describeLayoutJob(job) {
   return Object.assign(describeLayoutPlan(job.plan), { inner, keptFree });
 }
 
+/** Write a gap or padding, keeping a bound token when its value already matches. */
+function writeSpacingField(node, key, value) {
+  if (boundVariableId(node, key)) {
+    const current = readNumber(node, key);
+    if (current !== null && Math.abs(current - value) <= 0.01) return;
+    node.setBoundVariable(key, null);
+  }
+  node[key] = value;
+}
+
+function writePadding(frame, padding) {
+  writeSpacingField(frame, "paddingTop", padding.top);
+  writeSpacingField(frame, "paddingRight", padding.right);
+  writeSpacingField(frame, "paddingBottom", padding.bottom);
+  writeSpacingField(frame, "paddingLeft", padding.left);
+}
+
 function applyStackProperties(frame, stack, padding) {
+  try {
+    if (frame.layoutWrap === "WRAP") frame.layoutWrap = "NO_WRAP";
+  } catch (e) { /* not an Auto Layout property here */ }
   frame.primaryAxisAlignItems = stack.spaceBetween ? "SPACE_BETWEEN" : "MIN";
   frame.counterAxisAlignItems = stack.counterAlign;
-  frame.itemSpacing = stack.spaceBetween ? 0 : stack.gap;
-  frame.paddingTop = padding.top;
-  frame.paddingRight = padding.right;
-  frame.paddingBottom = padding.bottom;
-  frame.paddingLeft = padding.left;
+  writeSpacingField(frame, "itemSpacing", stack.spaceBetween ? 0 : stack.gap);
+  writePadding(frame, padding);
+}
+
+/**
+ * Fill resolves against the parent a layer leaves, so a layer that filled its
+ * old Auto Layout parent is fixed at its rendered size before it moves.
+ */
+function releaseFillSizing(node, sizing) {
+  if (!sizing || node.removed) return;
+  for (const axis of ["h", "v"]) {
+    if (sizing[axis] !== "FILL") continue;
+    try {
+      writeLayoutSizing(node, axis, "FIXED");
+    } catch (e) { /* no longer in Auto Layout */ }
+  }
 }
 
 function stackTokenFields(stack, padding) {
@@ -6963,6 +6903,44 @@ function placeStackChildren(frame, stack, built) {
   });
 }
 
+/**
+ * A layer that filled the width of its old column and still spans the rebuilt
+ * column's full width keeps Fill, so the design stays responsive.
+ */
+function restoreFillWidth(frame, plan) {
+  const body = plan.body;
+  if (body.direction !== "VERTICAL") return;
+  const inner = plan.frameBox.width - body.padding.left - body.padding.right;
+  body.children.forEach((child, i) => {
+    let sizing = null;
+    if (child.kind === "leaf") sizing = child.leaf.sizing;
+    else if (child.reuse) {
+      const entry = plan.dissolved.find((candidate) => candidate.node === child.reuse);
+      sizing = entry ? entry.sizing : null;
+    }
+    if (!sizing || sizing.h !== "FILL" || Math.abs(child.box.width - inner) > LAYOUT_TOLERANCE) return;
+    try {
+      writeLayoutSizing(frame.children[i], "h", "FILL");
+    } catch (e) { /* stays Fixed at the same width */ }
+  });
+}
+
+/**
+ * Hidden layers take no space in Auto Layout, but a Grid would give them a
+ * cell, and a removed wrapper cannot keep them. They move into the rebuilt
+ * frame as hidden absolute layers at the position they had, so showing one
+ * again puts it back where the designer drew it.
+ */
+function placeHiddenLayers(frame, plan, pinAll) {
+  for (const entry of plan.hidden) {
+    const node = entry.node;
+    if (node.removed) continue;
+    if (!pinAll && node.parent === frame) continue;
+    frame.appendChild(node);
+    pinOverlay(frame, entry, entry.transform, plan.frameBox);
+  }
+}
+
 function pinOverlay(frame, leaf, transform, origin) {
   leaf.node.layoutPositioning = "ABSOLUTE";
   leaf.node.x = transform[0][2] - origin.x;
@@ -6990,6 +6968,22 @@ function replaceGroupWithFrame(group, parent, index) {
   return frame;
 }
 
+/**
+ * Fix both axes at the frame's original size while its layers are rearranged;
+ * the content-driven axis is released at the end. Confirmed live: turning a row
+ * into a column swaps which axis hugs (a Fixed-width row becomes a Hug-width
+ * column), and resize() to the size it already has changes nothing — so without
+ * this, removing a wrapper shrinks the frame to its content.
+ */
+function pinFrameSize(frame, origin) {
+  for (const axis of ["h", "v"]) {
+    try {
+      if (readLayoutSizing(frame, axis) === "HUG") writeLayoutSizing(frame, axis, "FIXED");
+    } catch (e) { /* resize below fixes it */ }
+  }
+  frame.resize(origin.width, origin.height);
+}
+
 /** Apply a plan to frame. Returns the frames whose gap and padding may bind to tokens. */
 function buildLayoutPlan(frame, plan) {
   const built = [];
@@ -6998,6 +6992,8 @@ function buildLayoutPlan(frame, plan) {
   const transforms = plan.absolute.map((leaf) => leaf.node.absoluteTransform);
   const overlayTransform = (leaf) => transforms[plan.absolute.indexOf(leaf)];
   const sizing = { h: readLayoutSizing(frame, "h"), v: readLayoutSizing(frame, "v") };
+  for (const leaf of plan.leaves) releaseFillSizing(leaf.node, leaf.sizing);
+  for (const entry of plan.dissolved) releaseFillSizing(entry.node, entry.sizing);
 
   if (body.kind === "grid") {
     // Grid cells are claimed by whatever the frame already holds, so the layers wait outside.
@@ -7007,7 +7003,7 @@ function buildLayoutPlan(frame, plan) {
     try {
       for (const child of frame.children.slice()) holder.appendChild(child);
       frame.layoutMode = "GRID";
-      frame.resize(origin.width, origin.height);
+      pinFrameSize(frame, origin);
       frame.gridAutoTracks = "NONE";
       frame.gridItemsPositioning = "MANUAL";
       frame.gridRowCount = body.rows;
@@ -7021,13 +7017,14 @@ function buildLayoutPlan(frame, plan) {
           track.value = 1;
         }
       });
-      frame.gridRowSizes.forEach((track) => { track.type = "HUG"; });
-      frame.gridRowGap = body.rowGap;
-      frame.gridColumnGap = body.columnGap;
-      frame.paddingTop = body.padding.top;
-      frame.paddingRight = body.padding.right;
-      frame.paddingBottom = body.padding.bottom;
-      frame.paddingLeft = body.padding.left;
+      frame.gridRowSizes.forEach((track, i) => {
+        const planned = body.rowSizes[i];
+        track.type = planned.type;
+        if (planned.type === "FIXED") track.value = planned.value;
+      });
+      writeSpacingField(frame, "gridRowGap", body.rowGap);
+      writeSpacingField(frame, "gridColumnGap", body.columnGap);
+      writePadding(frame, body.padding);
       // An absolute layer passes through a cell on its way in, so it goes before the cells fill.
       for (const leaf of plan.below.concat(plan.above)) {
         frame.appendChild(leaf.node);
@@ -7046,9 +7043,11 @@ function buildLayoutPlan(frame, plan) {
         node.gridChildHorizontalAlign = cell.horizontal;
         node.gridChildVerticalAlign = cell.vertical;
         if (cell.fillWidth) writeLayoutSizing(node, "h", "FILL");
+        if (cell.fillHeight) writeLayoutSizing(node, "v", "FILL");
       }
       for (const leaf of plan.below.slice().reverse()) frame.insertChild(0, leaf.node);
       for (const leaf of plan.above) frame.appendChild(leaf.node);
+      placeHiddenLayers(frame, plan, true);
       if (body.autoFlow) {
         try {
           frame.gridItemsPositioning = "ROW_AUTO_FLOW";
@@ -7076,10 +7075,10 @@ function buildLayoutPlan(frame, plan) {
     });
   } else {
     frame.layoutMode = body.direction;
-    // A literal resize pins both axes at the original size; the content-driven axis is released below.
-    frame.resize(origin.width, origin.height);
+    pinFrameSize(frame, origin);
     applyStackProperties(frame, body, body.padding);
     placeStackChildren(frame, body, built);
+    restoreFillWidth(frame, plan);
     let index = 0;
     for (const leaf of plan.below) {
       frame.insertChild(index++, leaf.node);
@@ -7089,6 +7088,7 @@ function buildLayoutPlan(frame, plan) {
       frame.appendChild(leaf.node);
       pinOverlay(frame, leaf, overlayTransform(leaf), origin);
     }
+    placeHiddenLayers(frame, plan, false);
     built.push({ node: frame, fields: stackTokenFields(body, body.padding) });
   }
 
@@ -7107,10 +7107,11 @@ function removeEmptiedWrappers(plan) {
   }
 }
 
+/** The first tracked layer that disappeared or moved. Names are read beforehand: a removed node has none. */
 function findMovedLayer(tracked) {
   for (const entry of tracked) {
-    if (entry.node.removed) return { node: entry.node, removed: true };
-    if (layoutBoxMoved(entry.box, readBox(entry.node))) return { node: entry.node, removed: false };
+    if (entry.node.removed) return { name: entry.name, removed: true };
+    if (layoutBoxMoved(entry.box, readBox(entry.node))) return { name: entry.name, removed: false };
   }
   return null;
 }
@@ -7144,7 +7145,7 @@ async function applyLayoutPlan(plan) {
   const index = parent.children.indexOf(original);
   const name = original.name;
   const transform = original.relativeTransform;
-  const tracked = plan.leaves.map((leaf) => ({ node: leaf.node, box: leaf.box }));
+  const tracked = plan.leaves.map((leaf) => ({ node: leaf.node, name: leaf.node.name, box: leaf.box }));
 
   let backup;
   try {
@@ -7162,9 +7163,9 @@ async function applyLayoutPlan(plan) {
     const built = buildLayoutPlan(frame, plan);
     removeEmptiedWrappers(plan);
     if (frame !== original && !original.removed && original.children.length === 0) original.remove();
-    const moved = findMovedLayer(tracked.concat([{ node: frame, box: plan.frameBox }]));
+    const moved = findMovedLayer(tracked.concat([{ node: frame, name, box: plan.frameBox }]));
     if (moved) {
-      throw layoutError(`"${moved.node.name}" would ${moved.removed ? "disappear" : "move or change size"}`);
+      throw layoutError(`"${moved.name}" would ${moved.removed ? "disappear" : "move or change size"}`);
     }
     backup.remove();
     if (typeof figma.commitUndo === "function") figma.commitUndo();
@@ -7174,8 +7175,10 @@ async function applyLayoutPlan(plan) {
     const restored = restoreFromBackup({ original, frame, backup, parent, index, name, transform, box: plan.frameBox });
     return {
       ok: false,
+      // The copy that took the original's place is a different node: callers must use it from now on.
+      replacement: backup.removed ? null : backup,
       reason: restored
-        ? `${why}, so it was put back exactly as it was (the layers inside it now have new IDs)`
+        ? `${why}, so it was put back exactly as it was`
         : `${why}, and putting it back did not fully succeed — a hidden copy named "${name} (layout backup)" ` +
           "is on the page; undo (Cmd+Z) to recover",
     };
@@ -7230,12 +7233,23 @@ async function buildSpacingTokens() {
   return byValue;
 }
 
-async function bindLayoutTokens(built, tokens, report) {
+async function bindLayoutTokens(built, tokens, report, kept) {
   for (const entry of built) {
     for (const field of entry.fields) {
       const key = field[0];
       const value = field[1];
       if (!(value > 0) || boundVariableId(entry.node, key)) continue;
+      const previous = kept ? kept[`${SPACING_FIELD_FAMILY[key]}|${roundLayout(value)}`] : null;
+      if (previous && !previous.ambiguous) {
+        try {
+          const variable = await figma.variables.getVariableByIdAsync(previous.id);
+          if (variable) {
+            entry.node.setBoundVariable(key, variable);
+            report.tokensBound.push(`${entry.node.name}: ${key} → ${variable.name} (kept from the original layout)`);
+            continue;
+          }
+        } catch (e) { /* falls back to the spacing scale */ }
+      }
       const hit = tokens ? tokens[String(roundLayout(value))] : null;
       if (hit && !hit.ambiguous) {
         try {
@@ -7253,28 +7267,38 @@ async function executeLayoutJob(job, tokens, report) {
   for (const child of job.inner.jobs) await executeLayoutJob(child, tokens, report);
   for (const blocked of job.inner.blocked) report.keptFree.push(blocked);
   const node = job.node;
+  // A put-back replaces the node, so its name is read while it still exists.
+  const id = node.id;
+  const name = job.name;
   if (node.removed) {
-    report.skipped.push({ id: node.id, name: node.name, reason: "it no longer exists" });
+    report.skipped.push({ id, name, reason: "it no longer exists" });
     return;
   }
   let plan;
   try {
-    // Converting its layers first may have replaced some of them, so plan again.
-    plan = planLayoutConversion(node, job.mode);
+    // Converting its layers first may have replaced some of them, so plan again —
+    // the same variant the user approved, not a new choice.
+    plan = planLayoutConversion(node, job.plan.mode, job.plan.keepDirect);
+    plan.gridRefusal = job.plan.gridRefusal;
   } catch (e) {
     if (!isLayoutError(e)) throw e;
-    report.skipped.push({ id: node.id, name: node.name, reason: e.message });
+    report.skipped.push({ id, name, reason: e.message });
     return;
   }
   const summary = describeLayoutPlan(plan);
   const result = await applyLayoutPlan(plan);
   if (!result.ok) {
-    report.skipped.push({ id: node.id, name: node.name, reason: result.reason });
+    const entry = { id, name, reason: result.reason };
+    if (result.replacement) {
+      entry.newId = result.replacement.id;
+      report.replacements.set(id, result.replacement);
+    }
+    report.skipped.push(entry);
     return;
   }
   summary.id = result.frame.id;
   report.converted.push(summary);
-  await bindLayoutTokens(result.built, tokens, report);
+  await bindLayoutTokens(result.built, tokens, report, plan.spacingBindings);
 }
 
 async function resolveLayoutTargets(params) {
@@ -7305,10 +7329,8 @@ async function convertLayoutCommand(params) {
   const opts = params || {};
   const mode = opts.mode === "grid" ? "grid" : "auto_layout";
   const resolved = await resolveLayoutTargets(opts);
-  const targets = resolved.targets;
-  const targetInfo = targets.map((t) => ({ id: t.id, name: t.name, type: t.type }));
-  const sink = { jobs: [], blocked: [], graphics: 0 };
-  for (const target of targets) collectLayoutJobs(target, mode, sink, 0);
+  const targetInfo = resolved.targets.map((t) => ({ id: t.id, name: t.name, type: t.type }));
+  const sink = scanLayoutJobs(resolved.targets, mode);
 
   if (opts.dryRun) {
     return {
@@ -7322,15 +7344,43 @@ async function convertLayoutCommand(params) {
     };
   }
 
-  const confirmed = new Set(Array.isArray(opts.confirmedIds) ? opts.confirmedIds : []);
+  const report = await runConfirmedLayoutJobs(sink, opts.confirmedIds, opts.bindTokens !== false);
+  return Object.assign({ dryRun: false, mode, scope: resolved.scope, targets: targetInfo }, report);
+}
+
+/** Every container under the targets that can convert, as jobs, plus what cannot and why. */
+function scanLayoutJobs(targets, mode) {
+  const sink = { jobs: [], blocked: [], graphics: 0, targets: new Set(targets) };
+  for (const target of targets) collectLayoutJobs(target, mode, sink, 0);
+  return sink;
+}
+
+/** The jobs that become a Grid, outermost first; a Grid's inner conversions go with it. */
+function gridJobs(jobs) {
+  const found = [];
+  for (const job of jobs) {
+    if (job.plan.mode === "grid") found.push(job);
+    else found.push.apply(found, gridJobs(job.inner.jobs));
+  }
+  return found;
+}
+
+/**
+ * Convert the confirmed jobs. A confirmed job converts with everything inside
+ * it; an unconfirmed one may still hold a confirmed card. Shared by
+ * convert_layout and clean_layers' Grid proposals.
+ */
+async function runConfirmedLayoutJobs(sink, confirmedIds, bindTokens) {
+  const confirmed = new Set(Array.isArray(confirmedIds) ? confirmedIds : Array.from(confirmedIds || []));
   const report = { converted: [], skipped: [], keptFree: [], pending: [], tokensBound: [], tokensMissing: [] };
-  const tokens = opts.bindTokens === false ? null : await buildSpacingTokens();
+  // Nodes put back from their copy, by the ID they had; not part of the reply.
+  Object.defineProperty(report, "replacements", { value: new Map(), enumerable: false });
+  const tokens = bindTokens ? await buildSpacingTokens() : null;
   const handled = new Set();
   const markHandled = (job) => {
     handled.add(job.node.id);
     job.inner.jobs.forEach(markHandled);
   };
-  // A confirmed job converts with everything inside it; an unconfirmed one may still hold a confirmed card.
   const run = async (jobs, topLevel) => {
     for (const job of jobs) {
       if (confirmed.has(job.node.id)) {
@@ -7345,17 +7395,15 @@ async function convertLayoutCommand(params) {
   };
   await run(sink.jobs, true);
   for (const id of confirmed) {
-    if (!handled.has(id)) {
-      const blocked = sink.blocked.find((entry) => entry.id === id);
-      report.skipped.push({
-        id,
-        name: blocked ? blocked.name : id,
-        reason: blocked ? blocked.reason : "not found in scope as a free-positioned frame or group that can convert",
-      });
-    }
+    if (handled.has(id)) continue;
+    const blocked = sink.blocked.find((entry) => entry.id === id);
+    report.skipped.push({
+      id,
+      name: blocked ? blocked.name : id,
+      reason: blocked ? blocked.reason : "not found in scope as a frame or group that can convert",
+    });
   }
-
-  return Object.assign({ dryRun: false, mode, scope: resolved.scope, targets: targetInfo }, report);
+  return report;
 }
 
 // ─── Command entry points ──────────────────────────────────────────────────
@@ -7421,12 +7469,12 @@ async function cleanLayersCommand(params) {
   });
 
   const report = emptyCleanupReport();
-  const countLayers = () =>
-    targets.reduce(
+  const countLayers = (roots) =>
+    roots.reduce(
       (sum, target) => sum + countDescendants(target, function () { return true; }, 5000),
       0
     );
-  const before = countLayers();
+  const before = countLayers(targets);
   const targetInfo = targets.map((t) => ({ id: t.id, name: t.name, type: t.type }));
 
   if (opts.dryRun) {
@@ -7442,7 +7490,7 @@ async function cleanLayersCommand(params) {
       walk(target, 0);
       if (opts.removeUnwanted !== false) removeUnwantedLayers(target, report, gate);
       if (opts.collapseWrappers !== false) collapseRedundantWrappers(target, report, gate);
-      for (const plan of findGridCandidates(target)) report.gridCandidates.push(describeGridCandidate(plan));
+      for (const job of gridJobs(scanLayoutJobs([target], "grid").jobs)) report.gridCandidates.push(describeLayoutJob(job));
       flagLayoutGroups(target, report);
       flagExcessiveNesting(target, report);
     }
@@ -7463,22 +7511,27 @@ async function cleanLayersCommand(params) {
     };
   }
 
-  const handledGridIds = new Set();
   for (const target of targets) {
-    const targetOpts = Object.assign({}, opts, gate, { interactive: true });
-    cleanStructure(target, targetOpts, report, gate);
-    // Grids after the structural pass, so wrappers it already collapsed are not counted twice.
-    await applyGridConversions(target, gate, report, handledGridIds);
-    finishCleanup(target, targetOpts, report);
+    cleanStructure(target, Object.assign({}, opts, gate, { interactive: true }), report, gate);
   }
-  for (const id of gate.gridIds) {
-    if (!handledGridIds.has(id)) {
-      report.gridSkipped.push({
-        id, name: id, reason: "not found in the selection as a heading + equal-row section",
-      });
-    }
+  // Grids after the structural pass, with the planner convert_layout uses; only confirmed IDs convert.
+  const grids = gridJobs(scanLayoutJobs(targets, "grid").jobs);
+  const layout = await runConfirmedLayoutJobs({ jobs: grids, blocked: [] }, gate.gridIds, true);
+  report.gridConverted = layout.converted;
+  report.gridSkipped = layout.skipped;
+  report.gridCandidates = layout.pending;
+  // A section put back from its copy is a new node; the rest of the cleanup continues on it.
+  const current = targets
+    .map((target) => (target.removed ? layout.replacements.get(target.id) : target))
+    .filter((target) => target && !target.removed);
+  if (layout.tokensMissing.length) {
+    const values = Array.from(new Set(layout.tokensMissing.map((m) => `${m.value}px`)));
+    report.warnings.push(`No spacing token for ${values.join(", ")} in the converted Grids — kept as manual values.`);
   }
-  const after = countLayers();
+  for (const target of current) {
+    finishCleanup(target, Object.assign({}, opts, gate, { interactive: true }), report);
+  }
+  const after = countLayers(current);
 
   return {
     dryRun: false,

@@ -38,16 +38,18 @@ export const SERVER_INSTRUCTIONS = `
   3. **Apply** — call clean_layers without dryRun. Pass removeAllHidden: true (or confirmedHiddenIds for a subset) only if the user said yes to removing hidden layers, and put only the IDs the user approved in confirmedRiskyIds. Never fill these from your own judgement.
 - If the apply result lists new layers needing confirmation, ask again before touching them.
 - Protected layers (main components, component-property and variant layers) are never removed. Report them; do not try to delete them another way.
-- Grid proposals: when the scan lists a section under "Grid proposals" (heading + one row of equal items buried in wrappers), ask by name whether to convert it to a Grid with the items directly inside. Pass only the approved section IDs in confirmedGridIds. The plugin undoes any conversion that would move something and reports why. Report that too; do not rebuild the section by hand with other tools.
+- Grid proposals: when the scan lists a section or row under "Grid proposals" (the same planner as convert_layout mode "grid"), ask by name whether to convert it to a Grid with its layers directly inside. Pass only the approved section IDs in confirmedGridIds. The plugin undoes any conversion that would move something and reports why. Report that too; do not rebuild the section by hand with other tools.
 - If a Grid conversion is not applied, report the reason and stop. NEVER imitate it with ungroup_nodes, move_node, or set_auto_layout layoutMode NONE. Ungrouping an Auto Layout row stacks its items in the parent, and pinning them with x/y leaves a frame that looks right but has no layout and no longer adapts.
 
 ## 3b. Convert to Auto Layout / Grid — Scan, Ask, Then Apply (MANDATORY)
-- When the user asks to convert a static (free-positioned) design, selection or page to Auto Layout or Grid, use convert_layout — mode "auto_layout" or "grid" as the user asked:
+- When the user asks to convert a design, selection or page to Auto Layout or Grid — static, or already Auto Layout with nested wrappers to remove — use convert_layout, mode "auto_layout" or "grid" as the user asked:
   1. **Scan** — convert_layout with dryRun: true (nodeId or the selection; nothing selected scans the whole page). Nothing is modified.
   2. **Ask** — name each proposal and its layout, and say which layers cannot convert and why, in the user's language.
   3. **Apply** — convert_layout without dryRun, with only the approved IDs in confirmedIds.
 - Hidden or empty layers the user wants removed first: run clean_layers' scan → ask → apply before converting.
-- A layer reported as not convertible stays as it is. NEVER force it with set_auto_layout, move_node or manual x/y — the tool refuses exactly when the result would look different.
+- "Grid", "full Grid", "Figma Grid system", "fewer layers": load the Grid_Convert_v1 skill with figma_skill and follow it — mode "grid" on the section or page the user named. It converts every section and row that forms columns into a Grid and everything else into Auto Layout, removing wrappers throughout; hidden layers are kept as hidden absolute layers. Tell the user which parts became Auto Layout and the gridRefusal reason for each.
+- A layer reported as not convertible stays as it is. NEVER force it with set_auto_layout, move_node, manual x/y, or an execute_code script that rebuilds the layout — the tool refuses exactly when the result would look different.
+- A conversion that is put back replaces the layer with its untouched copy, which has a new ID (listed as "→ now <id>"). The old ID is gone, and this is not a sync problem. Never retry the same apply or keep rescanning for a new ID: report the reason to the user and stop.
 - If the apply result lists spacing values with no token, ask whether to keep the manual values or add tokens. Never create tokens without a yes.
 
 ## 4. HTML / URL → Figma Import (MANDATORY)

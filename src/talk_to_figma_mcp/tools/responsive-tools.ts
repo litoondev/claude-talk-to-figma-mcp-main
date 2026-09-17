@@ -36,16 +36,6 @@ interface CleanupEntry {
   reason?: string;
 }
 
-interface GridProposal {
-  id: string;
-  name: string;
-  columns: number;
-  headers: string[];
-  items: string[];
-  itemName: string | null;
-  removes: string[];
-}
-
 interface CleanLayersResult {
   dryRun: boolean;
   targets?: Array<{ id: string; name: string; type?: string }>;
@@ -63,9 +53,9 @@ interface CleanLayersResult {
   hiddenLayers?: CleanupEntry[];
   needsConfirmation?: CleanupEntry[];
   protectedLayers?: CleanupEntry[];
-  gridCandidates?: GridProposal[];
-  gridConverted?: GridProposal[];
-  gridSkipped?: Array<{ id: string; name: string; reason: string }>;
+  gridCandidates?: LayoutConversionSummary[];
+  gridConverted?: LayoutConversionSummary[];
+  gridSkipped?: LayoutBlocked[];
   warnings: string[];
 }
 
@@ -74,6 +64,10 @@ interface LayoutConversionSummary {
   name: string;
   type: string;
   mode: "auto_layout" | "grid";
+  /** Already Auto Layout: rebuilt from measured positions to drop structural wrappers. */
+  rebuild?: boolean;
+  /** Grid was asked for; why these layers got Auto Layout instead. */
+  gridRefusal?: string | null;
   layout: string;
   padding: [number, number, number, number];
   layers: number;
@@ -82,7 +76,7 @@ interface LayoutConversionSummary {
   flattened: string[];
   absolute: string[];
   layerChange: number;
-  inner?: Array<{ id: string; name: string; layout: string }>;
+  inner?: Array<{ id: string; name: string; layout: string; gridRefusal?: string | null }>;
   keptFree?: LayoutBlocked[];
 }
 
@@ -91,6 +85,8 @@ interface LayoutBlocked {
   name: string;
   type?: string;
   reason: string;
+  /** Put back from its copy: the node now has this ID, and the old one no longer exists. */
+  newId?: string;
 }
 
 interface ConvertLayoutResult {
@@ -114,10 +110,11 @@ const CLEANUP_ENTRY_LIMIT = 40;
 
 function describeLayoutConversion(s: LayoutConversionSummary): string {
   const [top, right, bottom, left] = s.padding;
-  const parts = [`${s.layout}, padding ${top}/${right}/${bottom}/${left}px`];
+  const parts = [`${s.rebuild ? "already Auto Layout, rebuilt as " : ""}${s.layout}, padding ${top}/${right}/${bottom}/${left}px`];
   if (s.wrappersCreated) parts.push(`${s.wrappersCreated} new row/column frame(s)`);
   if (s.flattened.length) parts.push(`flattens ${s.flattened.map((n) => `"${n}"`).slice(0, 3).join(", ")}${s.flattened.length > 3 ? ", …" : ""}`);
   if (s.absolute.length) parts.push(`keeps ${s.absolute.map((n) => `"${n}"`).slice(0, 3).join(", ")}${s.absolute.length > 3 ? ", …" : ""} in place as absolute`);
+  if (s.gridRefusal) parts.push(`Auto Layout, not a Grid: ${s.gridRefusal}`);
   if (s.inner?.length) parts.push(`converts ${s.inner.length} frame(s) inside first`);
   return `"${s.name}" [id ${s.id}] — ${parts.join("; ")}`;
 }
@@ -125,7 +122,9 @@ function describeLayoutConversion(s: LayoutConversionSummary): string {
 function appendBlocked(lines: string[], heading: string, entries?: LayoutBlocked[]): void {
   if (!entries?.length) return;
   lines.push(`\n${heading} (${entries.length}):`);
-  for (const e of entries.slice(0, CLEANUP_ENTRY_LIMIT)) lines.push(`  "${e.name}" [id ${e.id}] — ${e.reason}`);
+  for (const e of entries.slice(0, CLEANUP_ENTRY_LIMIT)) {
+    lines.push(`  "${e.name}" [id ${e.id}${e.newId ? ` → now ${e.newId}` : ""}] — ${e.reason}`);
+  }
   if (entries.length > CLEANUP_ENTRY_LIMIT) {
     lines.push(`  … ${entries.length - CLEANUP_ENTRY_LIMIT} more — scan a smaller selection to see them`);
   }
@@ -136,18 +135,6 @@ function describeCleanupTargets(r: CleanLayersResult): string {
   if (targets.length === 1) return `"${targets[0].name}"`;
   const names = targets.slice(0, 3).map((t) => `"${t.name}"`).join(", ");
   return `${targets.length} layers (${names}${targets.length > 3 ? ", …" : ""})`;
-}
-
-function describeGridProposal(p: GridProposal): string {
-  const heading = p.headers.length
-    ? `${p.headers.map((h) => `"${h}"`).join(", ")} spanning all ${p.columns} columns, `
-    : "";
-  const items = p.itemName ? `${p.items.length} × "${p.itemName}"` : `${p.items.length} items`;
-  const removed = p.removes.slice(0, 3).map((r) => `"${r}"`).join(", ") + (p.removes.length > 3 ? ", …" : "");
-  return (
-    `"${p.name}" [id ${p.id}] — ${p.columns}-column Grid: ${heading}${items} directly inside; ` +
-    `removes ${p.removes.length} wrapper layer(s) (${removed})`
-  );
 }
 
 function appendCleanupEntries(lines: string[], heading: string, entries?: CleanupEntry[]): void {
@@ -825,9 +812,9 @@ export function registerResponsiveTools(server: McpServer): void {
       "setting or mask are never removed on inference. Run dryRun first — it lists them with IDs — " +
       "ask the user, then apply with removeAllHidden / confirmedHiddenIds / confirmedRiskyIds set " +
       "only from the user's answer. Main components and component-property layers are never removed. " +
-      "GRID: a vertical section holding heading(s) and one row of equal items (often buried in wrappers) " +
-      "is listed under 'Grid proposals'. Converting it puts the items directly inside a Grid with the " +
-      "heading spanning every column, keeping gap and padding variables. Only IDs the user confirmed in " +
+      "GRID: sections and rows whose layers a Grid holds with fewer frames (the same planner as " +
+      "convert_layout mode 'grid') are listed under 'Grid proposals'. Converting one puts its layers " +
+      "directly inside a Grid, keeping gap and padding variables. Only IDs the user confirmed in " +
       "confirmedGridIds are converted, and a conversion that would move anything is undone.",
     {
       nodeId: z
@@ -947,7 +934,7 @@ export function registerResponsiveTools(server: McpServer): void {
 
           if (r.gridCandidates?.length) {
             lines.push(`\nGrid proposals — converted only with the user's permission (${r.gridCandidates.length}):`);
-            for (const p of r.gridCandidates.slice(0, CLEANUP_ENTRY_LIMIT)) lines.push(`  ${describeGridProposal(p)}`);
+            for (const p of r.gridCandidates.slice(0, CLEANUP_ENTRY_LIMIT)) lines.push(`  ${describeLayoutConversion(p)}`);
           }
 
           const hiddenCount = r.hiddenLayers?.length ?? 0;
@@ -972,8 +959,8 @@ export function registerResponsiveTools(server: McpServer): void {
             }
             for (const p of grids.slice(0, CLEANUP_ENTRY_LIMIT)) {
               lines.push(
-                `  • "\\"${p.name}\\" can become a ${p.columns}-column Grid with its items directly inside ` +
-                  `(${p.removes.length} wrapper layer(s) removed, design unchanged). Convert it?" — ` +
+                `  • "\\"${p.name}\\" can become a ${p.layout} with its layers directly inside ` +
+                  `(${p.flattened.length} wrapper layer(s) removed, design unchanged). Convert it?" — ` +
                   `yes: add ${p.id} to confirmedGridIds.`
               );
             }
@@ -1022,15 +1009,17 @@ export function registerResponsiveTools(server: McpServer): void {
           }
           if (r.gridConverted?.length) {
             lines.push(`\nConverted to Grid (${r.gridConverted.length}):`);
-            for (const p of r.gridConverted.slice(0, 15)) lines.push(`  ${describeGridProposal(p)}`);
+            for (const p of r.gridConverted.slice(0, 15)) lines.push(`  ${describeLayoutConversion(p)}`);
           }
           if (r.gridSkipped?.length) {
             lines.push(`\nGrid conversion not applied (${r.gridSkipped.length}) — left exactly as it was:`);
-            for (const s of r.gridSkipped.slice(0, 15)) lines.push(`  "${s.name}" [id ${s.id}] — ${s.reason}`);
+            for (const s of r.gridSkipped.slice(0, 15)) {
+              lines.push(`  "${s.name}" [id ${s.id}${s.newId ? ` → now ${s.newId}` : ""}] — ${s.reason}`);
+            }
           }
           if (r.gridCandidates?.length) {
             lines.push(`\n${r.gridCandidates.length} Grid proposal(s) not converted — not confirmed:`);
-            for (const p of r.gridCandidates.slice(0, 15)) lines.push(`  ${describeGridProposal(p)}`);
+            for (const p of r.gridCandidates.slice(0, 15)) lines.push(`  ${describeLayoutConversion(p)}`);
           }
           appendCleanupEntries(lines, "Kept — needs the user's confirmation", r.needsConfirmation);
           appendCleanupEntries(lines, "Protected — never removed", r.protectedLayers);
@@ -1058,9 +1047,13 @@ export function registerResponsiveTools(server: McpServer): void {
     "convert_layout",
     "Convert free-positioned frames and groups (layers placed by x/y, no Auto Layout) into Auto Layout " +
       "or a Grid that renders EXACTLY where the layers were, with as few frames as possible. " +
+      "Also rebuilds frames that ALREADY use Auto Layout when they hold structural wrappers (frames or groups " +
+      "that paint nothing, e.g. Frame > Frame > Card, or a heading and a paragraph each in their own Auto Layout), " +
+      "and turns an Auto Layout section into a Grid on request. " +
       "Reads every layer's position and size, splits them into rows and columns, calculates gap and " +
       "padding, dissolves groups and frames that only held layers, and nests a row/column frame only " +
-      "where one gap cannot describe the spacing. A layer overlapping another (a badge on a card) stays " +
+      "where one gap cannot describe the spacing or the direction changes. Components and instances are " +
+      "kept whole. Existing gap/padding variables stay bound. A layer overlapping another (a badge on a card) stays " +
       "in place as absolute. Height becomes Hug; width keeps Fixed or Fill. Measured gap and padding bind " +
       "to the file's spacing scale (Gap/<n>, spacing/<n>) when a token has that exact value in every mode. " +
       "REFUSES rather than approximates: layers not aligned left/centre/right, uneven Grid spacing, " +
@@ -1083,8 +1076,9 @@ export function registerResponsiveTools(server: McpServer): void {
         .enum(["auto_layout", "grid"])
         .optional()
         .describe(
-          "'auto_layout' (default): horizontal/vertical stacks. 'grid': the container becomes a Figma Grid " +
-            "(rows × columns, a heading may span all columns); frames inside it still use Auto Layout."
+          "'auto_layout' (default): horizontal/vertical stacks. 'grid': a full Grid system — the container and every " +
+            "frame inside it that forms rows × columns becomes a Figma Grid (a heading may span all columns); single " +
+            "columns and items spaced apart in a row get Auto Layout, with the reason."
         ),
       dryRun: z
         .boolean()
@@ -1127,7 +1121,7 @@ export function registerResponsiveTools(server: McpServer): void {
             lines.push(`\nCan convert with no visual change (${proposals.length}):`);
             for (const p of proposals.slice(0, CLEANUP_ENTRY_LIMIT)) {
               lines.push(`  ${describeLayoutConversion(p)}`);
-              for (const inner of (p.inner ?? []).slice(0, 8)) lines.push(`      inside: "${inner.name}" [id ${inner.id}] — ${inner.layout}`);
+              for (const inner of (p.inner ?? []).slice(0, 8)) lines.push(`      inside: "${inner.name}" [id ${inner.id}] — ${inner.layout}${inner.gridRefusal ? ` (Auto Layout, not a Grid: ${inner.gridRefusal})` : ""}`);
               for (const kept of (p.keptFree ?? []).slice(0, 8)) lines.push(`      stays free-positioned: "${kept.name}" [id ${kept.id}] — ${kept.reason}`);
             }
           } else {
@@ -1141,7 +1135,7 @@ export function registerResponsiveTools(server: McpServer): void {
             lines.push("  Ask the user before converting, in their language, naming each proposal, e.g.");
             const first = proposals[0];
             lines.push(
-              `  • "\\"${first.name}\\" can become ${modeLabel} (${first.layout}) with the design unchanged` +
+              `  • "\\"${first.name}\\" can ${first.rebuild ? "be rebuilt as a flatter" : "become"} ${modeLabel} (${first.layout}) with the design unchanged` +
                 `${first.flattened.length ? ` (${first.flattened.length} wrapper layer(s) removed)` : ""}. Convert it?"`
             );
             lines.push("  Then call convert_layout again without dryRun, with only the approved IDs in confirmedIds.");
@@ -1182,6 +1176,12 @@ export function registerResponsiveTools(server: McpServer): void {
           }
           if (r.skipped?.length) {
             lines.push("\nReport the reasons for anything not converted. Do not imitate the conversion by hand.");
+          }
+          if (r.skipped?.some((s) => s.newId)) {
+            lines.push(
+              "A layer put back from its copy has a NEW ID (shown as → now …); the old ID no longer exists. " +
+                "Do not retry the same apply: it fails for the same reason. Tell the user the reason and stop."
+            );
           }
         }
 

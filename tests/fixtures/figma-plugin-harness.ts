@@ -90,6 +90,8 @@ export function makeNode(spec: any = {}): any {
     primaryAxisAlignItems: spec.primaryAxisAlignItems ?? "MIN",
     counterAxisAlignItems: spec.counterAxisAlignItems ?? "MIN",
     clipsContent: spec.clipsContent ?? false,
+    // Figma: a number on every frame and shape, figma.mixed when the corners differ.
+    cornerRadius: spec.cornerRadius ?? 0,
     gridRowGap: 0,
     gridColumnGap: 0,
     gridAutoTracks: "NONE",
@@ -105,6 +107,12 @@ export function makeNode(spec: any = {}): any {
     resolvedVariableModes: { ...(spec.resolvedVariableModes ?? spec.explicitVariableModes ?? {}) },
     getPluginData: () => "",
     resize(w: number, h: number) {
+      if (engine.enabled) {
+        // Confirmed live: resizing to the size a frame already renders at changes nothing,
+        // not even a hugging axis. Only a real change fixes both axes.
+        const current = this.parent ? this.absoluteBoundingBox : null;
+        if (current && Math.abs(current.width - w) < 0.01 && Math.abs(current.height - h) < 0.01) return;
+      }
       this.width = w;
       this.height = h;
       if (engine.enabled) {
@@ -121,6 +129,12 @@ export function makeNode(spec: any = {}): any {
       this._verticalSizing = "FIXED";
     },
     setBoundVariable(field: string, variable: any) {
+      if (variable === null) {
+        // Figma: binding null removes the variable and keeps the current value.
+        const { [field]: _removed, ...rest } = this.boundVariables;
+        this.boundVariables = rest;
+        return;
+      }
       this.boundVariables = {
         ...this.boundVariables,
         [field]: { type: "VARIABLE_ALIAS", id: variable.id },
@@ -181,6 +195,15 @@ export function makeNode(spec: any = {}): any {
       this.parent = null;
       this.removed = true;
       removeEmptiedGroup(oldParent, null);
+      // Figma: a removed node keeps its id and \`removed\`; reading anything else throws.
+      const id = this.id;
+      for (const key of ["name", "children", "width", "height", "x", "y"]) {
+        Object.defineProperty(this, key, {
+          configurable: true,
+          get: () => { throw new Error(`in get_${key}: The node with id "${id}" does not exist`); },
+          set: () => { throw new Error(`in set_${key}: The node with id "${id}" does not exist`); },
+        });
+      }
     },
     clone(nested = false) {
       const subtree: any[] = [];
@@ -438,13 +461,20 @@ function measureStack(frame: any, outer: { width: number; height: number } | nul
     : [frame.paddingLeft, frame.paddingRight, frame.paddingTop, frame.paddingBottom];
   const mainAxis = vertical ? "v" : "h";
   const crossAxis = vertical ? "h" : "v";
-  for (const kid of kids) {
-    if (sizingOf(kid, mainAxis) === "FILL") throw new Error("layout engine: main-axis Fill is not modelled");
-  }
   const hugMain = sizingOf(frame, mainAxis) === "HUG";
   const hugCross = sizingOf(frame, crossAxis) === "HUG";
-  const totalMain = sizes.reduce((sum: number, s: any) => sum + mainOf(s), 0);
   const fixedMain = vertical ? (outer ? outer.height : frame.height) : (outer ? outer.width : frame.width);
+  // Main-axis Fill shares what a fixed frame has left; in a hugging frame it keeps its own size.
+  const fillers = hugMain ? [] : kids.filter((kid: any) => sizingOf(kid, mainAxis) === "FILL");
+  if (fillers.length) {
+    if (frame.primaryAxisAlignItems === "SPACE_BETWEEN") throw new Error("layout engine: Fill with space between is not modelled");
+    const rest = kids.reduce((sum: number, kid: any, i: number) => sum + (fillers.includes(kid) ? 0 : mainOf(sizes[i])), 0);
+    const share = (fixedMain - padMainStart - padMainEnd - rest - Math.max(0, kids.length - 1) * frame.itemSpacing) / fillers.length;
+    kids.forEach((kid: any, i: number) => {
+      if (fillers.includes(kid)) sizes[i] = vertical ? { ...sizes[i], height: share } : { ...sizes[i], width: share };
+    });
+  }
+  const totalMain = sizes.reduce((sum: number, s: any) => sum + mainOf(s), 0);
   const fixedCross = vertical ? (outer ? outer.width : frame.width) : (outer ? outer.height : frame.height);
   const spaceBetween = frame.primaryAxisAlignItems === "SPACE_BETWEEN" && kids.length > 1;
   const gap = spaceBetween && !hugMain
@@ -453,8 +483,10 @@ function measureStack(frame: any, outer: { width: number; height: number } | nul
   const mainSize = hugMain
     ? padMainStart + totalMain + Math.max(0, kids.length - 1) * gap + padMainEnd
     : fixedMain;
+  // A hugging frame grows to its content, Fill children included (live: a FILL/FILL block in a
+  // FIXED/HUG row renders at its content height); in a fixed frame Fill takes what is there.
   const crossContent = kids
-    .filter((kid: any) => sizingOf(kid, crossAxis) !== "FILL")
+    .filter((kid: any) => hugCross || sizingOf(kid, crossAxis) !== "FILL")
     .reduce((max: number, kid: any) => Math.max(max, crossOf(sizes[kids.indexOf(kid)])), 0);
   const crossSize = hugCross ? padCrossStart + crossContent + padCrossEnd : fixedCross;
   const innerCross = crossSize - padCrossStart - padCrossEnd;
@@ -619,6 +651,28 @@ function installLayoutEngine(node: any, spec: any) {
     set: (value: number[][]) => {
       node.x = value[0][2];
       node.y = value[1][2];
+    },
+  });
+
+  // Figma stores sizing per primary/counter axis, so turning a row into a column swaps
+  // which of width and height hugs (confirmed live: FIXED/HUG row → HUG/FIXED column).
+  let layoutMode = node.layoutMode;
+  Object.defineProperty(node, "layoutMode", {
+    enumerable: true,
+    configurable: true,
+    get: () => layoutMode,
+    set: (value: string) => {
+      const flips = (layoutMode === "HORIZONTAL" && value === "VERTICAL") || (layoutMode === "VERTICAL" && value === "HORIZONTAL");
+      if (flips) {
+        const own = (sizing: string | null) => sizing === "HUG" || sizing === "FIXED";
+        const h = node._horizontalSizing ?? sizingOf(node, "h");
+        const v = node._verticalSizing ?? sizingOf(node, "v");
+        if (own(h) && own(v)) {
+          node._horizontalSizing = v;
+          node._verticalSizing = h;
+        }
+      }
+      layoutMode = value;
     },
   });
 

@@ -1,14 +1,14 @@
 /**
- * Grid conversion: a heading + one row of equal items, buried in wrappers,
- * becomes a Grid holding the items directly — only when the user confirmed the
- * section, and only when the result renders where the old layout did.
+ * clean_layers' Grid proposals use the same planner as convert_layout mode
+ * "grid": a section is proposed when a Grid holds its layers with fewer frames,
+ * converts only when the user confirmed its ID, and is put back if anything moved.
  *
  * The fixture mirrors the real "# Work Process" section: padding 120/100,
  * section gap bound to a variable, a 1240px row of four 298px cards with a 16px
  * gap, each card inside two transparent Auto Layout frames, each card instance
  * holding an absolutely positioned BG.
  */
-import { loadPlugin, makeNode, registerNodes, clearNodes } from "../fixtures/figma-plugin-harness";
+import { loadPlugin, makeNode, placeOnPage, registerNodes, clearNodes } from "../fixtures/figma-plugin-harness";
 
 let api: any;
 
@@ -18,7 +18,11 @@ const variable = (id: string, name: string, value: number) => ({
 
 beforeEach(() => {
   clearNodes();
-  ({ api } = loadPlugin({ variables: [variable("v:gap", "Row Gap", 40), variable("v:col", "Column Gap", 16)] }));
+  ({ api } = loadPlugin({
+    layoutEngine: true,
+    collections: [{ id: "c:1", name: "Spacing", modes: [{ modeId: "m", name: "Desk" }], variableIds: ["v:gap", "v:col", "v:lr"] }],
+    variables: [variable("v:gap", "Row Gap", 40), variable("v:col", "Column Gap", 16), variable("v:lr", "Left-Right", 100)],
+  }));
 });
 
 const alias = (id: string) => ({ type: "VARIABLE_ALIAS", id });
@@ -27,7 +31,7 @@ function card(n: number, spec: any = {}) {
   return makeNode({
     id: `card${n}`, name: "Card", type: "INSTANCE", layoutMode: "VERTICAL", width: 298, height: 380,
     layoutSizingHorizontal: "FILL", layoutSizingVertical: "FIXED", fills: [{ type: "SOLID" }],
-    children: [makeNode({ name: "BG", type: "RECTANGLE", layoutPositioning: "ABSOLUTE", width: 310, height: 1 })],
+    children: [makeNode({ name: "BG", type: "RECTANGLE", layoutPositioning: "ABSOLUTE", width: 298, height: 1 })],
     ...spec,
   });
 }
@@ -43,11 +47,12 @@ function wrapped(item: any, n: number) {
   });
 }
 
-function workProcess(overrides: { section?: any; row?: any; cards?: any[] } = {}) {
-  const cards = overrides.cards ?? [1, 2, 3, 4].map((n) => card(n));
+function workProcess(overrides: { row?: any } = {}) {
+  const cards = [1, 2, 3, 4].map((n) => card(n));
   const heading = makeNode({
     id: "heading", name: "Text_Container", type: "INSTANCE", layoutMode: "VERTICAL", width: 773, height: 100,
     layoutSizingHorizontal: "HUG", layoutSizingVertical: "HUG",
+    children: [makeNode({ name: "Title", type: "TEXT", width: 773, height: 100 })],
   });
   const row = makeNode({
     id: "row", name: "Container", layoutMode: "HORIZONTAL", width: 1240, height: 380, itemSpacing: 16,
@@ -61,8 +66,8 @@ function workProcess(overrides: { section?: any; row?: any; cards?: any[] } = {}
     layoutSizingHorizontal: "FIXED", layoutSizingVertical: "HUG", fills: [{ type: "SOLID" }],
     boundVariables: { itemSpacing: alias("v:gap"), paddingLeft: alias("v:lr"), paddingRight: alias("v:lr") },
     children: [heading, row],
-    ...overrides.section,
   });
+  placeOnPage(section);
   registerNodes(section);
   return { section, heading, row, cards };
 }
@@ -76,21 +81,10 @@ describe("proposal", () => {
 
     const r = await scan();
 
-    expect(r.gridCandidates).toEqual([
-      {
-        id: "wp",
-        name: "# Work Process",
-        columns: 4,
-        headers: ["Text_Container"],
-        items: ["Card", "Card", "Card", "Card"],
-        itemName: "Card",
-        removes: [
-          "Container",
-          "Frame 2147239191", "Frame 2147239181", "Frame 2147239192", "Frame 2147239182",
-          "Frame 2147239193", "Frame 2147239183", "Frame 2147239194", "Frame 2147239184",
-        ],
-      },
-    ]);
+    expect(r.gridCandidates).toHaveLength(1);
+    expect(r.gridCandidates[0]).toMatchObject({
+      id: "wp", name: "# Work Process", mode: "grid", layout: "4-column Grid, 2 row(s), equal columns, gaps 40/16px",
+    });
     expect(section.layoutMode).toBe("VERTICAL");
     expect(row.removed).toBe(false);
   });
@@ -113,6 +107,18 @@ describe("proposal", () => {
 
     expect(section.layoutMode).toBe("VERTICAL");
   });
+
+  it("a row that paints a background survives, and is proposed as a Grid of its own", async () => {
+    workProcess({ row: { fills: [{ type: "SOLID" }] } });
+    expect((await scan()).gridCandidates.map((p: any) => p.id)).toEqual(["row"]);
+  });
+
+  it("nothing inside a main component", async () => {
+    const { section } = workProcess();
+    const component = makeNode({ id: "comp", name: "Section", type: "COMPONENT", children: [section] });
+    registerNodes(component);
+    expect((await scan()).gridCandidates).toEqual([]);
+  });
 });
 
 describe("confirmed conversion", () => {
@@ -121,17 +127,15 @@ describe("confirmed conversion", () => {
 
     const r = await apply({ confirmedGridIds: ["wp"] });
 
+    expect(r.gridSkipped).toEqual([]);
     expect(section.layoutMode).toBe("GRID");
     expect(section.children.map((c: any) => c.id)).toEqual(["heading", "card1", "card2", "card3", "card4"]);
     expect(row.removed).toBe(true);
     expect(section.gridColumnCount).toBe(4);
-    expect(section.gridColumnSizes.every((t: any) => t.type === "FLEX" && t.value === 1)).toBe(true);
-    expect(section.gridAutoTracks).toBe("ROWS");
-    expect(section.gridItemsPositioning).toBe("ROW_AUTO_FLOW");
     expect(heading.gridColumnSpan).toBe(4);
     expect(heading.gridChildHorizontalAlign).toBe("CENTER");
-    expect(cards.every((c) => c.layoutSizingHorizontal === "FILL" && c.layoutSizingVertical === "FIXED")).toBe(true);
-    expect(r.gridConverted).toEqual([expect.objectContaining({ id: "wp", columns: 4, removes: ["Container"] })]);
+    expect(cards.every((c) => c.layoutSizingHorizontal === "FILL")).toBe(true);
+    expect(r.gridConverted.map((c: any) => c.id)).toEqual(["wp"]);
   });
 
   it("keeps gaps, their variables, padding and the section's sizing", async () => {
@@ -140,44 +144,13 @@ describe("confirmed conversion", () => {
     await apply({ confirmedGridIds: ["wp"] });
 
     expect([section.gridRowGap, section.gridColumnGap]).toEqual([40, 16]);
-    expect(section.boundVariables.gridRowGap).toEqual(alias("v:gap"));
-    expect(section.boundVariables.gridColumnGap).toEqual(alias("v:col"));
+    expect(section.boundVariables).toMatchObject({ gridRowGap: alias("v:gap"), gridColumnGap: alias("v:col"), paddingLeft: alias("v:lr") });
     expect([section.paddingTop, section.paddingRight, section.paddingBottom, section.paddingLeft]).toEqual([120, 100, 120, 100]);
     expect([section.layoutSizingHorizontal, section.layoutSizingVertical]).toEqual(["FIXED", "HUG"]);
   });
-});
 
-describe("undone when the Grid would not match", () => {
-  function expectRestored(section: any, row: any, cards: any[]) {
-    expect(section.layoutMode).toBe("VERTICAL");
-    expect(section.children.map((c: any) => c.id)).toEqual(["heading", "row"]);
-    expect(row.removed).toBe(false);
-    expect(row.layoutPositioning).toBe("AUTO");
-    expect(row.children.map((c: any) => c.id)).toEqual(["card1", "card2", "card3", "card4"]);
-    expect(cards.every((c) => c.layoutSizingHorizontal === "FILL")).toBe(true);
-    expect(section.boundVariables.itemSpacing).toEqual(alias("v:gap"));
-  }
-
-  it("when a card would move", async () => {
-    const cards = [1, 2, 3, 4].map((n) =>
-      card(n, {
-        absoluteBoundingBox: (node: any) => ({
-          x: (n - 1) * 314 + (node.parent?.layoutMode === "GRID" ? 6 : 0), y: 220, width: 298, height: 380,
-        }),
-      })
-    );
-    const { section, row } = workProcess({ cards });
-
-    const r = await apply({ confirmedGridIds: ["wp"] });
-
-    expect(r.gridSkipped).toEqual([
-      { id: "wp", name: "# Work Process", reason: '"Card" would move or resize as a Grid, so the section was left as it was' },
-    ]);
-    expectRestored(section, row, cards);
-  });
-
-  it("when Figma refuses a step", async () => {
-    const { section, row, cards } = workProcess();
+  it("is put back when Figma refuses a step", async () => {
+    const { section } = workProcess();
     Object.defineProperty(section, "gridColumnGap", {
       configurable: true,
       get: () => 0,
@@ -186,57 +159,23 @@ describe("undone when the Grid would not match", () => {
 
     const r = await apply({ confirmedGridIds: ["wp"] });
 
-    expect(r.gridSkipped[0].reason).toBe(
-      "Figma refused a step (gridColumnGap is not supported), so the section was left as it was"
-    );
-    expectRestored(section, row, cards);
+    expect(r.gridSkipped[0]).toMatchObject({
+      id: "wp",
+      name: "# Work Process",
+      reason: "Figma refused a step (gridColumnGap is not supported), so it was put back exactly as it was",
+      newId: expect.any(String),
+    });
+    expect(r.gridConverted).toEqual([]);
+    // The rest of the cleanup ran on the copy that took the section's place.
+    expect(r.layerCountAfter).toBeGreaterThan(0);
   });
 
   it("reports a confirmed ID that is not a candidate", async () => {
     workProcess();
-
     const r = await apply({ confirmedGridIds: ["1:999"] });
-
     expect(r.gridSkipped).toEqual([
-      { id: "1:999", name: "1:999", reason: "not found in the selection as a heading + equal-row section" },
+      { id: "1:999", name: "1:999", reason: "not found in scope as a frame or group that can convert" },
     ]);
-  });
-});
-
-describe("not proposed", () => {
-  it.each([
-    ["the row has padding", { row: { paddingLeft: 8 } }],
-    ["the row paints a background", { row: { fills: [{ type: "SOLID" }] } }],
-    ["the row wraps", { row: { layoutWrap: "WRAP" } }],
-    ["the row spaces items apart", { row: { primaryAxisAlignItems: "SPACE_BETWEEN" } }],
-    ["the row is narrower than the section's content", { row: { width: 1200 } }],
-    ["the section's width hugs its content", { section: { layoutSizingHorizontal: "HUG" } }],
-  ])("when %s", async (_label, overrides) => {
-    workProcess(overrides as any);
-    expect((await scan()).gridCandidates).toEqual([]);
-  });
-
-  it("when the items differ in width", async () => {
-    workProcess({ cards: [card(1), card(2), card(3), card(4, { width: 320 })] });
-    expect((await scan()).gridCandidates).toEqual([]);
-  });
-
-  it("when an item is hidden", async () => {
-    workProcess({ cards: [card(1), card(2), card(3), card(4, { visible: false })] });
-    expect((await scan()).gridCandidates).toEqual([]);
-  });
-
-  it("inside a main component", async () => {
-    const { section } = workProcess();
-    const component = makeNode({ id: "comp", name: "Section", type: "COMPONENT", children: [section] });
-    registerNodes(component);
-    expect((await scan()).gridCandidates).toEqual([]);
-  });
-
-  it("with more than one heading — Figma may place them side by side and refuse the span", async () => {
-    const { section } = workProcess();
-    section.insertChild(0, makeNode({ name: "Eyebrow", type: "TEXT", width: 120, height: 20 }));
-    expect((await scan()).gridCandidates).toEqual([]);
   });
 });
 

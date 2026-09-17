@@ -157,11 +157,18 @@ describe("clean_layers MCP tool — interactive flow", () => {
   const proposal = {
     id: "1:1",
     name: "# Work Process",
-    columns: 4,
-    headers: ["Text_Container"],
-    items: ["Card", "Card", "Card", "Card"],
-    itemName: "Card",
-    removes: ["Container", "Frame 1", "Frame 2", "Frame 3"],
+    type: "FRAME",
+    mode: "grid",
+    gridRefusal: null,
+    rebuild: true,
+    layout: "4-column Grid, 2 row(s), equal columns, gaps 40/16px",
+    padding: [120, 100, 120, 100],
+    layers: 5,
+    wrappers: 0,
+    wrappersCreated: 0,
+    flattened: ["Container", "Frame 1", "Frame 2", "Frame 3"],
+    absolute: [],
+    layerChange: -4,
   };
 
   it("a scan lists Grid proposals and tells the model to ask before converting", async () => {
@@ -172,10 +179,10 @@ describe("clean_layers MCP tool — interactive flow", () => {
 
     expect(text).toContain("Grid proposals — converted only with the user's permission (1):");
     expect(text).toContain(
-      '"# Work Process" [id 1:1] — 4-column Grid: "Text_Container" spanning all 4 columns, 4 × "Card" ' +
-        'directly inside; removes 4 wrapper layer(s) ("Container", "Frame 1", "Frame 2", …)'
+      '"# Work Process" [id 1:1] — already Auto Layout, rebuilt as 4-column Grid, 2 row(s), equal columns, ' +
+        'gaps 40/16px, padding 120/100/120/100px; flattens "Container", "Frame 1", "Frame 2", …'
     );
-    expect(text).toContain('\\"# Work Process\\" can become a 4-column Grid with its items directly inside');
+    expect(text).toContain('\\"# Work Process\\" can become a 4-column Grid, 2 row(s), equal columns, gaps 40/16px with its layers directly inside');
     expect(text).toContain("yes: add 1:1 to confirmedGridIds.");
     expect(text).not.toContain("Nothing needs the user's permission");
   });
@@ -188,7 +195,7 @@ describe("clean_layers MCP tool — interactive flow", () => {
       layerCountBefore: 92,
       layerCountAfter: 79,
       gridCandidates: [],
-      gridConverted: [{ ...proposal, removes: ["Container"] }],
+      gridConverted: [{ ...proposal, flattened: ["Container"] }],
       gridSkipped: [{ id: "2:2", name: "# Services", reason: '"Card" would move or resize as a Grid, so the section was left as it was' }],
     });
 
@@ -196,7 +203,7 @@ describe("clean_layers MCP tool — interactive flow", () => {
 
     expect(mockSendCommand.mock.calls[0][1]).toMatchObject({ confirmedGridIds: ["1:1", "2:2"] });
     expect(text).toContain("Converted to Grid (1):");
-    expect(text).toContain('"# Work Process" [id 1:1] — 4-column Grid');
+    expect(text).toContain('"# Work Process" [id 1:1] — already Auto Layout, rebuilt as 4-column Grid');
     expect(text).toContain("Grid conversion not applied (1) — left exactly as it was:");
     expect(text).toContain('"# Services" [id 2:2] — "Card" would move or resize as a Grid');
     expect(text).not.toContain("Nothing needed changing");
