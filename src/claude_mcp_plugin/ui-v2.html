@@ -1,0 +1,1116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Claude Talk to Figma</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --bg-primary: #292929;
+            --bg-secondary: #303030;
+            --text-primary: #ffffff;
+            --text-secondary: #a0a0a0;
+            --border-color: #3f3f3f;
+            --button-primary: #0066ff;
+            --button-hover: #0052cc;
+            --border-radius: 4px;
+            --transition: 200ms cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-primary);
+            color: var(--text-primary);
+            overflow: hidden;
+            width: 100%;
+            height: 100%;
+            margin: 0;
+            padding: 0;
+        }
+
+        /* ────────────────────────────────────────────────────────────────── */
+        /* Main Container */
+        /* ────────────────────────────────────────────────────────────────── */
+
+        #app {
+            display: flex;
+            flex-direction: column;
+            width: 100%;
+            height: 100%;
+            background-color: var(--bg-primary);
+        }
+
+        .app-main {
+            display: none;
+            flex: 1;
+            overflow: hidden;
+            flex-direction: row;
+        }
+
+        .app-main.active {
+            display: flex;
+        }
+
+        /* ────────────────────────────────────────────────────────────────── */
+        /* Sidebar Navigation */
+        /* ────────────────────────────────────────────────────────────────── */
+
+        .sidebar {
+            width: 200px;
+            background-color: var(--bg-secondary);
+            border-right: 1px solid var(--border-color);
+            padding: 16px 0;
+            overflow-y: auto;
+            flex-shrink: 0;
+        }
+
+        .sidebar-item {
+            padding: 12px 16px;
+            cursor: pointer;
+            transition: all var(--transition);
+            color: var(--text-secondary);
+            font-size: 13px;
+            border-left: 3px solid transparent;
+            user-select: none;
+        }
+
+        .sidebar-item:hover {
+            background-color: var(--border-color);
+            color: var(--text-primary);
+        }
+
+        .sidebar-item.active {
+            background-color: var(--button-primary);
+            color: white;
+            border-left-color: var(--button-primary);
+        }
+
+        /* ────────────────────────────────────────────────────────────────── */
+        /* Operations Grid */
+        /* ────────────────────────────────────────────────────────────────── */
+
+        .operations-grid {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 16px;
+            align-content: start;
+        }
+
+        .operation-card {
+            background-color: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: var(--border-radius);
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            transition: all var(--transition);
+            cursor: pointer;
+        }
+
+        .operation-card:hover {
+            border-color: var(--button-primary);
+            background-color: rgba(0, 102, 255, 0.05);
+        }
+
+        .operation-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .operation-icon {
+            font-size: 20px;
+            flex-shrink: 0;
+        }
+
+        .operation-title {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-primary);
+            flex: 1;
+        }
+
+        .operation-description {
+            font-size: 11px;
+            color: var(--text-secondary);
+            line-height: 1.4;
+        }
+
+        .operation-button {
+            background-color: var(--button-primary);
+            color: white;
+            border: none;
+            border-radius: 3px;
+            padding: 6px 12px;
+            font-size: 11px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all var(--transition);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 4px;
+        }
+
+        .operation-button:hover {
+            background-color: var(--button-hover);
+        }
+
+        /* Default: hide operations, show content */
+        .app-main {
+            display: none;
+        }
+
+        /* Responsive operations grid */
+        @media (max-width: 1000px) {
+            .sidebar {
+                width: 150px;
+            }
+
+            .operations-grid {
+                grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+                gap: 12px;
+                padding: 16px;
+            }
+
+            .operation-card {
+                padding: 12px;
+            }
+
+            .operation-button {
+                font-size: 10px;
+                padding: 5px 10px;
+            }
+        }
+
+        @media (max-width: 900px) {
+            .sidebar {
+                width: 130px;
+            }
+
+            .sidebar-item {
+                padding: 10px 12px;
+                font-size: 12px;
+            }
+
+            .operations-grid {
+                grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+            }
+        }
+
+        /* ────────────────────────────────────────────────────────────────── */
+        /* Header */
+        /* ────────────────────────────────────────────────────────────────── */
+
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 16px;
+            background-color: var(--bg-secondary);
+            border-bottom: 1px solid var(--border-color);
+            flex-shrink: 0;
+            min-height: 44px;
+        }
+
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex: 1;
+            min-width: 0;
+        }
+
+        .header-icon {
+            font-size: 20px;
+            flex-shrink: 0;
+        }
+
+        .header-title {
+            font-size: 14px;
+            font-weight: 600;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            color: var(--text-primary);
+        }
+
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-shrink: 0;
+        }
+
+        .header-btn {
+            display: none;
+        }
+
+        .header-btn:hover {
+            display: none;
+        }
+
+        /* ────────────────────────────────────────────────────────────────── */
+        /* Content Area */
+        /* ────────────────────────────────────────────────────────────────── */
+
+        .content-wrapper {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow-y: auto;
+            overflow-x: hidden;
+            padding: 0;
+            position: relative;
+        }
+
+        .content {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: flex-start;
+            padding: 24px 16px;
+            width: 100%;
+            box-sizing: border-box;
+            transition: padding var(--transition);
+        }
+
+        .content-inner {
+            width: 100%;
+            max-width: 360px;
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+        }
+
+        /* ────────────────────────────────────────────────────────────────── */
+        /* Logo & Branding */
+        /* ────────────────────────────────────────────────────────────────── */
+
+        .logo-section {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 12px;
+            text-align: center;
+        }
+
+        .logo {
+            font-size: 32px;
+            width: 64px;
+            height: 64px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background-color: var(--bg-secondary);
+            border-radius: var(--border-radius);
+        }
+
+        .product-name {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--text-primary);
+            line-height: 1.3;
+        }
+
+        .product-description {
+            font-size: 13px;
+            color: var(--text-secondary);
+            line-height: 1.4;
+        }
+
+        /* ────────────────────────────────────────────────────────────────── */
+        /* Guides Section */
+        /* ────────────────────────────────────────────────────────────────── */
+
+        .guides-section {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            width: 100%;
+        }
+
+        .guides-title {
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-secondary);
+            opacity: 0.7;
+            margin-bottom: 4px;
+        }
+
+        .guides-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+            width: 100%;
+        }
+
+        .guide-item {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 6px;
+            padding: 12px 8px;
+            background-color: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: var(--border-radius);
+            cursor: pointer;
+            transition: all var(--transition);
+            text-align: center;
+        }
+
+        .guide-item:hover {
+            background-color: var(--border-color);
+            border-color: #4a4a4a;
+        }
+
+        .guide-icon {
+            font-size: 20px;
+        }
+
+        .guide-label {
+            font-size: 11px;
+            color: var(--text-secondary);
+            line-height: 1.3;
+        }
+
+        /* ────────────────────────────────────────────────────────────────── */
+        /* Action Buttons */
+        /* ────────────────────────────────────────────────────────────────── */
+
+        .action-group {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            width: 100%;
+        }
+
+        .action-row {
+            display: flex;
+            gap: 12px;
+            width: 100%;
+            align-items: center;
+        }
+
+        .btn {
+            padding: 10px 16px;
+            border: none;
+            border-radius: var(--border-radius);
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all var(--transition);
+            white-space: nowrap;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            font-family: inherit;
+        }
+
+        .btn-primary {
+            background-color: var(--button-primary);
+            color: white;
+            flex: 1;
+            min-height: 36px;
+        }
+
+        .btn-primary:hover {
+            background-color: var(--button-hover);
+        }
+
+        .btn-primary:active {
+            opacity: 0.9;
+        }
+
+        .btn-text {
+            background: transparent;
+            color: var(--button-primary);
+            padding: 0;
+            font-weight: 500;
+            font-size: 12px;
+            height: auto;
+        }
+
+        .btn-text:hover {
+            color: var(--button-hover);
+        }
+
+        .help-link {
+            font-size: 11px;
+            color: var(--text-secondary);
+            text-decoration: none;
+            cursor: pointer;
+            transition: color var(--transition);
+        }
+
+        .help-link:hover {
+            color: var(--button-primary);
+            text-decoration: underline;
+        }
+
+        /* ────────────────────────────────────────────────────────────────── */
+        /* Footer */
+        /* ────────────────────────────────────────────────────────────────── */
+
+        .footer {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 16px;
+            background-color: var(--bg-secondary);
+            border-top: 1px solid var(--border-color);
+            flex-shrink: 0;
+            min-height: 40px;
+            gap: 12px;
+        }
+
+        .footer-left {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex: 1;
+            min-width: 0;
+        }
+
+        .footer-version {
+            font-size: 10px;
+            color: var(--text-secondary);
+            opacity: 0.6;
+            white-space: nowrap;
+        }
+
+        .footer-pro {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 4px 8px;
+            background-color: var(--button-primary);
+            color: white;
+            border-radius: 3px;
+            font-size: 9px;
+            font-weight: 600;
+            text-transform: uppercase;
+            cursor: pointer;
+            transition: all var(--transition);
+            white-space: nowrap;
+            flex-shrink: 0;
+        }
+
+        .footer-pro:hover {
+            background-color: var(--button-hover);
+        }
+
+        .footer-right {
+            display: flex;
+            gap: 8px;
+            flex-shrink: 0;
+        }
+
+        .footer-icon-btn {
+            width: 24px;
+            height: 24px;
+            padding: 0;
+            border: none;
+            background: transparent;
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 3px;
+            transition: all var(--transition);
+        }
+
+        .footer-icon-btn:hover {
+            color: var(--text-primary);
+            background-color: var(--border-color);
+        }
+
+        /* ────────────────────────────────────────────────────────────────── */
+        /* Resize Handle */
+        /* ────────────────────────────────────────────────────────────────── */
+
+        .resize-handle {
+            position: absolute;
+            bottom: 0;
+            right: 0;
+            width: 16px;
+            height: 16px;
+            cursor: nwse-resize;
+            background: linear-gradient(135deg, transparent 50%, rgba(0, 102, 255, 0.3) 50%);
+            opacity: 0;
+            transition: opacity var(--transition);
+            border-radius: 2px 0 0 0;
+            z-index: 1000;
+        }
+
+        .content-wrapper:hover .resize-handle {
+            opacity: 0.4;
+        }
+
+        .resize-handle:hover {
+            opacity: 1 !important;
+            background: linear-gradient(135deg, transparent 50%, rgba(0, 102, 255, 0.6) 50%);
+        }
+
+        /* ────────────────────────────────────────────────────────────────── */
+        /* Responsive States */
+        /* ────────────────────────────────────────────────────────────────── */
+
+        /* Compact State (800px width) */
+        @media (max-width: 850px) {
+            .content {
+                padding: 20px 16px;
+            }
+
+            .content-inner {
+                max-width: 380px;
+                gap: 20px;
+            }
+
+            .logo {
+                width: 56px;
+                height: 56px;
+                font-size: 32px;
+            }
+
+            .product-name {
+                font-size: 16px;
+            }
+
+            .product-description {
+                font-size: 12px;
+            }
+
+            .guides-grid {
+                grid-template-columns: repeat(3, 1fr);
+                gap: 8px;
+            }
+
+            .guide-item {
+                padding: 10px 6px;
+            }
+
+            .guide-icon {
+                font-size: 20px;
+            }
+
+            .guide-label {
+                font-size: 11px;
+            }
+
+            .action-group {
+                gap: 10px;
+            }
+
+            .header-title {
+                font-size: 13px;
+            }
+        }
+
+        /* Default State (800-900px width) */
+        @media (min-width: 851px) and (max-width: 950px) {
+            .content {
+                padding: 24px 20px;
+            }
+
+            .content-inner {
+                max-width: 420px;
+                gap: 24px;
+            }
+
+            .logo {
+                width: 64px;
+                height: 64px;
+                font-size: 36px;
+            }
+
+            .product-name {
+                font-size: 18px;
+            }
+
+            .product-description {
+                font-size: 13px;
+            }
+        }
+
+        /* Expanded State (950px+ width) */
+        @media (min-width: 951px) {
+            .content {
+                padding: 32px 28px;
+                justify-content: center;
+                min-height: 100%;
+            }
+
+            .content-inner {
+                max-width: 480px;
+                gap: 32px;
+            }
+
+            .logo {
+                width: 80px;
+                height: 80px;
+                font-size: 44px;
+            }
+
+            .product-name {
+                font-size: 22px;
+            }
+
+            .product-description {
+                font-size: 14px;
+            }
+
+            .guides-grid {
+                gap: 16px;
+            }
+
+            .guide-item {
+                padding: 18px 14px;
+            }
+
+            .guide-icon {
+                font-size: 28px;
+            }
+
+            .guide-label {
+                font-size: 13px;
+            }
+
+            .btn {
+                min-height: 40px;
+            }
+        }
+
+        /* ────────────────────────────────────────────────────────────────── */
+        /* Scrollbar Styling */
+        /* ────────────────────────────────────────────────────────────────── */
+
+        .content-wrapper::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .content-wrapper::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .content-wrapper::-webkit-scrollbar-thumb {
+            background-color: var(--border-color);
+            border-radius: 3px;
+        }
+
+        .content-wrapper::-webkit-scrollbar-thumb:hover {
+            background-color: #4a4a4a;
+        }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <!-- Header -->
+        <div class="header">
+            <div class="header-left">
+                <div class="header-icon">🤖</div>
+                <div class="header-title">Claude Talk to Figma</div>
+            </div>
+            <div class="header-right">
+                <!-- Close button removed -->
+            </div>
+        </div>
+
+        <!-- Main App Container -->
+        <div class="app-main">
+            <!-- Sidebar Navigation -->
+            <div class="sidebar" id="sidebar">
+                <div class="sidebar-item active" data-category="all">Design System</div>
+                <div class="sidebar-item" data-category="layout">Layout</div>
+                <div class="sidebar-item" data-category="organization">Organization</div>
+                <div class="sidebar-item" data-category="response">Response</div>
+                <div class="sidebar-item" data-category="typography">Typography</div>
+            </div>
+
+            <!-- Operations Grid -->
+            <div class="operations-grid" id="operationsGrid"></div>
+        </div>
+
+        <!-- Content Area (Original) -->
+        <div class="content-wrapper">
+            <div class="content">
+                <div class="content-inner">
+                    <!-- Logo Section -->
+                    <div class="logo-section">
+                        <div class="logo">🎨</div>
+                        <div class="product-name">Claude Talk to Figma</div>
+                        <div class="product-description">AI agents reading and modifying Figma designs</div>
+                    </div>
+
+                    <!-- Guides Section -->
+                    <div class="guides-section">
+                        <div class="guides-title">Getting Started</div>
+                        <div class="guides-grid">
+                            <div class="guide-item">
+                                <div class="guide-icon">📖</div>
+                                <div class="guide-label">Read Docs</div>
+                            </div>
+                            <div class="guide-item">
+                                <div class="guide-icon">⚡</div>
+                                <div class="guide-label">Quick Start</div>
+                            </div>
+                            <div class="guide-item">
+                                <div class="guide-icon">🎯</div>
+                                <div class="guide-label">Examples</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Action Buttons -->
+                    <div class="action-group">
+                        <div class="action-row">
+                            <button class="btn btn-primary" id="connectBtn">
+                                <span>🔌</span>
+                                <span>Connect to Claude</span>
+                            </button>
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 4px;">
+                            <button class="btn btn-text" id="settingsBtn">Settings</button>
+                            <a class="help-link" href="#" id="helpLink">Help & Docs</a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Resize Handle -->
+            <div class="resize-handle" id="resizeHandle"></div>
+        </div>
+
+        <!-- Footer -->
+        <div class="footer">
+            <div class="footer-left">
+                <div class="footer-version">v1.0.0</div>
+                <button class="footer-pro" id="proBtn">Get Pro</button>
+            </div>
+            <div class="footer-right">
+                <button class="footer-icon-btn" id="githubBtn" title="GitHub">⭐</button>
+                <button class="footer-icon-btn" id="settingsFooterBtn" title="Settings">⚙️</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        /**
+         * Responsive Figma Plugin UI Manager
+         * Handles expand/collapse, manual resizing, and responsive layout
+         */
+        class PluginUIManager {
+            constructor() {
+                this.state = {
+                    viewMode: 'default', // compact, default, expanded
+                    isResizing: false,
+                    width: 800,
+                    height: 600,
+                    minWidth: 800,
+                    minHeight: 300,
+                    maxWidth: 1400,
+                    maxHeight: 1200,
+                    currentCategory: 'all',
+                    showOperations: false,
+                };
+
+                this.resizeStart = {
+                    x: 0,
+                    y: 0,
+                    width: 0,
+                    height: 0,
+                };
+
+                this.operations = [
+                    { id: 'convert-grid', category: 'layout', icon: '📊', title: 'Convert to Grid', description: 'Convert to Figma Grid with minimal layers' },
+                    { id: 'rename-layers', category: 'organization', icon: '📝', title: 'Rename Layers', description: 'Semantic naming conventions (BEM-like)' },
+                    { id: 'make-responsive', category: 'response', icon: '📱', title: 'Make Responsive', description: 'Adapt for tablet (768px) and mobile (320px)' },
+                    { id: 'optimize-layers', category: 'organization', icon: '✨', title: 'Optimize Layers', description: 'Remove wrappers and flatten structure' },
+                    { id: 'design-system', category: 'all', icon: '🎨', title: 'Design System First', description: 'Reuse existing components & variables' },
+                    { id: 'fix-typography', category: 'typography', icon: '🔤', title: 'Fix Typography', description: 'Bind to text styles and ensure hierarchy' },
+                    { id: 'audit-spacing', category: 'layout', icon: '📐', title: 'Audit Spacing', description: 'Standardize padding & gaps with tokens' },
+                    { id: 'hug-heights', category: 'response', icon: '📏', title: 'Apply Hug Heights', description: 'Replace fixed heights with Hug Contents' },
+                ];
+
+                this.init();
+            }
+
+            init() {
+                this.loadState();
+                this.setupEventListeners();
+                this.updateView();
+            }
+
+            setupEventListeners() {
+                // Resize handle
+                document.getElementById('resizeHandle').addEventListener('mousedown', (e) => this.startResize(e));
+
+                // Action buttons
+                document.getElementById('connectBtn').addEventListener('click', () => this.onConnect());
+                document.getElementById('settingsBtn').addEventListener('click', () => this.onSettings());
+                document.getElementById('helpLink').addEventListener('click', (e) => {
+                    e.preventDefault();
+                    this.onHelp();
+                });
+
+                // Footer buttons
+                const proBtn = document.getElementById('proBtn');
+                const githubBtn = document.getElementById('githubBtn');
+                const settingsFooterBtn = document.getElementById('settingsFooterBtn');
+
+                if (proBtn) proBtn.addEventListener('click', () => this.onProClick());
+                if (githubBtn) githubBtn.addEventListener('click', () => this.onGitHub());
+                if (settingsFooterBtn) settingsFooterBtn.addEventListener('click', () => this.onSettings());
+
+                // Guide items
+                document.querySelectorAll('.guide-item').forEach((item, index) => {
+                    item.addEventListener('click', () => this.onGuideClick(index));
+                });
+
+                // Sidebar items
+                document.querySelectorAll('.sidebar-item').forEach((item) => {
+                    item.addEventListener('click', (e) => {
+                        document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
+                        item.classList.add('active');
+                        this.state.currentCategory = item.getAttribute('data-category');
+                        this.renderOperations();
+                    });
+                });
+            }
+
+            startResize(e) {
+                e.preventDefault();
+                this.state.isResizing = true;
+                this.resizeStart = {
+                    x: e.clientX,
+                    y: e.clientY,
+                    width: this.state.width,
+                    height: this.state.height,
+                };
+
+                document.addEventListener('mousemove', (e) => this.doResize(e));
+                document.addEventListener('mouseup', () => this.stopResize());
+            }
+
+            doResize(e) {
+                if (!this.state.isResizing) return;
+
+                const deltaX = e.clientX - this.resizeStart.x;
+                const deltaY = e.clientY - this.resizeStart.y;
+
+                let newWidth = this.resizeStart.width + deltaX;
+                let newHeight = this.resizeStart.height + deltaY;
+
+                // Constrain sizes
+                newWidth = Math.max(this.state.minWidth, Math.min(newWidth, this.state.maxWidth));
+                newHeight = Math.max(this.state.minHeight, Math.min(newHeight, this.state.maxHeight));
+
+                this.setSize(newWidth, newHeight);
+            }
+
+            stopResize() {
+                this.state.isResizing = false;
+                document.removeEventListener('mousemove', (e) => this.doResize(e));
+                document.removeEventListener('mouseup', () => this.stopResize());
+                this.saveState();
+            }
+
+            setSize(width, height) {
+                this.state.width = width;
+                this.state.height = height;
+                this.updateViewMode();
+                this.applySize();
+            }
+
+            updateViewMode() {
+                if (this.state.width <= 380) {
+                    this.state.viewMode = 'compact';
+                } else if (this.state.width <= 550) {
+                    this.state.viewMode = 'default';
+                } else {
+                    this.state.viewMode = 'expanded';
+                }
+            }
+
+            applySize() {
+                const app = document.getElementById('app');
+                app.style.width = this.state.width + 'px';
+                app.style.height = this.state.height + 'px';
+            }
+
+            compactView() {
+                this.setSize(800, 400);
+            }
+
+            defaultView() {
+                this.setSize(800, 600);
+            }
+
+            expandedView() {
+                this.setSize(1000, 800);
+            }
+
+
+            saveState() {
+                try {
+                    localStorage.setItem('plugin-ui-state', JSON.stringify({
+                        width: this.state.width,
+                        height: this.state.height,
+                        viewMode: this.state.viewMode,
+                    }));
+                } catch (e) {
+                    console.warn('Could not save state:', e);
+                }
+            }
+
+            loadState() {
+                try {
+                    const saved = localStorage.getItem('plugin-ui-state');
+                    if (saved) {
+                        const state = JSON.parse(saved);
+                        this.state.width = state.width || 420;
+                        this.state.height = state.height || 500;
+                        this.state.viewMode = state.viewMode || 'default';
+                    }
+                } catch (e) {
+                    console.warn('Could not load state:', e);
+                }
+            }
+
+            updateView() {
+                this.applySize();
+            }
+
+            renderOperations() {
+                const grid = document.getElementById('operationsGrid');
+                const filtered = this.state.currentCategory === 'all'
+                    ? this.operations
+                    : this.operations.filter(op => op.category === this.state.currentCategory);
+
+                grid.innerHTML = filtered.map(op => `
+                    <div class="operation-card">
+                        <div class="operation-header">
+                            <div class="operation-icon">${op.icon}</div>
+                            <div class="operation-title">${op.title}</div>
+                        </div>
+                        <div class="operation-description">${op.description}</div>
+                        <button class="operation-button" data-operation-id="${op.id}">
+                            📋 Copy prompt
+                        </button>
+                    </div>
+                `).join('');
+
+                // Add event listeners to copy buttons
+                grid.querySelectorAll('.operation-button').forEach(btn => {
+                    btn.addEventListener('click', (e) => {
+                        const opId = btn.getAttribute('data-operation-id');
+                        const operation = this.operations.find(op => op.id === opId);
+                        if (operation) {
+                            this.copyOperationPrompt(operation);
+                        }
+                    });
+                });
+            }
+
+            toggleOperationsView() {
+                this.state.showOperations = !this.state.showOperations;
+                const appMain = document.querySelector('.app-main');
+                const contentWrapper = document.querySelector('.content-wrapper');
+
+                if (!appMain || !contentWrapper) {
+                    console.error('Elements not found');
+                    return;
+                }
+
+                if (this.state.showOperations) {
+                    contentWrapper.style.display = 'none';
+                    appMain.classList.add('active');
+                    this.renderOperations();
+                } else {
+                    appMain.classList.remove('active');
+                    contentWrapper.style.display = 'flex';
+                }
+            }
+
+            // Event handlers
+            onConnect() {
+                console.log('Connect clicked');
+                // Send message to Figma plugin
+                parent.postMessage({ pluginMessage: { type: 'connect' } }, '*');
+            }
+
+            onSettings() {
+                console.log('Operations clicked');
+                this.toggleOperationsView();
+            }
+
+            copyOperationPrompt(operation) {
+                const prompt = `${operation.title}\n\n${operation.description}`;
+                navigator.clipboard.writeText(prompt).then(() => {
+                    parent.postMessage({
+                        pluginMessage: {
+                            type: 'notify',
+                            message: `✓ ${operation.title} prompt copied!`
+                        }
+                    }, '*');
+                });
+            }
+
+            onHelp() {
+                console.log('Help clicked');
+                window.open('https://github.com/litoondev/claude-talk-to-figma-mcp-main');
+            }
+
+            onProClick() {
+                console.log('Pro clicked');
+                parent.postMessage({ pluginMessage: { type: 'pro' } }, '*');
+            }
+
+            onGitHub() {
+                console.log('GitHub clicked');
+                window.open('https://github.com/litoondev/claude-talk-to-figma-mcp-main');
+            }
+
+            onGuideClick(index) {
+                const guides = ['docs', 'quickstart', 'examples'];
+                console.log('Guide clicked:', guides[index]);
+                parent.postMessage({ pluginMessage: { type: 'guide', guide: guides[index] } }, '*');
+            }
+        }
+
+        // Initialize on page load
+        let pluginManager;
+        window.addEventListener('DOMContentLoaded', () => {
+            pluginManager = new PluginUIManager();
+            window.__pluginManager = pluginManager;
+        });
+
+        // Handle messages from Figma plugin
+        window.onmessage = (event) => {
+            const message = event.data.pluginMessage;
+            if (message && message.type === 'resize') {
+                // Allow Figma plugin to trigger resize
+                const manager = window.__pluginManager;
+                if (manager) {
+                    manager.setSize(message.width, message.height);
+                }
+            }
+        };
+    </script>
+</body>
+</html>

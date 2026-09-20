@@ -1,456 +1,1144 @@
 <!DOCTYPE html>
 <html>
-  <head>
-    <meta charset="utf-8" />
-    <title>Claude MCP Plugin</title>
-    <style>
-      body {
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-        margin: 0;
-        font-size: 12px;
-        padding: 16px;
-        color: #400B55;
-        background-color: #FDF8FF;
-      }
-      .dark {
-        color: #fff;
-        background-color: #2c2c2c;
-      }
-      .mcp-plugin__mode {
-        position: absolute;
-        bottom: -8px;
-        right: -4px;
-        cursor: pointer;
-        transition: ease 0.2s;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        gap: 4px;
-        font-size: 10px;
-        opacity: 0.4;
-      }
-      .mcp-plugin__mode:hover {
-        opacity: 1;
-      }
+
+<head>
+  <meta charset="utf-8" />
+  <title>Claude MCP Plugin</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      margin: 0;
+      font-size: 12px;
+      padding: 16px;
+      color: #400B55;
+      background-color: #FDF8FF;
+      overflow: hidden;
+      width: 100%;
+      box-sizing: border-box;
+      transition: padding 0.3s ease;
+    }
+
+    body .mcp-plugin.collapsed {
+      padding: 8px;
+    }
+
+    /* ── Resize & Window Management ───────────────────────────────────── */
+    .mcp-plugin__resize-handle {
+      position: absolute;
+      bottom: 0;
+      right: 0;
+      width: 24px;
+      height: 24px;
+      cursor: nwse-resize;
+      background: linear-gradient(135deg, transparent 55%, rgba(115, 35, 146, 0.25) 55%);
+      opacity: 0;
+      transition: all 0.2s ease;
+      z-index: 100;
+      border-radius: 2px 0 0 0;
+    }
+
+    .mcp-plugin:hover .mcp-plugin__resize-handle {
+      opacity: 0.6;
+    }
+
+    .mcp-plugin__resize-handle:hover {
+      opacity: 1 !important;
+      background: linear-gradient(135deg, transparent 55%, rgba(115, 35, 146, 0.5) 55%);
+    }
+
+    .dark .mcp-plugin__resize-handle {
+      background: linear-gradient(135deg, transparent 55%, rgba(84, 103, 247, 0.25) 55%);
+    }
+
+    .dark .mcp-plugin__resize-handle:hover {
+      background: linear-gradient(135deg, transparent 55%, rgba(84, 103, 247, 0.5) 55%);
+    }
+
+    .dark {
+      color: #fff;
+      background-color: #2c2c2c;
+    }
+
+    .mcp-plugin__mode {
+      position: absolute;
+      bottom: -8px;
+      right: -4px;
+      cursor: pointer;
+      transition: ease 0.2s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      font-size: 10px;
+      opacity: 0.4;
+    }
+
+    .mcp-plugin__mode:hover {
+      opacity: 1;
+    }
+
+    .mcp-plugin {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+      height: 100%;
+      width: 100%;
+      margin: 0 auto;
+      box-sizing: border-box;
+      overflow: hidden;
+      transition: gap 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      user-select: none;
+    }
+
+    /* Allow text selection inside content */
+    .mcp-plugin__content,
+    .mcp-plugin__activity,
+    .mcp-plugin__tab-content {
+      user-select: text;
+    }
+
+    /* Responsive width constraints */
+    .mcp-plugin {
+      max-width: min(100%, 900px);
+      padding: 16px;
+    }
+
+    @media (max-width: 900px) {
       .mcp-plugin {
-        position: relative;
-        display: flex;
-        flex-direction: column;
-        gap: 24px;
-        height: 100%;
-      }
-      .mcp-plugin__header {
-        display: flex;
-        flex-direction: column;
-        gap: 4px;
-      }
-      .mcp-plugin__header-title {
-        font-size: 14px;
-        margin: 0;
-      }
-      .mcp-plugin__header-description {
-        font-size: 12px;
-        margin: 0;
-      }
-      .dark .mcp-plugin__header-description {
-        color: #CCCCCC;
-      }
-      .mcp-plugin__content {
-        display: flex;
-        flex-direction: column;
+        max-width: 100%;
+        padding: 12px;
         gap: 16px;
       }
-      .mcp-plugin__connection-status {
+    }
+
+    @media (max-width: 800px) {
+      .mcp-plugin {
         padding: 8px;
-        border-radius: 4px;
-        height: 32px;
-        line-height: 1.35;
+        gap: 12px;
       }
-      .mcp-plugin__content-activity {
-        display: flex;
-      }
-      .mcp-plugin__connection-status.connected {
-        background: #D8FFBB;
-        color: #223005;
-      }
-      .mcp-plugin__connection-status.disconnected {
-        background-color: #FFC8BD;
-        color: #280B06;
-      }
-      .mcp-plugin__connection-status.info {
-        background-color: #BBFFFD;
-        color: #0B4240;
-      }
-      .mcp-plugin__channel-name {
-        font-weight: bold;
-        text-decoration: underline;
-        cursor: pointer;
-        position: relative;
-      }
-      .mcp-plugin__channel-name:hover {
-        text-decoration: none;
-      }
-      .mcp-plugin__channel-name::after {
-        content: "Click to copy";
-        position: absolute;
-        bottom: 16px;
-        left: 50%;
-        transform: translateX(-50%);
-        background-color: #223005;
-        color: #fff;
-        padding: 4px 8px;
-        border-radius: 4px;
-        font-size: 10px;
-        font-weight: normal;
-        white-space: nowrap;
-        opacity: 0;
-        visibility: hidden;
-        transition: opacity 0.2s, visibility 0.2s;
-        pointer-events: none;
-        z-index: 100;
-      }
-      .dark .mcp-plugin__channel-name::after {
-        background-color: #2c2c2c;
-      }
-      .mcp-plugin__channel-name:hover::after {
-        opacity: 1;
-        visibility: visible;
-      }
-      .mcp-plugin__button {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        height: 32px;
-        width: 96px;
-        border: 1px solid #732392; 
-        background-color: #732392;
-        color: #fff;
-        border-radius: 4px;
-        font-size: 12px;
-        cursor: pointer;
-        transition: ease 0.2s;
-        margin-left: auto;
-      }
-      .dark .mcp-plugin__button {
-        border-color: #5467F7;
-        background-color: #5467F7;
-        color: #ffffff;
-      }
-      .mcp-plugin__button:hover {
-        background-color: transparent;
-        color: #732392;
-      }
-      .dark .mcp-plugin__button:hover {
-        background-color: transparent;
-        color: #ffffff;
-        border-color: #5467F7;
-      }
-      .mcp-plugin__button--secondary {
-        background-color: transparent;
-        color: #732392;
-      }
-      .dark .mcp-plugin__button--secondary {
-        background-color: transparent;
-        color: #fff;
-        border-color: #5467F7;
-      }
-      .mcp-plugin__button--secondary:hover {
-        background-color: #732392;
-        color: #fff;
-      }
-      .dark .mcp-plugin__button--secondary:hover {
-        background-color: #5467F7;
-        color: #ffffff;
-        border-color: #5467F7;
-      }
-      .mcp-plugin__button:disabled {
-        display: none;
-      }
-      .hidden {
-        display: none !important;
-      }
-      .mcp-plugin__progress {
-        display: flex;
-        flex-direction: column;
-        width: calc(100% - 112px);
-        gap: 4px;
-      }
-      .mcp-plugin__progress-bar {
-        width: 100%; 
-        height: 4px; 
-        background-color: #EDD0F8; 
-        border-radius: 4px;
-      }
-      .dark .mcp-plugin__progress-bar {
-        background-color: #575757;
-      }
-      .mcp-plugin__progress-bar-fill {
-        width: 0%; 
-        height: 4px; 
-        background-color: #732392; 
-        border-radius: 4px; 
-        transition: width 0.3s;
-      }
-      .dark .mcp-plugin__progress-bar-fill {
-        background-color: #5467F7;
-      }
-      .mcp-plugin__progress-indicators {
-        display: flex;
-        justify-content: space-between;
-        gap: 16px;
-        font-size: 10px;
-      }
-      .dark .mcp-plugin__progress-indicators {
-        color: #ABABAB;
-      }
-      #progress-status {
-        display: none;
-      }
-      .operation-error {
-        color: #f87359ff;
-      }
+    }
 
-      /* ── Live activity feed ─────────────────────────────────────────── */
-      .mcp-plugin__activity {
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
-        min-height: 0;
-        flex: 1;
-      }
-      .mcp-plugin__activity-head {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-      }
-      .mcp-plugin__activity-title {
+    /* Responsive content adjustments */
+    .mcp-plugin__tabs-container {
+      flex-wrap: wrap;
+    }
+
+    @media (max-width: 800px) {
+      .mcp-plugin__tab {
+        flex: 0 1 auto;
+        padding: 10px 12px;
         font-size: 11px;
-        text-transform: uppercase;
-        letter-spacing: 0.08em;
-        font-weight: 600;
-        opacity: 0.55;
-        margin: 0;
       }
-      .mcp-plugin__activity-spacer { flex: 1; }
-      .mcp-plugin__status-chip {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        font-size: 10px;
-        padding: 3px 8px;
-        border-radius: 999px;
-        background: #EDD0F8;
-        color: #400B55;
-        white-space: nowrap;
-      }
-      .dark .mcp-plugin__status-chip {
-        background: #3a3a3a;
-        color: #ddd;
-      }
-      .mcp-plugin__status-chip .dot {
-        width: 6px;
-        height: 6px;
-        border-radius: 50%;
-        background: #999;
-        flex: none;
-      }
-      .mcp-plugin__status-chip.working { background: #732392; color: #fff; }
-      .dark .mcp-plugin__status-chip.working { background: #5467F7; }
-      .mcp-plugin__status-chip.working .dot {
-        background: #fff;
-        animation: mcp-pulse 1.3s ease-in-out infinite;
-      }
-      @keyframes mcp-pulse { 0%,100% { opacity: 1 } 50% { opacity: 0.25 } }
 
-      .mcp-plugin__activity-list {
-        flex: 1;
-        min-height: 90px;
-        overflow-y: auto;
-        border: 1px solid #EDD0F8;
-        border-radius: 6px;
-        background: #fff;
+      .mcp-plugin__tab-icon {
+        margin-right: 2px;
+        font-size: 12px;
+      }
+
+      .mcp-plugin__content {
+        gap: 12px;
+      }
+
+      .mcp-plugin__operations-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .mcp-plugin__button {
+        width: 80px;
+        font-size: 11px;
+      }
+    }
+
+    /* Very small screens */
+    @media (max-width: 800px) {
+      .mcp-plugin {
         padding: 4px;
       }
-      .dark .mcp-plugin__activity-list {
-        border-color: #3d3d3d;
-        background: #232323;
-      }
-      .mcp-plugin__activity-empty {
-        padding: 18px 8px;
-        text-align: center;
-        font-size: 11px;
-        opacity: 0.45;
-      }
-      .mcp-plugin__activity-row {
-        display: grid;
-        grid-template-columns: 52px 12px 1fr auto;
-        gap: 6px;
-        align-items: baseline;
-        padding: 4px 5px;
-        border-radius: 4px;
-        font-size: 11px;
-        line-height: 1.4;
-      }
-      .mcp-plugin__activity-row + .mcp-plugin__activity-row {
-        border-top: 1px solid rgba(128, 128, 128, 0.14);
-      }
-      .mcp-plugin__activity-row .t {
-        opacity: 0.45;
-        font-size: 10px;
-        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      }
-      .mcp-plugin__activity-row .i { font-size: 10px; }
-      .mcp-plugin__activity-row .m { word-break: break-word; }
-      .mcp-plugin__activity-row .d {
-        opacity: 0.45;
-        font-size: 10px;
-        white-space: nowrap;
-        font-variant-numeric: tabular-nums;
-      }
-      .mcp-plugin__activity-row.started  .i { color: #732392; }
-      .dark .mcp-plugin__activity-row.started .i { color: #8f9bff; }
-      .mcp-plugin__activity-row.completed .i { color: #2e9e57; }
-      .mcp-plugin__activity-row.error     .i { color: #d94f36; }
-      .mcp-plugin__activity-row.error     .m { color: #d94f36; }
-      .mcp-plugin__activity-row .n {
-        grid-column: 3 / -1;
-        display: block;
-        opacity: 0.45;
-        font-size: 10px;
-        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+
+      .mcp-plugin__header-title {
+        font-size: 14px;
       }
 
-      .mcp-plugin__activity-opts {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 10px;
+      .mcp-plugin__header-description {
         font-size: 10px;
-        opacity: 0.75;
       }
-      .mcp-plugin__activity-opts label {
-        display: inline-flex;
-        align-items: center;
-        gap: 4px;
-        cursor: pointer;
-      }
-      .mcp-plugin__activity-opts input { margin: 0; }
-      .mcp-plugin__link {
-        background: none;
-        border: none;
-        padding: 0;
-        font: inherit;
-        font-size: 10px;
-        color: inherit;
-        opacity: 0.6;
-        text-decoration: underline;
-        cursor: pointer;
-      }
-      .mcp-plugin__link:hover { opacity: 1; }
+    }
 
-      /* ── Command history & reuse ───────────────────────────────────────── */
-      .mcp-plugin__activity-row {
-        transition: background-color 0.15s ease;
-      }
-      .mcp-plugin__activity-row.has-command {
-        cursor: pointer;
-      }
-      .mcp-plugin__activity-row.has-command:hover {
-        background-color: rgba(115, 35, 146, 0.08);
-      }
-      .dark .mcp-plugin__activity-row.has-command:hover {
-        background-color: rgba(84, 103, 247, 0.12);
-      }
-      .mcp-plugin__activity-row.has-command::after {
-        content: attr(data-copy-hint);
-        position: absolute;
-        bottom: 20px;
-        left: 50%;
-        transform: translateX(-50%);
-        background-color: #223005;
-        color: #fff;
-        padding: 4px 8px;
-        border-radius: 4px;
-        font-size: 9px;
-        font-weight: normal;
-        white-space: nowrap;
-        opacity: 0;
-        visibility: hidden;
-        transition: opacity 0.15s, visibility 0.15s;
-        pointer-events: none;
-        z-index: 100;
-      }
-      .dark .mcp-plugin__activity-row.has-command::after {
-        background-color: #3d3d3d;
-      }
-      .mcp-plugin__activity-row.has-command:hover::after {
-        opacity: 1;
-        visibility: visible;
-      }
-      .mcp-plugin__activity-row {
-        position: relative;
+    .mcp-plugin__header {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      padding-top: 4px;
+    }
+
+    .mcp-plugin__header-title {
+      font-size: 16px;
+      font-weight: 600;
+      margin: 0;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .mcp-plugin__header-title::before {
+      content: "🤖";
+      font-size: 18px;
+    }
+
+    .mcp-plugin__header-description {
+      font-size: 12px;
+      margin: 0;
+      opacity: 0.75;
+    }
+
+    .dark .mcp-plugin__header-description {
+      color: #AAAAAA;
+    }
+
+    .mcp-plugin__content {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      width: 100%;
+      box-sizing: border-box;
+      overflow-x: hidden;
+      overflow-y: auto;
+    }
+
+    .mcp-plugin__connection-status {
+      padding: 8px;
+      border-radius: 4px;
+      height: 32px;
+      line-height: 1.35;
+    }
+
+    .mcp-plugin__content-activity {
+      display: flex;
+    }
+
+    .mcp-plugin__connection-status.connected {
+      background: #D8FFBB;
+      color: #223005;
+    }
+
+    .mcp-plugin__connection-status.disconnected {
+      background-color: #FFC8BD;
+      color: #280B06;
+    }
+
+    .mcp-plugin__connection-status.info {
+      background-color: #BBFFFD;
+      color: #0B4240;
+    }
+
+    .mcp-plugin__channel-name {
+      font-weight: bold;
+      text-decoration: underline;
+      cursor: pointer;
+      position: relative;
+    }
+
+    .mcp-plugin__channel-name:hover {
+      text-decoration: none;
+    }
+
+    .mcp-plugin__channel-name::after {
+      content: "Click to copy";
+      position: absolute;
+      bottom: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      background-color: #223005;
+      color: #fff;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: normal;
+      white-space: nowrap;
+      opacity: 0;
+      visibility: hidden;
+      transition: opacity 0.2s, visibility 0.2s;
+      pointer-events: none;
+      z-index: 100;
+    }
+
+    .dark .mcp-plugin__channel-name::after {
+      background-color: #2c2c2c;
+    }
+
+    .mcp-plugin__channel-name:hover::after {
+      opacity: 1;
+      visibility: visible;
+    }
+
+    .mcp-plugin__button {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 32px;
+      width: 96px;
+      border: 1px solid #732392;
+      background-color: #732392;
+      color: #fff;
+      border-radius: 4px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: ease 0.2s;
+      margin-left: auto;
+    }
+
+    .dark .mcp-plugin__button {
+      border-color: #5467F7;
+      background-color: #5467F7;
+      color: #ffffff;
+    }
+
+    .mcp-plugin__button:hover {
+      background-color: transparent;
+      color: #732392;
+    }
+
+    .dark .mcp-plugin__button:hover {
+      background-color: transparent;
+      color: #ffffff;
+      border-color: #5467F7;
+    }
+
+    .mcp-plugin__button--secondary {
+      background-color: transparent;
+      color: #732392;
+    }
+
+    .dark .mcp-plugin__button--secondary {
+      background-color: transparent;
+      color: #fff;
+      border-color: #5467F7;
+    }
+
+    .mcp-plugin__button--secondary:hover {
+      background-color: #732392;
+      color: #fff;
+    }
+
+    .dark .mcp-plugin__button--secondary:hover {
+      background-color: #5467F7;
+      color: #ffffff;
+      border-color: #5467F7;
+    }
+
+    .mcp-plugin__button:disabled {
+      display: none;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    .mcp-plugin__progress {
+      display: flex;
+      flex-direction: column;
+      width: calc(100% - 112px);
+      gap: 4px;
+    }
+
+    .mcp-plugin__progress-bar {
+      width: 100%;
+      height: 4px;
+      background-color: #EDD0F8;
+      border-radius: 4px;
+    }
+
+    .dark .mcp-plugin__progress-bar {
+      background-color: #575757;
+    }
+
+    .mcp-plugin__progress-bar-fill {
+      width: 0%;
+      height: 4px;
+      background-color: #732392;
+      border-radius: 4px;
+      transition: width 0.3s;
+    }
+
+    .dark .mcp-plugin__progress-bar-fill {
+      background-color: #5467F7;
+    }
+
+    .mcp-plugin__progress-indicators {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      font-size: 10px;
+    }
+
+    .dark .mcp-plugin__progress-indicators {
+      color: #ABABAB;
+    }
+
+    #progress-status {
+      display: none;
+    }
+
+    .operation-error {
+      color: #f87359ff;
+    }
+
+    /* ── Live activity feed ─────────────────────────────────────────── */
+    .mcp-plugin__activity {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      min-height: 0;
+      flex: 1;
+      width: 100%;
+      box-sizing: border-box;
+      overflow-x: hidden;
+    }
+
+    .mcp-plugin__activity-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .mcp-plugin__activity-title {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-weight: 600;
+      opacity: 0.55;
+      margin: 0;
+    }
+
+    .mcp-plugin__activity-spacer {
+      flex: 1;
+    }
+
+    .mcp-plugin__status-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 10px;
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: #EDD0F8;
+      color: #400B55;
+      white-space: nowrap;
+    }
+
+    .dark .mcp-plugin__status-chip {
+      background: #3a3a3a;
+      color: #ddd;
+    }
+
+    .mcp-plugin__status-chip .dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: #999;
+      flex: none;
+    }
+
+    .mcp-plugin__status-chip.working {
+      background: #732392;
+      color: #fff;
+    }
+
+    .dark .mcp-plugin__status-chip.working {
+      background: #5467F7;
+    }
+
+    .mcp-plugin__status-chip.working .dot {
+      background: #fff;
+      animation: mcp-pulse 1.3s ease-in-out infinite;
+    }
+
+    @keyframes mcp-pulse {
+
+      0%,
+      100% {
+        opacity: 1
       }
 
-      /* ── Recent commands quick access ──────────────────────────────────── */
-      .mcp-plugin__recent-command-btn {
-        display: inline-flex;
-        align-items: center;
-        gap: 4px;
-        padding: 4px 8px;
-        border-radius: 3px;
-        font-size: 10px;
-        background: #fff;
-        border: 1px solid #ddd;
-        color: #400B55;
-        cursor: pointer;
-        transition: all 0.15s ease;
-        white-space: nowrap;
-        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      50% {
+        opacity: 0.25
       }
-      .dark .mcp-plugin__recent-command-btn {
-        background: #2a2a2a;
-        border-color: #444;
-        color: #ddd;
-      }
-      .mcp-plugin__recent-command-btn:hover {
-        background: #732392;
-        color: #fff;
-        border-color: #732392;
-      }
-      .dark .mcp-plugin__recent-command-btn:hover {
-        background: #5467F7;
-        border-color: #5467F7;
-        color: #fff;
-      }
-      .mcp-plugin__recent-command-btn::before {
-        content: "📋";
-        font-size: 9px;
-      }
-    </style>
-  </head>
-  <body class="dark">
-    <div class="container mcp-plugin">
-      <div class="mcp-plugin__mode">
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          width="20"
-          height="20"
-          fill="#400b55"
-          class="mcp-plugin__mode-moon hidden"
-          viewBox="0 -960 960 960"><path d="M483.11-116q-76.3 0-143.05-28.93-66.76-28.93-116.48-78.65t-78.65-116.48Q116-406.81 116-483.11q0-125.27 75.12-223.93 75.11-98.65 198.19-129.65-10.08 96.31 20.34 181.27 30.43 84.96 97.12 151.65 64.69 64.69 151.65 94.62 86.96 29.92 178.27 19.84-29.38 121.08-128.85 197.19Q608.38-116 483.11-116m-.11-52q88 0 164-45t115-122.11q-83-5.01-158.5-39.56T469-468.3q-60-60.08-94-134.89T335-762q-77 41-122 116.18-45 75.19-45 162.82 0 131.25 91.88 223.12Q351.75-168 483-168m-14-300.38"/></svg>
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          width="20"
-          height="20"
-          fill="#fff"
-          class="mcp-plugin__mode-sun"
-          viewBox="0 -960 960 960">
-            <path d="M454-794.31V-902h52v107.69zM454-58v-107.69h52V-58zm340.31-396v-52H902v52zM58-454v-52h107.69v52zm660.31-227.15-37.16-37.16L759-798.38 798.38-759zM202-162.62 162.62-202l79.07-76.85 37.16 37.16zm557 0-77.85-79.07 37.16-37.16L798.38-202zM241.69-681.15 162.62-759 202-798.38l76.85 80.07zm82.54 356.92Q260-388.46 260-480t64.23-155.77T480-700t155.77 64.23T700-480t-64.23 155.77T480-260t-155.77-64.23M599-360.5q49-49.5 49-119.75 0-70.24-48.75-119-48.76-48.75-119-48.75Q410-648 361-599.25q-49 48.76-49 119 0 70.25 48.75 119.75 48.76 49.5 119 49.5Q550-311 599-360.5M481-481"/></svg>
-      </div>
-      <div class="header mcp-plugin__header">
-        <h1 class="mcp-plugin__header-title">🤖🎨 Claude Talk to Figma</h1>
-        <p class="mcp-plugin__header-description">AI agents reading and modifing Figma designs</p>
-      </div>
-      <div class="content mcp-plugin__content">   
+    }
+
+    .mcp-plugin__activity-list {
+      flex: 1;
+      min-height: 90px;
+      overflow-y: auto;
+      overflow-x: hidden;
+      border: 1px solid #EDD0F8;
+      border-radius: 6px;
+      background: #fff;
+      padding: 4px;
+      width: 100%;
+      box-sizing: border-box;
+    }
+
+    .dark .mcp-plugin__activity-list {
+      border-color: #3d3d3d;
+      background: #232323;
+    }
+
+    .mcp-plugin__activity-empty {
+      padding: 18px 8px;
+      text-align: center;
+      font-size: 11px;
+      opacity: 0.45;
+    }
+
+    .mcp-plugin__activity-row {
+      display: grid;
+      grid-template-columns: 52px 12px 1fr auto;
+      gap: 6px;
+      align-items: baseline;
+      padding: 4px 5px;
+      border-radius: 4px;
+      font-size: 11px;
+      line-height: 1.4;
+      width: 100%;
+      box-sizing: border-box;
+      overflow-x: hidden;
+    }
+
+    .mcp-plugin__activity-row+.mcp-plugin__activity-row {
+      border-top: 1px solid rgba(128, 128, 128, 0.14);
+    }
+
+    .mcp-plugin__activity-row .t {
+      opacity: 0.45;
+      font-size: 10px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    .mcp-plugin__activity-row .i {
+      font-size: 10px;
+    }
+
+    .mcp-plugin__activity-row .m {
+      word-break: break-word;
+    }
+
+    .mcp-plugin__activity-row .d {
+      opacity: 0.45;
+      font-size: 10px;
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .mcp-plugin__activity-row.started .i {
+      color: #732392;
+    }
+
+    .dark .mcp-plugin__activity-row.started .i {
+      color: #8f9bff;
+    }
+
+    .mcp-plugin__activity-row.completed .i {
+      color: #2e9e57;
+    }
+
+    .mcp-plugin__activity-row.error .i {
+      color: #d94f36;
+    }
+
+    .mcp-plugin__activity-row.error .m {
+      color: #d94f36;
+    }
+
+    .mcp-plugin__activity-row .n {
+      grid-column: 3 / -1;
+      display: block;
+      opacity: 0.45;
+      font-size: 10px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    .mcp-plugin__activity-opts {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      font-size: 10px;
+      opacity: 0.75;
+    }
+
+    .mcp-plugin__activity-opts label {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      cursor: pointer;
+    }
+
+    .mcp-plugin__activity-opts input {
+      margin: 0;
+    }
+
+    .mcp-plugin__link {
+      background: none;
+      border: none;
+      padding: 0;
+      font: inherit;
+      font-size: 10px;
+      color: inherit;
+      opacity: 0.6;
+      text-decoration: underline;
+      cursor: pointer;
+    }
+
+    .mcp-plugin__link:hover {
+      opacity: 1;
+    }
+
+    /* ── Command history & reuse ───────────────────────────────────────── */
+    .mcp-plugin__activity-row {
+      transition: background-color 0.15s ease;
+    }
+
+    .mcp-plugin__activity-row.has-command {
+      cursor: pointer;
+    }
+
+    .mcp-plugin__activity-row.has-command:hover {
+      background-color: rgba(115, 35, 146, 0.08);
+    }
+
+    .dark .mcp-plugin__activity-row.has-command:hover {
+      background-color: rgba(84, 103, 247, 0.12);
+    }
+
+    .mcp-plugin__activity-row.has-command::after {
+      content: attr(data-copy-hint);
+      position: absolute;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background-color: #223005;
+      color: #fff;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 9px;
+      font-weight: normal;
+      white-space: nowrap;
+      opacity: 0;
+      visibility: hidden;
+      transition: opacity 0.15s, visibility 0.15s;
+      pointer-events: none;
+      z-index: 100;
+    }
+
+    .dark .mcp-plugin__activity-row.has-command::after {
+      background-color: #3d3d3d;
+    }
+
+    .mcp-plugin__activity-row.has-command:hover::after {
+      opacity: 1;
+      visibility: visible;
+    }
+
+    .mcp-plugin__activity-row {
+      position: relative;
+    }
+
+    /* ── Recent commands quick access ──────────────────────────────────── */
+    .mcp-plugin__recent-command-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 4px 8px;
+      border-radius: 3px;
+      font-size: 10px;
+      background: #fff;
+      border: 1px solid #ddd;
+      color: #400B55;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      white-space: nowrap;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    .dark .mcp-plugin__recent-command-btn {
+      background: #2a2a2a;
+      border-color: #444;
+      color: #ddd;
+    }
+
+    .mcp-plugin__recent-command-btn:hover {
+      background: #732392;
+      color: #fff;
+      border-color: #732392;
+    }
+
+    .dark .mcp-plugin__recent-command-btn:hover {
+      background: #5467F7;
+      border-color: #5467F7;
+      color: #fff;
+    }
+
+    .mcp-plugin__recent-command-btn::before {
+      content: "📋";
+      font-size: 9px;
+    }
+
+    /* ── Operations Menu ────────────────────────────────────────────── */
+    .mcp-plugin__operations {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      padding: 12px;
+      border-radius: 6px;
+      background: rgba(115, 35, 146, 0.04);
+      border-left: 3px solid #732392;
+      width: 100%;
+      box-sizing: border-box;
+      overflow-x: hidden;
+    }
+
+    .dark .mcp-plugin__operations {
+      background: rgba(84, 103, 247, 0.04);
+      border-left-color: #5467F7;
+    }
+
+    .mcp-plugin__operations-title {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      opacity: 0.7;
+      margin: 0;
+    }
+
+    .mcp-plugin__operations-search {
+      display: flex;
+      gap: 6px;
+      width: 100%;
+      box-sizing: border-box;
+    }
+
+    .mcp-plugin__operations-search input {
+      flex: 1;
+      padding: 6px 8px;
+      border-radius: 4px;
+      border: 1px solid rgba(115, 35, 146, 0.2);
+      background: rgba(255, 255, 255, 0.5);
+      color: #400B55;
+      font-size: 11px;
+      width: 100%;
+      box-sizing: border-box;
+    }
+
+    .dark .mcp-plugin__operations-search input {
+      border-color: rgba(84, 103, 247, 0.3);
+      background: rgba(50, 50, 50, 0.8);
+      color: #ddd;
+    }
+
+    .mcp-plugin__operations-search input::placeholder {
+      opacity: 0.5;
+    }
+
+    .mcp-plugin__operations-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      font-size: 10px;
+    }
+
+    .mcp-plugin__operations-tab {
+      padding: 4px 8px;
+      border-radius: 3px;
+      border: 1px solid rgba(115, 35, 146, 0.3);
+      background: transparent;
+      color: #400B55;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      font-weight: 500;
+    }
+
+    .dark .mcp-plugin__operations-tab {
+      border-color: rgba(84, 103, 247, 0.3);
+      color: #ddd;
+    }
+
+    .mcp-plugin__operations-tab:hover,
+    .mcp-plugin__operations-tab.active {
+      background: #732392;
+      color: #fff;
+      border-color: #732392;
+    }
+
+    .dark .mcp-plugin__operations-tab:hover,
+    .dark .mcp-plugin__operations-tab.active {
+      background: #5467F7;
+      border-color: #5467F7;
+      color: #fff;
+    }
+
+    .mcp-plugin__operations-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      width: 100%;
+      box-sizing: border-box;
+    }
+
+    .mcp-plugin__operation-item {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      padding: 8px;
+      border-radius: 4px;
+      background: #fff;
+      border: 1px solid #E8DFF5;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      width: 100%;
+      box-sizing: border-box;
+      overflow: hidden;
+    }
+
+    .dark .mcp-plugin__operation-item {
+      background: #2a2a2a;
+      border-color: #3d3d3d;
+    }
+
+    .mcp-plugin__operation-item:hover {
+      background: #f8f5fc;
+      border-color: #732392;
+      transform: translateY(-2px);
+      box-shadow: 0 2px 8px rgba(115, 35, 146, 0.12);
+    }
+
+    .dark .mcp-plugin__operation-item:hover {
+      background: #333;
+      border-color: #5467F7;
+      box-shadow: 0 2px 8px rgba(84, 103, 247, 0.12);
+    }
+
+    .mcp-plugin__operation-header {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .mcp-plugin__operation-icon {
+      font-size: 14px;
+    }
+
+    .mcp-plugin__operation-name {
+      font-size: 11px;
+      font-weight: 600;
+      color: #400B55;
+    }
+
+    .dark .mcp-plugin__operation-name {
+      color: #fff;
+    }
+
+    .mcp-plugin__operation-description {
+      font-size: 9px;
+      opacity: 0.65;
+      line-height: 1.3;
+    }
+
+    .mcp-plugin__operation-action {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 4px 6px;
+      border-radius: 3px;
+      background: #732392;
+      color: #fff;
+      border: none;
+      font-size: 9px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      align-self: flex-start;
+      font-weight: 500;
+    }
+
+    .dark .mcp-plugin__operation-action {
+      background: #5467F7;
+    }
+
+    .mcp-plugin__operation-action:hover {
+      background: #5a1a6f;
+      transform: scale(1.05);
+    }
+
+    .dark .mcp-plugin__operation-action:hover {
+      background: #4758d9;
+    }
+
+    .mcp-plugin__operation-action::before {
+      content: "📋";
+      font-size: 8px;
+    }
+
+    .mcp-plugin__operations-empty {
+      padding: 12px 8px;
+      text-align: center;
+      font-size: 10px;
+      opacity: 0.5;
+    }
+
+    /* ── Tabbed Interface ───────────────────────────────────────────── */
+    .mcp-plugin__tabs-container {
+      display: flex;
+      gap: 0;
+      border-bottom: 1px solid #E8DFF5;
+      margin: -16px -16px 0 -16px;
+      width: calc(100% + 32px);
+      box-sizing: border-box;
+      overflow-x: hidden;
+      padding: 0;
+    }
+
+    .dark .mcp-plugin__tabs-container {
+      border-bottom-color: #3d3d3d;
+    }
+
+    .mcp-plugin__tab {
+      flex: 1;
+      padding: 14px 16px;
+      border: none;
+      background: transparent;
+      color: #666;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 500;
+      border-bottom: 2px solid transparent;
+      transition: all 0.2s ease;
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+
+    .dark .mcp-plugin__tab {
+      color: #999;
+    }
+
+    .mcp-plugin__tab:hover {
+      background: rgba(115, 35, 146, 0.04);
+      color: #732392;
+    }
+
+    .dark .mcp-plugin__tab:hover {
+      background: rgba(84, 103, 247, 0.04);
+      color: #5467F7;
+    }
+
+    .mcp-plugin__tab.active {
+      color: #732392;
+      border-bottom-color: #732392;
+      font-weight: 600;
+    }
+
+    .dark .mcp-plugin__tab.active {
+      color: #5467F7;
+      border-bottom-color: #5467F7;
+    }
+
+    .mcp-plugin__tab-icon {
+      font-size: 16px;
+      display: flex;
+      align-items: center;
+    }
+
+    /* Tab content sections */
+    .mcp-plugin__tab-content {
+      display: none;
+      flex-direction: column;
+      gap: 16px;
+      overflow-y: auto;
+      overflow-x: hidden;
+      flex: 1;
+      min-height: 0;
+      padding: 16px;
+      padding-top: 16px;
+      width: 100%;
+      box-sizing: border-box;
+    }
+
+    .mcp-plugin__tab-content.active {
+      display: flex;
+    }
+
+    .mcp-plugin__main-container {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      height: 100%;
+      padding: 0;
+    }
+
+    /* Dark mode adjustments for tabs */
+    .dark .mcp-plugin__tabs-container {
+      border-bottom-color: #3d3d3d;
+    }
+
+    .dark .mcp-plugin__tab-content {
+      padding: 16px;
+      padding-top: 16px;
+    }
+
+    /* ── Expand/Collapse Toggle ───────────────────────────────────────── */
+    .mcp-plugin__collapse-toggle {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      width: 32px;
+      height: 32px;
+      padding: 0;
+      border: none;
+      background: transparent;
+      color: #666;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 20px;
+      transition: all 0.2s ease;
+      z-index: 50;
+      border-radius: 4px;
+    }
+
+    .dark .mcp-plugin__collapse-toggle {
+      color: #999;
+    }
+
+    .mcp-plugin__collapse-toggle:hover {
+      background: rgba(0, 0, 0, 0.08);
+      color: #333;
+    }
+
+    .dark .mcp-plugin__collapse-toggle:hover {
+      background: rgba(255, 255, 255, 0.08);
+      color: #ccc;
+    }
+
+    .mcp-plugin__collapse-toggle::before {
+      content: "×";
+      font-size: 24px;
+      font-weight: 200;
+      line-height: 1;
+    }
+
+    .mcp-plugin.collapsed .mcp-plugin__collapse-toggle::before {
+      content: "↖";
+      font-size: 18px;
+    }
+
+    /* Collapsed state - corner button */
+    .mcp-plugin.collapsed {
+      gap: 0;
+      overflow: visible;
+      max-width: none;
+      width: 56px;
+      height: 56px;
+      padding: 8px;
+      margin: 0;
+      border-radius: 12px;
+      background: transparent;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+    }
+
+    .mcp-plugin.collapsed .mcp-plugin__header {
+      display: none;
+    }
+
+    .mcp-plugin.collapsed .mcp-plugin__tabs-container {
+      display: none;
+    }
+
+    .mcp-plugin.collapsed .mcp-plugin__content {
+      display: none;
+    }
+
+    .mcp-plugin.collapsed .mcp-plugin__mode {
+      display: none;
+    }
+
+    .mcp-plugin.collapsed .mcp-plugin__collapse-toggle {
+      position: static;
+      width: 48px;
+      height: 48px;
+      background: #2c2c2c;
+      border-radius: 12px;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+      margin: 0;
+      color: #fff;
+      top: auto;
+      right: auto;
+    }
+
+    .mcp-plugin.collapsed .mcp-plugin__collapse-toggle:hover {
+      background: #3a3a3a;
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+    }
+
+    /* Light mode collapsed button */
+    body:not(.dark) .mcp-plugin.collapsed .mcp-plugin__collapse-toggle {
+      background: #e8e8e8;
+      color: #333;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+    }
+
+    body:not(.dark) .mcp-plugin.collapsed .mcp-plugin__collapse-toggle:hover {
+      background: #d8d8d8;
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.2);
+    }
+  </style>
+</head>
+
+<body class="dark">
+  <div class="container mcp-plugin" id="mcp-plugin-container">
+    <div class="mcp-plugin__resize-handle" id="resize-handle"></div>
+    <button class="mcp-plugin__collapse-toggle" id="collapse-toggle" title="Collapse/Expand panel"></button>
+    <div class="mcp-plugin__mode">
+      <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="#400b55" class="mcp-plugin__mode-moon hidden"
+        viewBox="0 -960 960 960">
+        <path
+          d="M483.11-116q-76.3 0-143.05-28.93-66.76-28.93-116.48-78.65t-78.65-116.48Q116-406.81 116-483.11q0-125.27 75.12-223.93 75.11-98.65 198.19-129.65-10.08 96.31 20.34 181.27 30.43 84.96 97.12 151.65 64.69 64.69 151.65 94.62 86.96 29.92 178.27 19.84-29.38 121.08-128.85 197.19Q608.38-116 483.11-116m-.11-52q88 0 164-45t115-122.11q-83-5.01-158.5-39.56T469-468.3q-60-60.08-94-134.89T335-762q-77 41-122 116.18-45 75.19-45 162.82 0 131.25 91.88 223.12Q351.75-168 483-168m-14-300.38" />
+      </svg>
+      <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="#fff" class="mcp-plugin__mode-sun"
+        viewBox="0 -960 960 960">
+        <path
+          d="M454-794.31V-902h52v107.69zM454-58v-107.69h52V-58zm340.31-396v-52H902v52zM58-454v-52h107.69v52zm660.31-227.15-37.16-37.16L759-798.38 798.38-759zM202-162.62 162.62-202l79.07-76.85 37.16 37.16zm557 0-77.85-79.07 37.16-37.16L798.38-202zM241.69-681.15 162.62-759 202-798.38l76.85 80.07zm82.54 356.92Q260-388.46 260-480t64.23-155.77T480-700t155.77 64.23T700-480t-64.23 155.77T480-260t-155.77-64.23M599-360.5q49-49.5 49-119.75 0-70.24-48.75-119-48.76-48.75-119-48.75Q410-648 361-599.25q-49 48.76-49 119 0 70.25 48.75 119.75 48.76 49.5 119 49.5Q550-311 599-360.5M481-481" />
+      </svg>
+    </div>
+    <div class="header mcp-plugin__header">
+      <h1 class="mcp-plugin__header-title">Claude Talk to Figma</h1>
+      <p class="mcp-plugin__header-description">AI agents reading and modifing Figma designs</p>
+    </div>
+
+    <!-- Tab Navigation -->
+    <div class="mcp-plugin__tabs-container">
+      <button class="mcp-plugin__tab active" data-tab="connection">
+        Connect
+      </button>
+      <button class="mcp-plugin__tab" data-tab="operations">
+        Operations
+      </button>
+      <button class="mcp-plugin__tab" data-tab="activity">
+        Activity
+      </button>
+      <button class="mcp-plugin__tab" data-tab="settings">
+        Settings
+      </button>
+    </div>
+
+    <div class="content mcp-plugin__content mcp-plugin__main-container">
+
+      <!-- Tab 1: Connection -->
+      <div id="tab-connection" class="mcp-plugin__tab-content active">
         <div id="connection-status" class="disconnected mcp-plugin__connection-status">
           Disconnected from server…<br>Try to reconnect clicking the button
         </div>
@@ -471,6 +1159,38 @@
           </button>
         </div>
 
+        <div
+          style="margin-top: 16px; padding: 12px; border-radius: 6px; background: rgba(115, 35, 146, 0.04); border-left: 3px solid #732392;">
+          <div style="font-size: 11px; font-weight: 600; margin-bottom: 8px; opacity: 0.7; text-transform: uppercase;">
+            📝 Connection Info</div>
+          <p style="font-size: 10px; margin: 0 0 8px 0; opacity: 0.7; line-height: 1.4;">
+            To connect Claude to Figma, get your channel ID from the connection status above, then use it in Claude's
+            chat interface.
+          </p>
+        </div>
+      </div>
+
+      <!-- Tab 2: Operations -->
+      <div id="tab-operations" class="mcp-plugin__tab-content">
+        <div class="mcp-plugin__operations">
+          <h3 class="mcp-plugin__operations-title">⚡ Quick Operations</h3>
+
+          <div class="mcp-plugin__operations-search">
+            <input id="operations-search" type="text" placeholder="Search operations..." style="flex: 1;">
+          </div>
+
+          <div class="mcp-plugin__operations-tabs" id="operations-categories">
+            <!-- Populated dynamically -->
+          </div>
+
+          <div class="mcp-plugin__operations-grid" id="operations-grid">
+            <!-- Populated dynamically -->
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab 3: Activity -->
+      <div id="tab-activity" class="mcp-plugin__tab-content">
         <div class="mcp-plugin__activity">
           <div class="mcp-plugin__activity-head">
             <h2 class="mcp-plugin__activity-title">Live activity</h2>
@@ -481,8 +1201,11 @@
             <button id="btn-clear-activity" class="mcp-plugin__link" type="button">Clear</button>
           </div>
 
-          <div id="recent-commands" class="mcp-plugin__recent-commands" style="display: none; margin-bottom: 8px; padding: 8px; border-radius: 4px; background: rgba(115, 35, 146, 0.06); border-left: 3px solid #732392;">
-            <div style="font-size: 10px; font-weight: 600; margin-bottom: 6px; opacity: 0.7; text-transform: uppercase;">📌 Recent Commands</div>
+          <div id="recent-commands" class="mcp-plugin__recent-commands"
+            style="display: none; margin-bottom: 8px; padding: 8px; border-radius: 4px; background: rgba(115, 35, 146, 0.06); border-left: 3px solid #732392;">
+            <div
+              style="font-size: 10px; font-weight: 600; margin-bottom: 6px; opacity: 0.7; text-transform: uppercase;">📌
+              Recent Commands</div>
             <div id="recent-commands-list" style="display: flex; flex-wrap: wrap; gap: 4px;">
               <!-- Populated dynamically -->
             </div>
@@ -495,13 +1218,16 @@
           </div>
 
           <div class="mcp-plugin__activity-opts">
-            <label title="Draw a moving cursor on the canvas that travels to each element as it is edited. Everyone with the file open sees it.">
+            <label
+              title="Draw a moving cursor on the canvas that travels to each element as it is edited. Everyone with the file open sees it.">
               <input type="checkbox" id="opt-cursor"> Live cursor
             </label>
-            <label title="Select each node as it is changed, so collaborators watching the file see what is being edited">
+            <label
+              title="Select each node as it is changed, so collaborators watching the file see what is being edited">
               <input type="checkbox" id="opt-highlight" checked> Highlight nodes
             </label>
-            <label title="Write a live status frame onto the canvas so anyone with the file open can follow progress. Adds nodes to your document.">
+            <label
+              title="Write a live status frame onto the canvas so anyone with the file open can follow progress. Adds nodes to your document.">
               <input type="checkbox" id="opt-overlay"> Canvas overlay
             </label>
             <label title="Pan and zoom the canvas to follow each change">
@@ -509,663 +1235,1124 @@
             </label>
           </div>
 
-          <div class="mcp-plugin__file-key" style="margin-top: 8px; display: flex; flex-direction: column; gap: 4px; font-size: 10px;">
-            <div style="display: flex; align-items: center; justify-content: space-between;">
-              <span style="opacity: 0.7; font-weight: 500;">Figma File URL or Key (for REST fallback):</span>
-              <span id="file-key-status" style="font-size: 9px; opacity: 0.5;">Auto</span>
+        </div>
+      </div>
+
+      <!-- Tab 4: Settings -->
+      <div id="tab-settings" class="mcp-plugin__tab-content">
+        <div style="display: flex; flex-direction: column; gap: 12px;">
+          <div
+            style="padding: 12px; border-radius: 6px; background: rgba(115, 35, 146, 0.04); border-left: 3px solid #732392;">
+            <div
+              style="font-size: 11px; font-weight: 600; margin-bottom: 8px; opacity: 0.7; text-transform: uppercase;">
+              👁️ Display Options</div>
+            <div class="mcp-plugin__activity-opts">
+              <label
+                title="Draw a moving cursor on the canvas that travels to each element as it is edited. Everyone with the file open sees it.">
+                <input type="checkbox" id="opt-cursor"> Live cursor
+              </label>
+              <label
+                title="Select each node as it is changed, so collaborators watching the file see what is being edited">
+                <input type="checkbox" id="opt-highlight" checked> Highlight nodes
+              </label>
+              <label
+                title="Write a live status frame onto the canvas so anyone with the file open can follow progress. Adds nodes to your document.">
+                <input type="checkbox" id="opt-overlay"> Canvas overlay
+              </label>
+              <label title="Pan and zoom the canvas to follow each change">
+                <input type="checkbox" id="opt-follow"> Follow viewport
+              </label>
             </div>
-            <div style="display: flex; gap: 6px;">
-              <input id="input-file-key" type="text" placeholder="Paste figma.com/design/... URL or key" style="flex: 1; padding: 4px 6px; border-radius: 4px; border: 1px solid rgba(120,120,120,0.3); background: transparent; color: inherit; font-size: 10px;" />
-              <button id="btn-set-file-key" type="button" style="padding: 4px 8px; border-radius: 4px; border: 1px solid #732392; background: #732392; color: #fff; font-size: 10px; cursor: pointer;">Save</button>
+          </div>
+
+          <div
+            style="padding: 12px; border-radius: 6px; background: rgba(115, 35, 146, 0.04); border-left: 3px solid #732392;">
+            <div
+              style="font-size: 11px; font-weight: 600; margin-bottom: 8px; opacity: 0.7; text-transform: uppercase;">📄
+              Figma File Configuration</div>
+            <div class="mcp-plugin__file-key" style="display: flex; flex-direction: column; gap: 4px; font-size: 10px;">
+              <div style="display: flex; align-items: center; justify-content: space-between;">
+                <span style="opacity: 0.7; font-weight: 500;">File URL or Key (for REST fallback):</span>
+                <span id="file-key-status" style="font-size: 9px; opacity: 0.5;">Auto</span>
+              </div>
+              <div style="display: flex; gap: 6px;">
+                <input id="input-file-key" type="text" placeholder="Paste figma.com/design/... URL or key"
+                  style="flex: 1; padding: 4px 6px; border-radius: 4px; border: 1px solid rgba(120,120,120,0.3); background: transparent; color: inherit; font-size: 10px;" />
+                <button id="btn-set-file-key" type="button"
+                  style="padding: 4px 8px; border-radius: 4px; border: 1px solid #732392; background: #732392; color: #fff; font-size: 10px; cursor: pointer;">Save</button>
+              </div>
+            </div>
+          </div>
+
+          <div
+            style="padding: 12px; border-radius: 6px; background: rgba(115, 35, 146, 0.04); border-left: 3px solid #732392;">
+            <div
+              style="font-size: 11px; font-weight: 600; margin-bottom: 8px; opacity: 0.7; text-transform: uppercase;">ℹ️
+              About</div>
+            <div style="font-size: 10px; opacity: 0.7; line-height: 1.5;">
+              <strong>Claude Talk to Figma MCP</strong><br>
+              AI-powered design agent for Figma<br>
+              <a href="https://github.com/litoondev/claude-talk-to-figma-mcp-main" target="_blank"
+                style="color: #732392; text-decoration: none;">📖 Documentation</a>
             </div>
           </div>
         </div>
       </div>
+
     </div>
+  </div>
 
-    <script>
-      /**
-       * ClaudeMCPPlugin Class
-       * Managed WebSocket connection, Figma communication, and UI state.
-       */
-      class ClaudeMCPPlugin {
-        constructor() {
-          this.state = {
-            connected: false,
-            socket: null,
-            serverPort: 3055,
-            pendingRequests: new Map(),
-            channel: null,
-          };
+  <script>
+    /**
+     * Operations Menu Manager
+     * Provides quick access to common design operations
+     */
+    class OperationsMenu {
+      constructor() {
+        this.operations = [
+          {
+            id: 'convert_to_grid',
+            category: 'Layout',
+            title: 'Convert to Grid',
+            description: 'Convert to Figma Grid with minimal layers',
+            triggers: ['convert to grid', 'gridify'],
+            prompt: 'Convert this selection to a Figma Grid layout. Minimize layers while keeping design identical.',
+            icon: '📊'
+          },
+          {
+            id: 'rename_layers',
+            category: 'Organization',
+            title: 'Rename Layers',
+            description: 'Semantic naming conventions (BEM-like)',
+            triggers: ['rename layers', 'clean up layers'],
+            prompt: 'Rename all layers using professional frontend naming conventions (semantic HTML + BEM-like prefixes).',
+            icon: '📝'
+          },
+          {
+            id: 'make_responsive',
+            category: 'Responsive',
+            title: 'Make Responsive',
+            description: 'Adapt for tablet (768px) and mobile (320px)',
+            triggers: ['make responsive', 'responsive'],
+            prompt: 'Make this design responsive for tablet (768px) and mobile (320px). Adapt layout without redesigning.',
+            icon: '📱'
+          },
+          {
+            id: 'optimize_layers',
+            category: 'Organization',
+            title: 'Optimize Layers',
+            description: 'Remove wrappers and flatten structure',
+            triggers: ['optimize layers', 'fewer layers'],
+            prompt: 'Optimize layer structure by removing unnecessary wrappers and empty frames.',
+            icon: '✨'
+          },
+          {
+            id: 'design_system',
+            category: 'Design System',
+            title: 'Design System First',
+            description: 'Reuse existing components & variables',
+            triggers: ['design system', 'reuse'],
+            prompt: 'Inspect the local design system. Reuse existing components, variables, and styles before creating new elements.',
+            icon: '🎨'
+          },
+          {
+            id: 'fix_typography',
+            category: 'Typography',
+            title: 'Fix Typography',
+            description: 'Bind to text styles and ensure hierarchy',
+            triggers: ['fix typography', 'text styles'],
+            prompt: 'Review and fix typography. Bind all text to existing text styles and ensure proper hierarchy.',
+            icon: '🔤'
+          },
+          {
+            id: 'audit_spacing',
+            category: 'Layout',
+            title: 'Audit Spacing',
+            description: 'Standardize padding & gaps with tokens',
+            triggers: ['audit spacing', 'spacing review'],
+            prompt: 'Audit spacing throughout. Use design tokens for padding, gaps, and margins. Fix inconsistencies.',
+            icon: '📐'
+          },
+          {
+            id: 'hug_heights',
+            category: 'Responsive',
+            title: 'Apply Hug Heights',
+            description: 'Replace fixed heights with Hug Contents',
+            triggers: ['hug height', 'hug contents'],
+            prompt: 'Convert fixed heights to Hug Contents for all content containers. Ensure responsive growth.',
+            icon: '📏'
+          }
+        ];
 
-          // Cache DOM elements
-          this.ui = {
-            connectBtn: document.getElementById("btn-connect"),
-            disconnectBtn: document.getElementById("btn-disconnect"),
-            connectionStatus: document.getElementById("connection-status"),
-            progressContainer: document.getElementById("progress-container"),
-            progressBar: document.getElementById("progress-bar"),
-            progressMessage: document.getElementById("progress-message"),
-            progressStatus: document.getElementById("progress-status"),
-            progressPercentage: document.getElementById("progress-percentage"),
-            modeToggle: document.querySelector(".mcp-plugin__mode"),
-            modeSun: document.querySelector(".mcp-plugin__mode-sun"),
-            modeMoon: document.querySelector(".mcp-plugin__mode-moon"),
-            activityList: document.getElementById("activity-list"),
-            activityChip: document.getElementById("activity-chip"),
-            activityChipText: document.getElementById("activity-chip-text"),
-            clearActivityBtn: document.getElementById("btn-clear-activity"),
-            optCursor: document.getElementById("opt-cursor"),
-            optHighlight: document.getElementById("opt-highlight"),
-            optOverlay: document.getElementById("opt-overlay"),
-            optFollow: document.getElementById("opt-follow"),
-          };
+        this.filteredOperations = [...this.operations];
+        this.searchQuery = '';
+        this.selectedCategory = 'all';
+      }
 
-          // Rendered activity entries, newest last. Bounded so a long session
-          // cannot grow the panel's DOM without limit.
-          this.activity = { entries: [], max: 100, elapsedTimer: null };
+      getCategories() {
+        const categories = new Set(this.operations.map(op => op.category));
+        return ['all', ...Array.from(categories).sort()];
+      }
 
-          // Track unique recent commands for quick access (latest first, max 10)
-          this.recentCommands = { list: [], max: 10 };
+      search(query) {
+        this.searchQuery = query.toLowerCase();
+        this.filter();
+      }
 
-          this.init();
+      setCategory(category) {
+        this.selectedCategory = category;
+        this.filter();
+      }
+
+      filter() {
+        this.filteredOperations = this.operations.filter(op => {
+          const matchesSearch =
+            !this.searchQuery ||
+            op.title.toLowerCase().includes(this.searchQuery) ||
+            op.description.toLowerCase().includes(this.searchQuery) ||
+            op.triggers.some(t => t.includes(this.searchQuery));
+
+          const matchesCategory =
+            this.selectedCategory === 'all' || op.category === this.selectedCategory;
+
+          return matchesSearch && matchesCategory;
+        });
+      }
+
+      getFiltered() {
+        return this.filteredOperations;
+      }
+    }
+
+    /**
+     * ClaudeMCPPlugin Class
+     * Managed WebSocket connection, Figma communication, and UI state.
+     */
+    class ClaudeMCPPlugin {
+      constructor() {
+        this.state = {
+          connected: false,
+          socket: null,
+          serverPort: 3055,
+          pendingRequests: new Map(),
+          channel: null,
+          isCollapsed: this.loadCollapsedState(),
+        };
+
+        // Initialize operations menu
+        this.operationsMenu = new OperationsMenu();
+
+        // Cache DOM elements
+        this.ui = {
+          connectBtn: document.getElementById("btn-connect"),
+          disconnectBtn: document.getElementById("btn-disconnect"),
+          connectionStatus: document.getElementById("connection-status"),
+          progressContainer: document.getElementById("progress-container"),
+          progressBar: document.getElementById("progress-bar"),
+          progressMessage: document.getElementById("progress-message"),
+          progressStatus: document.getElementById("progress-status"),
+          progressPercentage: document.getElementById("progress-percentage"),
+          modeToggle: document.querySelector(".mcp-plugin__mode"),
+          modeSun: document.querySelector(".mcp-plugin__mode-sun"),
+          modeMoon: document.querySelector(".mcp-plugin__mode-moon"),
+          activityList: document.getElementById("activity-list"),
+          activityChip: document.getElementById("activity-chip"),
+          activityChipText: document.getElementById("activity-chip-text"),
+          clearActivityBtn: document.getElementById("btn-clear-activity"),
+          optCursor: document.getElementById("opt-cursor"),
+          optHighlight: document.getElementById("opt-highlight"),
+          optOverlay: document.getElementById("opt-overlay"),
+          optFollow: document.getElementById("opt-follow"),
+          collapseToggle: document.getElementById("collapse-toggle"),
+          container: document.getElementById("mcp-plugin-container"),
+          resizeHandle: document.getElementById("resize-handle"),
+        };
+
+        // Window resize state
+        this.resizeState = {
+          isResizing: false,
+          startX: 0,
+          startY: 0,
+          startWidth: 0,
+          startHeight: 0,
+          minWidth: 300,
+          minHeight: 200,
+          maxWidth: 1200,
+          maxHeight: 1200,
+        };
+
+        // Rendered activity entries, newest last. Bounded so a long session
+        // cannot grow the panel's DOM without limit.
+        this.activity = { entries: [], max: 100, elapsedTimer: null };
+
+        // Track unique recent commands for quick access (latest first, max 10)
+        this.recentCommands = { list: [], max: 10 };
+
+        this.init();
+      }
+
+      init() {
+        // Initialize tab system
+        this.initTabs();
+
+        // Initialize operations menu
+        this.initOperationsMenu();
+
+        // Apply initial collapsed state
+        if (this.state.isCollapsed) {
+          this.setCollapsed(true);
         }
 
-        init() {
-          // Event Listeners
-          this.ui.connectBtn.addEventListener("click", () => this.connect());
-          this.ui.disconnectBtn.addEventListener("click", () => this.disconnect());
+        // Apply saved window size
+        this.restoreWindowSize();
 
-          // Clipboard feature using event delegation
-          this.ui.connectionStatus.addEventListener("click", (e) => {
-            if (e.target.classList.contains("mcp-plugin__channel-name")) {
-              this.copyToClipboard(`Connect to Figma, channel ${e.target.textContent}`);
+        // Event Listeners
+        this.ui.connectBtn.addEventListener("click", () => this.connect());
+        this.ui.disconnectBtn.addEventListener("click", () => this.disconnect());
+        this.ui.collapseToggle.addEventListener("click", () => this.toggleCollapse());
+        this.ui.resizeHandle.addEventListener("mousedown", (e) => this.startResize(e));
+
+        // Clipboard feature using event delegation
+        this.ui.connectionStatus.addEventListener("click", (e) => {
+          if (e.target.classList.contains("mcp-plugin__channel-name")) {
+            this.copyToClipboard(`Connect to Figma, channel ${e.target.textContent}`);
+          }
+        });
+
+        // Mode toggle
+        this.ui.modeToggle.addEventListener("click", () => this.toggleMode());
+
+        // Activity controls
+        this.ui.clearActivityBtn.addEventListener("click", () => this.clearActivity());
+        ["optCursor", "optHighlight", "optOverlay", "optFollow"].forEach((key) => {
+          this.ui[key].addEventListener("change", () => this.pushActivitySettings());
+        });
+
+        // File key controls
+        const setFileKeyBtn = document.getElementById("btn-set-file-key");
+        const fileKeyInput = document.getElementById("input-file-key");
+        const fileKeyStatus = document.getElementById("file-key-status");
+        if (setFileKeyBtn && fileKeyInput) {
+          setFileKeyBtn.addEventListener("click", () => {
+            const val = fileKeyInput.value.trim();
+            if (val) {
+              parent.postMessage({ pluginMessage: { type: "set-file-key", fileKey: val } }, "*");
+              if (fileKeyStatus) {
+                fileKeyStatus.innerText = "Saved!";
+                setTimeout(() => { fileKeyStatus.innerText = "Configured"; }, 2500);
+              }
             }
           });
-
-          // Mode toggle
-          this.ui.modeToggle.addEventListener("click", () => this.toggleMode());
-
-          // Activity controls
-          this.ui.clearActivityBtn.addEventListener("click", () => this.clearActivity());
-          ["optCursor", "optHighlight", "optOverlay", "optFollow"].forEach((key) => {
-            this.ui[key].addEventListener("change", () => this.pushActivitySettings());
-          });
-
-          // File key controls
-          const setFileKeyBtn = document.getElementById("btn-set-file-key");
-          const fileKeyInput = document.getElementById("input-file-key");
-          const fileKeyStatus = document.getElementById("file-key-status");
-          if (setFileKeyBtn && fileKeyInput) {
-            setFileKeyBtn.addEventListener("click", () => {
-              const val = fileKeyInput.value.trim();
-              if (val) {
-                parent.postMessage({ pluginMessage: { type: "set-file-key", fileKey: val } }, "*");
-                if (fileKeyStatus) {
-                  fileKeyStatus.innerText = "Saved!";
-                  setTimeout(() => { fileKeyStatus.innerText = "Configured"; }, 2500);
-                }
-              }
-            });
-          }
-
-          // Keeps the "working · 4s" elapsed counter ticking between events.
-          this.activity.elapsedTimer = setInterval(() => this.renderActivityChip(), 1000);
-
-          // Figma messages
-          window.onmessage = (event) => this.handleFigmaMessage(event.data.pluginMessage);
         }
 
-        /**
-         * Update the connection status UI
-         */
-        updateStatus(isConnected, message) {
-          this.state.connected = isConnected;
-          this.ui.connectionStatus.innerHTML =
-            message ||
-            (isConnected
-              ? "Connected to Claude MCP server"
-              : "Not connected to Claude MCP server");
-          
-          this.ui.connectionStatus.className = `mcp-plugin__connection-status ${
-            isConnected ? "connected" : (message && message.includes("Connecting") ? "info" : "disconnected")
+        // Keeps the "working · 4s" elapsed counter ticking between events.
+        this.activity.elapsedTimer = setInterval(() => this.renderActivityChip(), 1000);
+
+        // Figma messages
+        window.onmessage = (event) => this.handleFigmaMessage(event.data.pluginMessage);
+      }
+
+      /**
+       * Update the connection status UI
+       */
+      updateStatus(isConnected, message) {
+        this.state.connected = isConnected;
+        this.ui.connectionStatus.innerHTML =
+          message ||
+          (isConnected
+            ? "Connected to Claude MCP server"
+            : "Not connected to Claude MCP server");
+
+        this.ui.connectionStatus.className = `mcp-plugin__connection-status ${isConnected ? "connected" : (message && message.includes("Connecting") ? "info" : "disconnected")
           }`;
 
-          this.ui.connectBtn.disabled = isConnected;
-          this.ui.disconnectBtn.disabled = !isConnected;
-        }
+        this.ui.connectBtn.disabled = isConnected;
+        this.ui.disconnectBtn.disabled = !isConnected;
+      }
 
-        /**
-         * Connect to WebSocket server
-         */
-        async connect(port = 3055) {
-          try {
-            if (this.state.connected && this.state.socket) {
-              this.updateStatus(true, "Already connected to server");
-              return;
-            }
+      /**
+       * Connect to WebSocket server
+       */
+      async connect(port = 3055) {
+        try {
+          if (this.state.connected && this.state.socket) {
+            this.updateStatus(true, "Already connected to server");
+            return;
+          }
 
-            this.updateStatus(false, "Connecting...");
-            this.ui.connectionStatus.className = "mcp-plugin__connection-status info";
-            
-            this.state.serverPort = port;
-            this.state.socket = new WebSocket(`ws://localhost:${port}`);
+          this.updateStatus(false, "Connecting...");
+          this.ui.connectionStatus.className = "mcp-plugin__connection-status info";
 
-            this.state.socket.onopen = () => {
-              const channelName = this.generateChannelName();
-              console.log("Joining channel:", channelName);
-              this.state.channel = channelName;
+          this.state.serverPort = port;
+          this.state.socket = new WebSocket(`ws://localhost:${port}`);
 
-              this.state.socket.send(
-                JSON.stringify({
-                  type: "join",
-                  channel: channelName.trim(),
-                })
-              );
-            };
+          this.state.socket.onopen = () => {
+            const channelName = this.generateChannelName();
+            console.log("Joining channel:", channelName);
+            this.state.channel = channelName;
 
-            this.state.socket.onmessage = (event) => {
-              try {
-                const data = JSON.parse(event.data);
-                console.log("Received message:", data);
-
-                if (data.type === "system") {
-                  if (data.message && data.message.result) {
-                    this.state.connected = true;
-                    const channelName = data.channel;
-                    this.updateStatus(
-                      true,
-                      `Connected on port ${port}!<br>Copy the channel ID: <span class="mcp-plugin__channel-name" title="Click to copy">${channelName}</span>`
-                    );
-
-                    parent.postMessage(
-                      {
-                        pluginMessage: {
-                          type: "notify",
-                          message: `Connected on port ${port}. In channel: ${channelName}`,
-                        },
-                      },
-                      "*"
-                    );
-                  }
-                } else if (data.type === "error") {
-                  console.error("Error:", data.message);
-                  this.updateStatus(false, `Error: ${data.message}`);
-                  this.state.socket.close();
-                }
-
-                this.handleSocketMessage(data);
-              } catch (error) {
-                console.error("Error parsing message:", error);
-              }
-            };
-
-            this.state.socket.onclose = () => {
-              this.state.connected = false;
-              this.state.socket = null;
-              this.updateStatus(false, "Disconnected from server…<br>Try to reconnect clicking the button");
-            };
-
-            this.state.socket.onerror = (error) => {
-              console.error("WebSocket error:", error);
-              this.updateStatus(false, "Connection error");
-              this.state.connected = false;
-              this.state.socket = null;
-            };
-          } catch (error) {
-            console.error("Connection error:", error);
-            this.updateStatus(
-              false,
-              `Connection error: ${error.message || "Unknown error"}`
+            this.state.socket.send(
+              JSON.stringify({
+                type: "join",
+                channel: channelName.trim(),
+              })
             );
-          }
-        }
+          };
 
-        /**
-         * Disconnect from WebSocket server
-         */
-        disconnect() {
-          if (this.state.socket) {
-            this.updateStatus(false, "Disconnecting...");
-            this.ui.connectionStatus.className = "mcp-plugin__connection-status info";
-            this.state.socket.close();
-            this.state.socket = null;
-            this.state.connected = false;
-          }
-        }
-
-        /**
-         * Handle messages from the WebSocket server
-         */
-        async handleSocketMessage(payload) {
-          const data = payload.message;
-          if (!data) return;
-          console.log("handleSocketMessage", data);
-
-          // If it's a response to a previous request
-          if (data.id && this.state.pendingRequests.has(data.id)) {
-            const { resolve, reject } = this.state.pendingRequests.get(data.id);
-            this.state.pendingRequests.delete(data.id);
-
-            if (data.error) reject(new Error(data.error));
-            else resolve(data.result);
-            return;
-          }
-
-          // If it's a new command
-          if (data.command) {
+          this.state.socket.onmessage = (event) => {
             try {
-              parent.postMessage(
-                {
-                  pluginMessage: {
-                    type: "execute-command",
-                    id: data.id,
-                    command: data.command,
-                    params: data.params,
-                  },
-                },
-                "*"
-              );
+              const data = JSON.parse(event.data);
+              console.log("Received message:", data);
+
+              if (data.type === "system") {
+                if (data.message && data.message.result) {
+                  this.state.connected = true;
+                  const channelName = data.channel;
+                  this.updateStatus(
+                    true,
+                    `Connected on port ${port}!<br>Copy the channel ID: <span class="mcp-plugin__channel-name" title="Click to copy">${channelName}</span>`
+                  );
+
+                  parent.postMessage(
+                    {
+                      pluginMessage: {
+                        type: "notify",
+                        message: `Connected on port ${port}. In channel: ${channelName}`,
+                      },
+                    },
+                    "*"
+                  );
+                }
+              } else if (data.type === "error") {
+                console.error("Error:", data.message);
+                this.updateStatus(false, `Error: ${data.message}`);
+                this.state.socket.close();
+              }
+
+              this.handleSocketMessage(data);
             } catch (error) {
-              this.sendErrorResponse(data.id, error.message || "Error executing command");
+              console.error("Error parsing message:", error);
             }
-          }
-        }
+          };
 
-        /**
-         * Handle messages from Figma
-         */
-        handleFigmaMessage(message) {
-          if (!message) return;
-          console.log("Received message from plugin:", message);
+          this.state.socket.onclose = () => {
+            this.state.connected = false;
+            this.state.socket = null;
+            this.updateStatus(false, "Disconnected from server…<br>Try to reconnect clicking the button");
+          };
 
-          switch (message.type) {
-            case "connection-status":
-              this.updateStatus(message.connected, message.message);
-              break;
-            case "auto-connect":
-              this.connect();
-              break;
-            case "auto-disconnect":
-              this.disconnect();
-              break;
-            case "command-result":
-              this.sendSuccessResponse(message.id, message.result);
-              break;
-            case "command-error":
-              this.sendErrorResponse(message.id, message.error);
-              break;
-            case "command_progress":
-              this.updateProgress(message);
-              this.sendProgressUpdate(message);
-              break;
-            case "activity-entry":
-              this.addActivityEntry(message.entry, message.state);
-              break;
-            case "activity-settings":
-              this.applyActivitySettingsToUi(message.settings);
-              break;
-          }
-        }
-
-        // ── Live activity feed ────────────────────────────────────────────
-
-        /**
-         * Append one lifecycle entry and refresh the header chip.
-         * `state` carries the plugin's current working/idle status.
-         */
-        addActivityEntry(entry, state) {
-          if (!entry) return;
-
-          this.activity.entries.push(entry);
-          if (this.activity.entries.length > this.activity.max) {
-            this.activity.entries.splice(0, this.activity.entries.length - this.activity.max);
-          }
-          this.activity.state = state || this.activity.state;
-
-          // Track completed commands for quick access
-          if (entry.command && entry.kind === "completed") {
-            this.trackRecentCommand(entry.command);
-          }
-
-          this.renderActivity();
-          this.renderActivityChip();
-        }
-
-        /**
-         * Track a command in the recent commands list (no duplicates, most recent first)
-         */
-        trackRecentCommand(command) {
-          // Remove if already exists
-          this.recentCommands.list = this.recentCommands.list.filter(c => c !== command);
-          // Add to front
-          this.recentCommands.list.unshift(command);
-          // Limit to max
-          if (this.recentCommands.list.length > this.recentCommands.max) {
-            this.recentCommands.list.pop();
-          }
-        }
-
-        clearActivity() {
-          this.activity.entries = [];
-          this.recentCommands.list = []; // Also clear recent commands
-          this.renderActivity();
-        }
-
-        escapeHtml(value) {
-          return String(value == null ? "" : value).replace(/[&<>"']/g, (c) => ({
-            "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-          })[c]);
-        }
-
-        formatClock(ts) {
-          const d = new Date(ts);
-          const pad = (n) => String(n).padStart(2, "0");
-          return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-        }
-
-        formatDuration(ms) {
-          if (ms == null) return "";
-          return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
-        }
-
-        renderActivity() {
-          const entries = this.activity.entries;
-
-          if (!entries.length) {
-            this.ui.activityList.innerHTML =
-              '<div class="mcp-plugin__activity-empty">No activity yet. ' +
-              "Actions will appear here as Claude works.</div>";
-            return;
-          }
-
-          const icons = { started: "▶", completed: "✓", error: "✕" };
-
-          this.ui.activityList.innerHTML = entries.map((e) => {
-            const names = e.nodeNames && e.nodeNames.length
-              ? e.nodeNames
-              : (e.nodeIds || []);
-            const nodeLine = names.length
-              ? `<span class="n">${this.escapeHtml(names.slice(0, 4).join(", "))}` +
-                (names.length > 4 ? ` +${names.length - 4} more` : "") + "</span>"
-              : "";
-
-            // Add class and data attribute if command exists (for click to copy)
-            const hasCommand = e.command && (e.kind === "completed" || e.kind === "started");
-            const classAttr = hasCommand ? ` has-command` : "";
-            const dataAttr = hasCommand ? ` data-copy-hint="Click to copy command"` : "";
-            const dataCommand = hasCommand ? ` data-command="${this.escapeHtml(e.command)}"` : "";
-
-            return `<div class="mcp-plugin__activity-row ${this.escapeHtml(e.kind)}${classAttr}"${dataAttr}${dataCommand}>` +
-              `<span class="t">${this.formatClock(e.ts)}</span>` +
-              `<span class="i">${icons[e.kind] || "·"}</span>` +
-              `<span class="m">${this.escapeHtml(e.message)}</span>` +
-              `<span class="d">${this.formatDuration(e.durationMs)}</span>` +
-              nodeLine +
-            "</div>";
-          }).join("");
-
-          // Add click handlers to rows with commands
-          this.ui.activityList.querySelectorAll(".mcp-plugin__activity-row.has-command").forEach((row) => {
-            row.addEventListener("click", (e) => {
-              const command = row.getAttribute("data-command");
-              if (command) {
-                this.copyCommandToClipboard(command);
-              }
-            });
-          });
-
-          // Render recent commands panel
-          this.renderRecentCommands();
-
-          // Pin to the newest entry.
-          this.ui.activityList.scrollTop = this.ui.activityList.scrollHeight;
-        }
-
-        /**
-         * Render the recent commands quick-access panel
-         */
-        renderRecentCommands() {
-          const recentPanel = document.getElementById("recent-commands");
-          const recentList = document.getElementById("recent-commands-list");
-
-          if (!this.recentCommands.list.length) {
-            recentPanel.style.display = "none";
-            return;
-          }
-
-          recentPanel.style.display = "block";
-          recentList.innerHTML = this.recentCommands.list.map((cmd) => {
-            const displayText = cmd.length > 20 ? cmd.substring(0, 20) + "…" : cmd;
-            return `<button class="mcp-plugin__recent-command-btn" title="${this.escapeHtml(cmd)}" data-command="${this.escapeHtml(cmd)}">${this.escapeHtml(displayText)}</button>`;
-          }).join("");
-
-          // Add click handlers
-          recentList.querySelectorAll(".mcp-plugin__recent-command-btn").forEach((btn) => {
-            btn.addEventListener("click", (e) => {
-              e.preventDefault();
-              const command = btn.getAttribute("data-command");
-              if (command) {
-                this.copyCommandToClipboard(command);
-              }
-            });
-          });
-        }
-
-        /**
-         * Copy a command to clipboard in a format ready for Claude chat
-         */
-        copyCommandToClipboard(command) {
-          // Format the command as a proper prompt for Claude
-          const prompt = `${command}`;
-          this.copyToClipboard(prompt);
-
-          // Show success notification
-          parent.postMessage({
-            pluginMessage: {
-              type: "notify",
-              message: `✓ Command copied: ${command}`,
-            },
-          }, "*");
-        }
-
-        renderActivityChip() {
-          const state = this.activity.state;
-          const working = !!(state && state.working);
-
-          this.ui.activityChip.className =
-            "mcp-plugin__status-chip" + (working ? " working" : "");
-
-          if (working) {
-            const secs = state.startedAt
-              ? Math.max(0, Math.round((Date.now() - state.startedAt) / 1000))
-              : 0;
-            const name = String(state.currentCommand || "working").replace(/_/g, " ");
-            this.ui.activityChipText.textContent = `${name} · ${secs}s`;
-          } else if (state) {
-            this.ui.activityChipText.textContent =
-              `Idle · ${state.completed} done` + (state.failed ? `, ${state.failed} failed` : "");
-          } else {
-            this.ui.activityChipText.textContent = "Idle";
-          }
-        }
-
-        /** Reflect settings pushed from the plugin core into the checkboxes. */
-        applyActivitySettingsToUi(settings) {
-          if (!settings) return;
-          this.ui.optCursor.checked = !!settings.cursorEnabled;
-          this.ui.optHighlight.checked = !!settings.highlightEnabled;
-          this.ui.optOverlay.checked = !!settings.overlayEnabled;
-          this.ui.optFollow.checked = !!settings.followViewport;
-        }
-
-        /** Send checkbox state back to the plugin core, which persists it. */
-        pushActivitySettings() {
-          parent.postMessage({
-            pluginMessage: {
-              type: "set-activity-settings",
-              settings: {
-                cursorEnabled: this.ui.optCursor.checked,
-                highlightEnabled: this.ui.optHighlight.checked,
-                overlayEnabled: this.ui.optOverlay.checked,
-                followViewport: this.ui.optFollow.checked,
-              },
-            },
-          }, "*");
-        }
-
-        /**
-         * Send success response to server
-         */
-        sendSuccessResponse(id, result) {
-          if (!this.state.connected || !this.state.socket) return;
-          this.state.socket.send(
-            JSON.stringify({
-              id,
-              type: "message",
-              channel: this.state.channel,
-              message: { id, result },
-            })
+          this.state.socket.onerror = (error) => {
+            console.error("WebSocket error:", error);
+            this.updateStatus(false, "Connection error");
+            this.state.connected = false;
+            this.state.socket = null;
+          };
+        } catch (error) {
+          console.error("Connection error:", error);
+          this.updateStatus(
+            false,
+            `Connection error: ${error.message || "Unknown error"}`
           );
-        }
-
-        /**
-         * Send error response to server
-         */
-        sendErrorResponse(id, errorMessage) {
-          if (!this.state.connected || !this.state.socket) return;
-          this.state.socket.send(
-            JSON.stringify({
-              id,
-              type: "message",
-              channel: this.state.channel,
-              message: { id, error: errorMessage },
-            })
-          );
-        }
-
-        /**
-         * Update Progress UI
-         */
-        updateProgress(data) {
-          this.ui.progressContainer.classList.remove("hidden");
-          const progress = data.progress || 0;
-          this.ui.progressBar.style.width = `${progress}%`;
-          this.ui.progressPercentage.textContent = `${progress}%`;
-          this.ui.progressMessage.textContent = data.message || "Operation in progress";
-
-          if (data.status === 'started' || data.status === 'in_progress') {
-            this.ui.progressStatus.textContent = data.status === 'started' ? "Started" : "In Progress";
-            this.ui.progressStatus.className = "";
-          } else if (data.status === 'completed') {
-            this.ui.progressStatus.textContent = "Completed";
-            this.ui.progressStatus.className = "operation-complete";
-            setTimeout(() => this.ui.progressContainer.classList.add("hidden"), 5000);
-          } else if (data.status === 'error') {
-            this.ui.progressStatus.textContent = "Error";
-            this.ui.progressStatus.className = "operation-error";
-          }
-        }
-
-        /**
-         * Relay progress update to server
-         */
-        sendProgressUpdate(data) {
-          if (!this.state.connected || !this.state.socket) return;
-          this.state.socket.send(
-            JSON.stringify({
-              id: data.commandId,
-              type: "progress_update",
-              channel: this.state.channel,
-              message: {
-                id: data.commandId,
-                type: "progress_update",
-                data: data
-              }
-            })
-          );
-        }
-
-        /**
-         * Copy text to clipboard and notify
-         */
-        async copyToClipboard(text) {
-          try {
-            // Try modern API first
-            if (navigator.clipboard && navigator.clipboard.writeText) {
-              await navigator.clipboard.writeText(text);
-              this.notifyCopied(text);
-            } else {
-              throw new Error("Clipboard API not available");
-            }
-          } catch (err) {
-            // Fallback to execCommand('copy')
-            try {
-              const textArea = document.createElement("textarea");
-              textArea.value = text;
-              textArea.style.position = "fixed";
-              textArea.style.left = "-9999px";
-              textArea.style.top = "0";
-              document.body.appendChild(textArea);
-              textArea.focus();
-              textArea.select();
-              const successful = document.execCommand('copy');
-              document.body.removeChild(textArea);
-              if (successful) {
-                this.notifyCopied(text);
-              } else {
-                throw new Error("execCommand('copy') failed");
-              }
-            } catch (fallbackErr) {
-              console.error("All copy methods failed:", fallbackErr);
-            }
-          }
-        }
-
-        /**
-         * Toggle between dark and light mode
-         */
-        toggleMode() {
-          const isDark = document.body.classList.toggle("dark");
-          
-          if (isDark) {
-            this.ui.modeSun.classList.remove("hidden");
-            this.ui.modeMoon.classList.add("hidden");
-          } else {
-            this.ui.modeSun.classList.add("hidden");
-            this.ui.modeMoon.classList.remove("hidden");
-          }
-        }
-
-        /**
-         * Notify Figma about clipboard success
-         */
-        notifyCopied(text) {
-          parent.postMessage({
-            pluginMessage: {
-              type: "notify",
-              message: `Channel ID copied: ${text}`,
-            },
-          }, "*");
-        }
-
-        /**
-         * Utils
-         */
-        generateId() {
-          return Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
-        }
-
-        generateChannelName() {
-          const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
-          let res = "";
-          for (let i = 0; i < 8; i++) res += chars.charAt(Math.floor(Math.random() * chars.length));
-          return res;
         }
       }
 
-      // Initialize the plugin
-      const plugin = new ClaudeMCPPlugin();
-    </script>
-  </body>
+      /**
+       * Disconnect from WebSocket server
+       */
+      disconnect() {
+        if (this.state.socket) {
+          this.updateStatus(false, "Disconnecting...");
+          this.ui.connectionStatus.className = "mcp-plugin__connection-status info";
+          this.state.socket.close();
+          this.state.socket = null;
+          this.state.connected = false;
+        }
+      }
+
+      /**
+       * Handle messages from the WebSocket server
+       */
+      async handleSocketMessage(payload) {
+        const data = payload.message;
+        if (!data) return;
+        console.log("handleSocketMessage", data);
+
+        // If it's a response to a previous request
+        if (data.id && this.state.pendingRequests.has(data.id)) {
+          const { resolve, reject } = this.state.pendingRequests.get(data.id);
+          this.state.pendingRequests.delete(data.id);
+
+          if (data.error) reject(new Error(data.error));
+          else resolve(data.result);
+          return;
+        }
+
+        // If it's a new command
+        if (data.command) {
+          try {
+            parent.postMessage(
+              {
+                pluginMessage: {
+                  type: "execute-command",
+                  id: data.id,
+                  command: data.command,
+                  params: data.params,
+                },
+              },
+              "*"
+            );
+          } catch (error) {
+            this.sendErrorResponse(data.id, error.message || "Error executing command");
+          }
+        }
+      }
+
+      /**
+       * Handle messages from Figma
+       */
+      handleFigmaMessage(message) {
+        if (!message) return;
+        console.log("Received message from plugin:", message);
+
+        switch (message.type) {
+          case "connection-status":
+            this.updateStatus(message.connected, message.message);
+            break;
+          case "auto-connect":
+            this.connect();
+            break;
+          case "auto-disconnect":
+            this.disconnect();
+            break;
+          case "command-result":
+            this.sendSuccessResponse(message.id, message.result);
+            break;
+          case "command-error":
+            this.sendErrorResponse(message.id, message.error);
+            break;
+          case "command_progress":
+            this.updateProgress(message);
+            this.sendProgressUpdate(message);
+            break;
+          case "activity-entry":
+            this.addActivityEntry(message.entry, message.state);
+            break;
+          case "activity-settings":
+            this.applyActivitySettingsToUi(message.settings);
+            break;
+        }
+      }
+
+      // ── Collapse/Expand functionality ─────────────────────────────────
+
+      /**
+       * Load the collapsed state from localStorage
+       */
+      loadCollapsedState() {
+        try {
+          const saved = localStorage.getItem("mcp-plugin-collapsed");
+          return saved === "true";
+        } catch (e) {
+          return false;
+        }
+      }
+
+      /**
+       * Save the collapsed state to localStorage
+       */
+      saveCollapsedState(isCollapsed) {
+        try {
+          localStorage.setItem("mcp-plugin-collapsed", isCollapsed ? "true" : "false");
+        } catch (e) {
+          console.warn("Could not save collapsed state:", e);
+        }
+      }
+
+      /**
+       * Toggle between collapsed and expanded state
+       */
+      toggleCollapse() {
+        this.state.isCollapsed = !this.state.isCollapsed;
+        this.setCollapsed(this.state.isCollapsed);
+        this.saveCollapsedState(this.state.isCollapsed);
+      }
+
+      /**
+       * Set the collapsed state
+       */
+      setCollapsed(isCollapsed) {
+        if (isCollapsed) {
+          this.ui.container.classList.add("collapsed");
+        } else {
+          this.ui.container.classList.remove("collapsed");
+        }
+      }
+
+      // ── Window Resize Functionality ────────────────────────────────────
+
+      /**
+       * Start resize operation
+       */
+      startResize(e) {
+        e.preventDefault();
+        this.resizeState.isResizing = true;
+        this.resizeState.startX = e.clientX;
+        this.resizeState.startY = e.clientY;
+        this.resizeState.startWidth = this.ui.container.offsetWidth;
+        this.resizeState.startHeight = this.ui.container.offsetHeight;
+
+        // Bind context for event handlers
+        this.resizeMoveHandler = this.doResize.bind(this);
+        this.resizeUpHandler = this.stopResize.bind(this);
+
+        document.addEventListener("mousemove", this.resizeMoveHandler);
+        document.addEventListener("mouseup", this.resizeUpHandler);
+      }
+
+      /**
+       * Handle resize
+       */
+      doResize(e) {
+        if (!this.resizeState.isResizing) return;
+
+        const deltaX = e.clientX - this.resizeState.startX;
+        const deltaY = e.clientY - this.resizeState.startY;
+
+        let newWidth = this.resizeState.startWidth + deltaX;
+        let newHeight = this.resizeState.startHeight + deltaY;
+
+        // Apply constraints
+        newWidth = Math.max(this.resizeState.minWidth, Math.min(newWidth, this.resizeState.maxWidth));
+        newHeight = Math.max(this.resizeState.minHeight, Math.min(newHeight, this.resizeState.maxHeight));
+
+        this.ui.container.style.width = newWidth + "px";
+        this.ui.container.style.height = newHeight + "px";
+
+        // Save size preference
+        this.saveWindowSize(newWidth, newHeight);
+      }
+
+      /**
+       * Stop resize operation
+       */
+      stopResize() {
+        this.resizeState.isResizing = false;
+        document.removeEventListener("mousemove", this.resizeMoveHandler);
+        document.removeEventListener("mouseup", this.resizeUpHandler);
+      }
+
+      /**
+       * Load window size from localStorage
+       */
+      loadWindowSize() {
+        try {
+          const saved = localStorage.getItem("mcp-plugin-size");
+          if (saved) {
+            return JSON.parse(saved);
+          }
+        } catch (e) {
+          console.warn("Could not load window size:", e);
+        }
+        return { width: null, height: null };
+      }
+
+      /**
+       * Save window size to localStorage
+       */
+      saveWindowSize(width, height) {
+        try {
+          localStorage.setItem("mcp-plugin-size", JSON.stringify({ width, height }));
+        } catch (e) {
+          console.warn("Could not save window size:", e);
+        }
+      }
+
+      /**
+       * Restore window size from saved preferences
+       */
+      restoreWindowSize() {
+        const { width, height } = this.loadWindowSize();
+        if (width && height) {
+          this.ui.container.style.width = width + "px";
+          this.ui.container.style.height = height + "px";
+        }
+      }
+
+      // ── Live activity feed ────────────────────────────────────────────
+
+      /**
+       * Append one lifecycle entry and refresh the header chip.
+       * `state` carries the plugin's current working/idle status.
+       */
+      addActivityEntry(entry, state) {
+        if (!entry) return;
+
+        this.activity.entries.push(entry);
+        if (this.activity.entries.length > this.activity.max) {
+          this.activity.entries.splice(0, this.activity.entries.length - this.activity.max);
+        }
+        this.activity.state = state || this.activity.state;
+
+        // Track completed commands for quick access
+        if (entry.command && entry.kind === "completed") {
+          this.trackRecentCommand(entry.command);
+        }
+
+        this.renderActivity();
+        this.renderActivityChip();
+      }
+
+      /**
+       * Track a command in the recent commands list (no duplicates, most recent first)
+       */
+      trackRecentCommand(command) {
+        // Remove if already exists
+        this.recentCommands.list = this.recentCommands.list.filter(c => c !== command);
+        // Add to front
+        this.recentCommands.list.unshift(command);
+        // Limit to max
+        if (this.recentCommands.list.length > this.recentCommands.max) {
+          this.recentCommands.list.pop();
+        }
+      }
+
+      clearActivity() {
+        this.activity.entries = [];
+        this.recentCommands.list = []; // Also clear recent commands
+        this.renderActivity();
+      }
+
+      escapeHtml(value) {
+        return String(value == null ? "" : value).replace(/[&<>"']/g, (c) => ({
+          "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+        })[c]);
+      }
+
+      formatClock(ts) {
+        const d = new Date(ts);
+        const pad = (n) => String(n).padStart(2, "0");
+        return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+      }
+
+      formatDuration(ms) {
+        if (ms == null) return "";
+        return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
+      }
+
+      renderActivity() {
+        const entries = this.activity.entries;
+
+        if (!entries.length) {
+          this.ui.activityList.innerHTML =
+            '<div class="mcp-plugin__activity-empty">No activity yet. ' +
+            "Actions will appear here as Claude works.</div>";
+          return;
+        }
+
+        const icons = { started: "▶", completed: "✓", error: "✕" };
+
+        this.ui.activityList.innerHTML = entries.map((e) => {
+          const names = e.nodeNames && e.nodeNames.length
+            ? e.nodeNames
+            : (e.nodeIds || []);
+          const nodeLine = names.length
+            ? `<span class="n">${this.escapeHtml(names.slice(0, 4).join(", "))}` +
+            (names.length > 4 ? ` +${names.length - 4} more` : "") + "</span>"
+            : "";
+
+          // Add class and data attribute if command exists (for click to copy)
+          const hasCommand = e.command && (e.kind === "completed" || e.kind === "started");
+          const classAttr = hasCommand ? ` has-command` : "";
+          const dataAttr = hasCommand ? ` data-copy-hint="Click to copy command"` : "";
+          const dataCommand = hasCommand ? ` data-command="${this.escapeHtml(e.command)}"` : "";
+
+          return `<div class="mcp-plugin__activity-row ${this.escapeHtml(e.kind)}${classAttr}"${dataAttr}${dataCommand}>` +
+            `<span class="t">${this.formatClock(e.ts)}</span>` +
+            `<span class="i">${icons[e.kind] || "·"}</span>` +
+            `<span class="m">${this.escapeHtml(e.message)}</span>` +
+            `<span class="d">${this.formatDuration(e.durationMs)}</span>` +
+            nodeLine +
+            "</div>";
+        }).join("");
+
+        // Add click handlers to rows with commands
+        this.ui.activityList.querySelectorAll(".mcp-plugin__activity-row.has-command").forEach((row) => {
+          row.addEventListener("click", (e) => {
+            const command = row.getAttribute("data-command");
+            if (command) {
+              this.copyCommandToClipboard(command);
+            }
+          });
+        });
+
+        // Render recent commands panel
+        this.renderRecentCommands();
+
+        // Pin to the newest entry.
+        this.ui.activityList.scrollTop = this.ui.activityList.scrollHeight;
+      }
+
+      /**
+       * Render the recent commands quick-access panel
+       */
+      renderRecentCommands() {
+        const recentPanel = document.getElementById("recent-commands");
+        const recentList = document.getElementById("recent-commands-list");
+
+        if (!this.recentCommands.list.length) {
+          recentPanel.style.display = "none";
+          return;
+        }
+
+        recentPanel.style.display = "block";
+        recentList.innerHTML = this.recentCommands.list.map((cmd) => {
+          const displayText = cmd.length > 20 ? cmd.substring(0, 20) + "…" : cmd;
+          return `<button class="mcp-plugin__recent-command-btn" title="${this.escapeHtml(cmd)}" data-command="${this.escapeHtml(cmd)}">${this.escapeHtml(displayText)}</button>`;
+        }).join("");
+
+        // Add click handlers
+        recentList.querySelectorAll(".mcp-plugin__recent-command-btn").forEach((btn) => {
+          btn.addEventListener("click", (e) => {
+            e.preventDefault();
+            const command = btn.getAttribute("data-command");
+            if (command) {
+              this.copyCommandToClipboard(command);
+            }
+          });
+        });
+      }
+
+      /**
+       * Copy a command to clipboard in a format ready for Claude chat
+       */
+      copyCommandToClipboard(command) {
+        // Format the command as a proper prompt for Claude
+        const prompt = `${command}`;
+        this.copyToClipboard(prompt);
+
+        // Show success notification
+        parent.postMessage({
+          pluginMessage: {
+            type: "notify",
+            message: `✓ Command copied: ${command}`,
+          },
+        }, "*");
+      }
+
+      renderActivityChip() {
+        const state = this.activity.state;
+        const working = !!(state && state.working);
+
+        this.ui.activityChip.className =
+          "mcp-plugin__status-chip" + (working ? " working" : "");
+
+        if (working) {
+          const secs = state.startedAt
+            ? Math.max(0, Math.round((Date.now() - state.startedAt) / 1000))
+            : 0;
+          const name = String(state.currentCommand || "working").replace(/_/g, " ");
+          this.ui.activityChipText.textContent = `${name} · ${secs}s`;
+        } else if (state) {
+          this.ui.activityChipText.textContent =
+            `Idle · ${state.completed} done` + (state.failed ? `, ${state.failed} failed` : "");
+        } else {
+          this.ui.activityChipText.textContent = "Idle";
+        }
+      }
+
+      /** Reflect settings pushed from the plugin core into the checkboxes. */
+      applyActivitySettingsToUi(settings) {
+        if (!settings) return;
+        this.ui.optCursor.checked = !!settings.cursorEnabled;
+        this.ui.optHighlight.checked = !!settings.highlightEnabled;
+        this.ui.optOverlay.checked = !!settings.overlayEnabled;
+        this.ui.optFollow.checked = !!settings.followViewport;
+      }
+
+      /** Send checkbox state back to the plugin core, which persists it. */
+      pushActivitySettings() {
+        parent.postMessage({
+          pluginMessage: {
+            type: "set-activity-settings",
+            settings: {
+              cursorEnabled: this.ui.optCursor.checked,
+              highlightEnabled: this.ui.optHighlight.checked,
+              overlayEnabled: this.ui.optOverlay.checked,
+              followViewport: this.ui.optFollow.checked,
+            },
+          },
+        }, "*");
+      }
+
+      /**
+       * Send success response to server
+       */
+      sendSuccessResponse(id, result) {
+        if (!this.state.connected || !this.state.socket) return;
+        this.state.socket.send(
+          JSON.stringify({
+            id,
+            type: "message",
+            channel: this.state.channel,
+            message: { id, result },
+          })
+        );
+      }
+
+      /**
+       * Send error response to server
+       */
+      sendErrorResponse(id, errorMessage) {
+        if (!this.state.connected || !this.state.socket) return;
+        this.state.socket.send(
+          JSON.stringify({
+            id,
+            type: "message",
+            channel: this.state.channel,
+            message: { id, error: errorMessage },
+          })
+        );
+      }
+
+      /**
+       * Update Progress UI
+       */
+      updateProgress(data) {
+        this.ui.progressContainer.classList.remove("hidden");
+        const progress = data.progress || 0;
+        this.ui.progressBar.style.width = `${progress}%`;
+        this.ui.progressPercentage.textContent = `${progress}%`;
+        this.ui.progressMessage.textContent = data.message || "Operation in progress";
+
+        if (data.status === 'started' || data.status === 'in_progress') {
+          this.ui.progressStatus.textContent = data.status === 'started' ? "Started" : "In Progress";
+          this.ui.progressStatus.className = "";
+        } else if (data.status === 'completed') {
+          this.ui.progressStatus.textContent = "Completed";
+          this.ui.progressStatus.className = "operation-complete";
+          setTimeout(() => this.ui.progressContainer.classList.add("hidden"), 5000);
+        } else if (data.status === 'error') {
+          this.ui.progressStatus.textContent = "Error";
+          this.ui.progressStatus.className = "operation-error";
+        }
+      }
+
+      /**
+       * Relay progress update to server
+       */
+      sendProgressUpdate(data) {
+        if (!this.state.connected || !this.state.socket) return;
+        this.state.socket.send(
+          JSON.stringify({
+            id: data.commandId,
+            type: "progress_update",
+            channel: this.state.channel,
+            message: {
+              id: data.commandId,
+              type: "progress_update",
+              data: data
+            }
+          })
+        );
+      }
+
+      /**
+       * Copy text to clipboard and notify
+       */
+      async copyToClipboard(text) {
+        try {
+          // Try modern API first
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(text);
+            this.notifyCopied(text);
+          } else {
+            throw new Error("Clipboard API not available");
+          }
+        } catch (err) {
+          // Fallback to execCommand('copy')
+          try {
+            const textArea = document.createElement("textarea");
+            textArea.value = text;
+            textArea.style.position = "fixed";
+            textArea.style.left = "-9999px";
+            textArea.style.top = "0";
+            document.body.appendChild(textArea);
+            textArea.focus();
+            textArea.select();
+            const successful = document.execCommand('copy');
+            document.body.removeChild(textArea);
+            if (successful) {
+              this.notifyCopied(text);
+            } else {
+              throw new Error("execCommand('copy') failed");
+            }
+          } catch (fallbackErr) {
+            console.error("All copy methods failed:", fallbackErr);
+          }
+        }
+      }
+
+      /**
+       * Initialize the tab system
+       */
+      initTabs() {
+        const tabs = document.querySelectorAll(".mcp-plugin__tab");
+        const contents = document.querySelectorAll(".mcp-plugin__tab-content");
+
+        tabs.forEach(tab => {
+          tab.addEventListener("click", () => {
+            const tabName = tab.getAttribute("data-tab");
+
+            // Remove active class from all tabs and contents
+            tabs.forEach(t => t.classList.remove("active"));
+            contents.forEach(c => c.classList.remove("active"));
+
+            // Add active class to clicked tab and corresponding content
+            tab.classList.add("active");
+            const content = document.getElementById(`tab-${tabName}`);
+            if (content) {
+              content.classList.add("active");
+            }
+          });
+        });
+      }
+
+      /**
+       * Initialize the operations menu
+       */
+      initOperationsMenu() {
+        const searchInput = document.getElementById("operations-search");
+        const categoriesContainer = document.getElementById("operations-categories");
+
+        if (!searchInput || !categoriesContainer) return;
+
+        // Render categories
+        const categories = this.operationsMenu.getCategories();
+        categoriesContainer.innerHTML = categories.map(cat => {
+          const isActive = cat === this.operationsMenu.selectedCategory;
+          return `<button class="mcp-plugin__operations-tab ${isActive ? 'active' : ''}" data-category="${cat}">${cat}</button>`;
+        }).join("");
+
+        // Add category filter listeners
+        categoriesContainer.querySelectorAll(".mcp-plugin__operations-tab").forEach(btn => {
+          btn.addEventListener("click", (e) => {
+            const category = e.target.getAttribute("data-category");
+            this.operationsMenu.setCategory(category);
+            this.renderOperations();
+            // Update active state
+            categoriesContainer.querySelectorAll(".mcp-plugin__operations-tab").forEach(b => b.classList.remove("active"));
+            e.target.classList.add("active");
+          });
+        });
+
+        // Add search listener
+        searchInput.addEventListener("input", (e) => {
+          this.operationsMenu.search(e.target.value);
+          this.renderOperations();
+        });
+
+        // Initial render
+        this.renderOperations();
+      }
+
+      /**
+       * Render the operations grid
+       */
+      renderOperations() {
+        const grid = document.getElementById("operations-grid");
+        if (!grid) return;
+
+        const operations = this.operationsMenu.getFiltered();
+
+        if (!operations.length) {
+          grid.innerHTML = '<div class="mcp-plugin__operations-empty">No operations match your search</div>';
+          return;
+        }
+
+        grid.innerHTML = operations.map(op => `
+            <div class="mcp-plugin__operation-item" data-operation-id="${op.id}">
+              <div class="mcp-plugin__operation-header">
+                <span class="mcp-plugin__operation-icon">${op.icon}</span>
+                <span class="mcp-plugin__operation-name">${this.escapeHtml(op.title)}</span>
+              </div>
+              <div class="mcp-plugin__operation-description">${this.escapeHtml(op.description)}</div>
+              <button class="mcp-plugin__operation-action" data-operation-id="${op.id}">Copy prompt</button>
+            </div>
+          `).join("");
+
+        // Add click handlers
+        grid.querySelectorAll(".mcp-plugin__operation-action").forEach(btn => {
+          btn.addEventListener("click", (e) => {
+            e.preventDefault();
+            const operationId = btn.getAttribute("data-operation-id");
+            const operation = this.operationsMenu.operations.find(op => op.id === operationId);
+            if (operation) {
+              this.copyOperationPrompt(operation);
+            }
+          });
+        });
+      }
+
+      /**
+       * Copy operation prompt to clipboard
+       */
+      copyOperationPrompt(operation) {
+        const prompt = `${operation.title}\n\n${operation.prompt}`;
+        this.copyToClipboard(prompt);
+
+        parent.postMessage({
+          pluginMessage: {
+            type: "notify",
+            message: `✓ ${operation.title} prompt copied to clipboard!`,
+          },
+        }, "*");
+      }
+
+      /**
+       * Toggle between dark and light mode
+       */
+      toggleMode() {
+        const isDark = document.body.classList.toggle("dark");
+
+        if (isDark) {
+          this.ui.modeSun.classList.remove("hidden");
+          this.ui.modeMoon.classList.add("hidden");
+        } else {
+          this.ui.modeSun.classList.add("hidden");
+          this.ui.modeMoon.classList.remove("hidden");
+        }
+      }
+
+      /**
+       * Notify Figma about clipboard success
+       */
+      notifyCopied(text) {
+        parent.postMessage({
+          pluginMessage: {
+            type: "notify",
+            message: `Channel ID copied: ${text}`,
+          },
+        }, "*");
+      }
+
+      /**
+       * Utils
+       */
+      generateId() {
+        return Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
+      }
+
+      generateChannelName() {
+        const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
+        let res = "";
+        for (let i = 0; i < 8; i++) res += chars.charAt(Math.floor(Math.random() * chars.length));
+        return res;
+      }
+    }
+
+    // Initialize the plugin
+    const plugin = new ClaudeMCPPlugin();
+  </script>
+</body>
+
 </html>
