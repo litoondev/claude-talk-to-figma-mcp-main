@@ -2636,6 +2636,22 @@ function isAbsolutePositionedLayer(node) {
   }
 }
 
+/**
+ * A marquee or carousel track: far wider than the parent that clips it, and
+ * either pulled left of it or built from a uniform repeat. The overflow is the
+ * design — sizing keeps the track fixed and QA does not report it as overflow.
+ */
+function isOverWideByDesign(node) {
+  const parent = node && node.parent;
+  if (!parent || !isContainer(node) || parent.clipsContent !== true) return false;
+  if (!(node.width >= parent.width * 1.5)) return false;
+  if (node.x < -0.5) return true;
+  const items = node.children.filter((c) => c.visible !== false);
+  if (items.length < 3) return false;
+  const w = items[0].width;
+  return w > 0 && items.every((c) => c.type === items[0].type && Math.abs(c.width - w) <= w * 0.02);
+}
+
 function collectAbsolutePositionedLayers(root, includeRoot) {
   const found = [];
   const walk = (node, depth) => {
@@ -2932,7 +2948,7 @@ function analyzeSection(node, index, total) {
  */
 function responsiveBaseName(value) {
   let name = (value || "Frame").trim();
-  const breakpointSuffix = /\s*(?:[-\u2013\u2014/]\s*)?(?:(?:\d+\s*(?:px)?\s*)?(?:desktop|desk|tablet|tab|mobile|mobi|mob)|(?:desktop|desk|tablet|tab|mobile|mobi|mob)(?:\s*[-\u2013\u2014/]?\s*\d+\s*(?:px)?)?)\s*$/i;
+  const breakpointSuffix = /\s*(?:[-\u2013\u2014/]\s*)?(?:\d{3,4}\s*px|(?:\d+\s*(?:px)?\s*)?(?:desktop|desk|tablet|tab|mobile|mobi|mob)|(?:desktop|desk|tablet|tab|mobile|mobi|mob)(?:\s*[-\u2013\u2014/]?\s*\d+\s*(?:px)?)?)\s*$/i;
   let previous = "";
   while (name && name !== previous) {
     previous = name;
@@ -3005,7 +3021,7 @@ function findExistingResponsiveFrames(sourceNode, parentOverride) {
     const normalizedSibling = responsiveBaseName(name);
     const sharesBase = normalizedSibling.toLowerCase() === baseName;
     const isGenericSlot = normalizedSibling === "Frame";
-    const namesBreakpoint = /\b(desktop|desk|tablet|tab|mobile|mobi|mob)\b|\b(1440|768|390|320)\b/i.test(name);
+    const namesBreakpoint = /\b(desktop|desk|tablet|tab|mobile|mobi|mob)\b|\b(1440|768|390|320)(?:px)?\b/i.test(name);
     if ((!sharesBase && !isGenericSlot) || !namesBreakpoint) continue;
 
     found.push({
@@ -3775,6 +3791,13 @@ function enforceResponsiveSizing(root, report) {
   const walk = (n, depth) => {
     if (!n || depth > 14 || n.removed) return;
     if (isAbsolutePositionedLayer(n)) return;
+    if (n !== root && isOverWideByDesign(n)) {
+      report.warnings.push(
+        `${n.name}: over-wide track kept at its width (intentional overflow). Scale its items ` +
+          "proportionally by hand if needed — never shrink the track to fit."
+      );
+      return;
+    }
 
     const parentIsAutoLayout = n.parent && isAutoLayout(n.parent);
 
@@ -4582,10 +4605,23 @@ function validateResponsive(node, width, label) {
   const frameBox = node.absoluteBoundingBox;
 
   let inspected = 0;
-  const walk = (n, depth) => {
+  const walk = (n, depth, insideTrack) => {
     if (!n || depth > 12 || inspected > 3000 || n.removed) return;
     if (n.visible === false || isInstrumentation(n)) return;
     inspected++;
+
+    if (!insideTrack && n !== node && isOverWideByDesign(n)) {
+      insideTrack = true;
+      issues.push({
+        severity: "info",
+        type: "intentional-overflow",
+        node: n.name,
+        nodeId: n.id,
+        message:
+          `${Math.round(n.width)}px track in a ${Math.round(n.parent.width)}px clipped parent — ` +
+          "intentional overflow, verified; excluded from overflow QA",
+      });
+    }
 
     if (isAbsolutePositionedLayer(n)) {
       issues.push({
@@ -4602,7 +4638,7 @@ function validateResponsive(node, width, label) {
 
     const box = n.absoluteBoundingBox;
 
-    if (box && frameBox) {
+    if (box && frameBox && !insideTrack) {
       const relLeft = box.x - frameBox.x;
       const relRight = relLeft + box.width;
 
@@ -4628,7 +4664,7 @@ function validateResponsive(node, width, label) {
     }
 
     // Fixed widths wider than the viewport can never fit.
-    if (typeof n.width === "number" && n.width > viewport && n.parent && isAutoLayout(n.parent)) {
+    if (!insideTrack && typeof n.width === "number" && n.width > viewport && n.parent && isAutoLayout(n.parent)) {
       if (readHorizontalSizing(n) === "FIXED") {
         issues.push({
           severity: "error",
@@ -4794,10 +4830,10 @@ function validateResponsive(node, width, label) {
       }
     }
 
-    if (isContainer(n)) for (const c of n.children) walk(c, depth + 1);
+    if (isContainer(n)) for (const c of n.children) walk(c, depth + 1, insideTrack);
   };
 
-  walk(node, 0);
+  walk(node, 0, false);
 
   // Deduplicate: one message per node per issue type.
   const seen = {};
@@ -4810,6 +4846,7 @@ function validateResponsive(node, width, label) {
   }
 
   const errors = unique.filter((i) => i.severity === "error");
+  const infoCount = unique.filter((i) => i.severity === "info").length;
   return {
     label: label || `${viewport}px`,
     viewport,
@@ -4818,7 +4855,7 @@ function validateResponsive(node, width, label) {
     inspected,
     passed: errors.length === 0,
     errorCount: errors.length,
-    warningCount: unique.length - errors.length,
+    warningCount: unique.length - errors.length - infoCount,
     issues: unique.slice(0, 120),
     truncated: unique.length > 120 ? unique.length - 120 : 0,
   };
@@ -7553,6 +7590,156 @@ async function cleanLayersCommand(params) {
   };
 }
 
+// ─── Page structure contract ───────────────────────────────────────────────
+
+/** Mobile page frames copied from a shared template keep this stale height. */
+const STALE_TEMPLATE_PAGE_HEIGHT = 17826;
+const SECTION_SUFFIX_BREAKPOINT = { desk: "desktop", tab: "tablet", mobi: "mobile" };
+
+function round2(n) {
+  return Math.round(n * 100) / 100;
+}
+
+/** A breakpoint is identified by frame width, never by name or suffix. */
+function breakpointKeyForWidth(width) {
+  for (const key of Object.keys(RESPONSIVE_PRESETS)) {
+    if (Math.abs(RESPONSIVE_PRESETS[key].width - width) <= 2) return key;
+  }
+  return null;
+}
+
+/** Sections sit directly in the page frame or in its single Container wrapper. */
+function pageSections(page) {
+  const own = page.children.filter((c) => !isInstrumentation(c));
+  const shown = own.filter((c) => c.visible !== false);
+  const host = shown.length === 1 && isContainer(shown[0]) && shown[0].children.length > 1 ? shown[0] : page;
+  return { host, sections: host === page ? own : host.children.filter((c) => !isInstrumentation(c)) };
+}
+
+/** Visible and hidden count per section name, breakpoint suffixes stripped. */
+function sectionStates(sections) {
+  const states = new Map();
+  for (const s of sections) {
+    const key = responsiveBaseName(s.name).toLowerCase();
+    const state = states.get(key) || { name: responsiveBaseName(s.name), visible: 0, hidden: 0 };
+    state[s.visible === false ? "hidden" : "visible"]++;
+    states.set(key, state);
+  }
+  return states;
+}
+
+/** Three states per section — visible, hidden, absent — compared both ways. */
+function compareSectionParity(sections, peerSections) {
+  const here = sectionStates(sections);
+  const there = sectionStates(peerSections);
+  const out = { onlyHere: [], onlyThere: [], hiddenHereAbsentThere: [], hiddenThereAbsentHere: [], orderDiffers: false };
+  for (const [key, a] of here) {
+    const b = there.get(key) || { visible: 0, hidden: 0 };
+    for (let i = b.visible; i < a.visible; i++) out.onlyHere.push(a.name);
+    if (a.hidden && !there.has(key)) out.hiddenHereAbsentThere.push(a.name);
+  }
+  for (const [key, b] of there) {
+    const a = here.get(key) || { visible: 0, hidden: 0 };
+    for (let i = a.visible; i < b.visible; i++) out.onlyThere.push(b.name);
+    if (b.hidden && !here.has(key)) out.hiddenThereAbsentHere.push(b.name);
+  }
+  if (!out.onlyHere.length && !out.onlyThere.length) {
+    const order = (list) =>
+      list.filter((s) => s.visible !== false).map((s) => responsiveBaseName(s.name).toLowerCase()).join("|");
+    out.orderDiffers = order(sections) !== order(peerSections);
+  }
+  return out;
+}
+
+/**
+ * Health checks for a breakpoint page frame, run on VISIBLE sections only —
+ * hidden sections keep stale coordinates and would read as overlaps. Report
+ * only: nothing is resized, reordered, hidden, unhidden or deleted.
+ */
+function auditPageStructure(page) {
+  const breakpoint = breakpointKeyForWidth(page.width);
+  if (!breakpoint || !isContainer(page)) return null;
+
+  const { host, sections } = pageSections(page);
+  const visible = sections.filter((s) => s.visible !== false);
+  const flow = visible.filter((s) => !isAbsolutePositionedLayer(s));
+  const issues = [];
+
+  // The Container (or the stacked sections) must be exactly as tall as the page.
+  const contentHeight = host !== page
+    ? host.height
+    : flow.reduce((max, s) => Math.max(max, s.y + s.height), 0);
+  const delta = page.height - contentHeight;
+  if (flow.length && Math.abs(delta) > 0.01) {
+    issues.push(
+      Math.round(page.height) === STALE_TEMPLATE_PAGE_HEIGHT && delta > 0
+        ? `Page frame fixed at ${STALE_TEMPLATE_PAGE_HEIGHT}px (known template default); content is ` +
+            `${round2(contentHeight)}px. The page frame should hug contents. Trailing empty space: ${round2(delta)}px.`
+        : `Page frame is ${round2(page.height)}px but its content is ${round2(contentHeight)}px (delta ${round2(delta)}px).`
+    );
+  }
+
+  // Sequential stacking — only for a vertical flow of full-width sections.
+  const vertical = !isAutoLayout(host) || host.layoutMode === "VERTICAL";
+  if (vertical && flow.every((s) => s.width >= host.width * 0.8)) {
+    const gap = isAutoLayout(host) ? host.itemSpacing || 0 : 0;
+    for (let i = 1; i < flow.length; i++) {
+      const prev = flow[i - 1];
+      const drift = flow[i].y - (prev.y + prev.height + gap);
+      if (Math.abs(drift) > 0.01) {
+        issues.push(
+          drift < 0
+            ? `"${flow[i].name}" overlaps "${prev.name}" by ${round2(-drift)}px.`
+            : `${round2(drift)}px unexpected gap between "${prev.name}" and "${flow[i].name}".`
+        );
+      }
+    }
+  }
+
+  // Suffixes are hints; the frame width is the fact.
+  const suffixMismatches = visible
+    .filter((s) => {
+      const m = /\/\s*(desk|tab|mobi)\s*$/i.exec(s.name || "");
+      return m && SECTION_SUFFIX_BREAKPOINT[m[1].toLowerCase()] !== breakpoint;
+    })
+    .map((s) => s.name);
+
+  // Reported, never rounded: rounding shifts every absolute child inside.
+  const subPixel = [page, ...visible]
+    .filter((n) => Math.abs(n.width - Math.round(n.width)) > 0.01)
+    .map((n) => `${n.name} ${n.width}px`);
+
+  // Section parity with the other breakpoint frames of the same page.
+  const parity = [];
+  const base = responsiveBaseName(page.name).toLowerCase();
+  for (const peer of (page.parent && page.parent.children) || []) {
+    if (peer === page || peer.removed || !isContainer(peer)) continue;
+    const peerKey = breakpointKeyForWidth(peer.width);
+    if (!peerKey || peerKey === breakpoint || responsiveBaseName(peer.name).toLowerCase() !== base) continue;
+    parity.push(
+      Object.assign(
+        { id: peer.id, name: peer.name, breakpoint: peerKey },
+        compareSectionParity(sections, pageSections(peer).sections)
+      )
+    );
+  }
+
+  return {
+    breakpoint,
+    width: round2(page.width),
+    height: round2(page.height),
+    container: host === page ? null : host.name,
+    visibleCount: visible.length,
+    hidden: sections.filter((s) => s.visible === false).map((s) => s.name),
+    components: visible.filter((s) => s.type === "COMPONENT").map((s) => s.name),
+    instances: visible.filter((s) => s.type === "INSTANCE").map((s) => s.name),
+    suffixMismatches,
+    subPixel,
+    issues,
+    parity,
+  };
+}
+
 async function analyzeResponsive(params) {
   const node = await resolveResponsiveTarget(params);
   const preservation = (params && params.preservation) || "strict";
@@ -7605,6 +7792,7 @@ async function analyzeResponsive(params) {
     plans,
     planWidths,
     existingResponsiveFrames: findExistingResponsiveFrames(node),
+    structure: auditPageStructure(node),
     sourceIssues: selfCheck,
     layerHygiene: (function () {
       const generic = [];
@@ -14798,6 +14986,42 @@ async function createPaintStyle(params) {
 }
 
 /**
+ * Two naming generations of layout tokens carry identical values and modes;
+ * only the paths differ. `Layout/` is used whenever the file has any; the
+ * legacy `Pages/` names are used only when it has none. Legacy leaf names keep
+ * their typos (`Top-Buttom`) because those are the real variable names.
+ */
+const LEGACY_LAYOUT_ROLES = {
+  "container-padding": "Left-Right",
+  "section-gap": "Top-Buttom",
+  "row-gap": "Row gap",
+  "column-gap": "Column gap",
+};
+const LEGACY_LAYOUT_GROUPS = {
+  Default: "Home/basic",
+  Compact: "Home/Custom",
+  Inner: "Inner",
+  "Full Width": "Full Width",
+  "All Locations": "All Locations",
+};
+
+function layoutTokenGeneration(variables) {
+  let legacy = false;
+  for (const v of variables || []) {
+    const path = (v.name || "").toLowerCase();
+    if (path.indexOf("layout/") === 0) return "Layout";
+    if (path.indexOf("pages/") === 0) legacy = true;
+  }
+  return legacy ? "Pages" : null;
+}
+
+function layoutTokenCandidates(generation, group, role) {
+  if (generation !== "Pages") return [`Layout/${group}/${role}`, `Layout/Default/${role}`];
+  const leaf = LEGACY_LAYOUT_ROLES[role];
+  return [`Pages/${LEGACY_LAYOUT_GROUPS[group]}/${leaf}`, `Pages/Home/basic/${leaf}`];
+}
+
+/**
  * Bind Figma local variables (Layout, Gap, Radius, Responsive Text Container)
  * to all FRAME/COMPONENT/INSTANCE nodes in a subtree.
  *
@@ -14824,9 +15048,10 @@ async function bindVariablesToSubtree(root) {
   const textContainerVars = {};
   const seen = Object.create(null);
 
+  const generation = layoutTokenGeneration(tokenIndex.all);
   for (const v of tokenIndex.all) {
     const path = (v.name || "").toLowerCase();
-    const bucket = path.indexOf("layout/") === 0 ? layoutVars
+    const bucket = path.indexOf("layout/") === 0 || path.indexOf("pages/") === 0 ? layoutVars
       : path.indexOf("gap/") === 0 ? gapVars
       : path.indexOf("radius/") === 0 ? radiusVars
       : path.indexOf("responsive text container/") === 0 ? textContainerVars
@@ -14840,6 +15065,7 @@ async function bindVariablesToSubtree(root) {
       result.collections.push({ id: col.id, name: col.name, modes: col.modes });
     }
   }
+  result.tokenGeneration = generation;
 
   const hasVars = Object.keys(layoutVars).length > 0 ||
                   Object.keys(textContainerVars).length > 0 ||
@@ -14919,41 +15145,19 @@ async function bindVariablesToSubtree(root) {
         } catch (e) { return false; }
       };
 
-      // Padding
-      const paddingCandidates = [
-        `Layout/${group}/container-padding`,
-        "Layout/Default/container-padding",
-      ];
-      const paddingVar = resolveToken(layoutVars, paddingCandidates, "paddingLeft");
-      if (paddingVar) {
-        const hasUnboundPadding = !bound.paddingLeft || !bound.paddingRight ||
-                                   !bound.paddingTop || !bound.paddingBottom;
-        if (hasUnboundPadding) {
-          bind("paddingLeft", paddingVar);
-          bind("paddingRight", paddingVar);
-          bind("paddingTop", paddingVar);
-          bind("paddingBottom", paddingVar);
-        }
-      }
+      // Padding: horizontal is container-padding, vertical is section-gap.
+      // bind() skips occupied fields, so partially bound padding is completed.
+      const candidates = (role) => layoutTokenCandidates(generation, group, role);
+      const horizontalPaddingVar = resolveToken(layoutVars, candidates("container-padding"), "paddingLeft");
+      const verticalPaddingVar = resolveToken(layoutVars, candidates("section-gap"), "paddingTop");
+      bind("paddingLeft", horizontalPaddingVar);
+      bind("paddingRight", horizontalPaddingVar);
+      bind("paddingTop", verticalPaddingVar);
+      bind("paddingBottom", verticalPaddingVar);
 
-      // Section gap
-      const sectionGapCandidates = [
-        `Layout/${group}/section-gap`,
-        "Layout/Default/section-gap",
-      ];
-      const sectionGapVar = resolveToken(layoutVars, sectionGapCandidates, "itemSpacing");
-
-      // Row gap & column gap
-      const rowGapCandidates = [
-        `Layout/${group}/row-gap`,
-        "Layout/Default/row-gap",
-      ];
-      const colGapCandidates = [
-        `Layout/${group}/column-gap`,
-        "Layout/Default/column-gap",
-      ];
-      const rowGapVar = resolveToken(layoutVars, rowGapCandidates, "itemSpacing");
-      const colGapVar = resolveToken(layoutVars, colGapCandidates, "itemSpacing");
+      const sectionGapVar = resolveToken(layoutVars, candidates("section-gap"), "itemSpacing");
+      const rowGapVar = resolveToken(layoutVars, candidates("row-gap"), "itemSpacing");
+      const colGapVar = resolveToken(layoutVars, candidates("column-gap"), "itemSpacing");
 
       if (isAL && !bound.itemSpacing) {
         const vertical = frame.layoutMode === "VERTICAL";

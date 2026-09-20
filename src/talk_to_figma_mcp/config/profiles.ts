@@ -1,17 +1,17 @@
 /**
  * Tool profiles.
  *
- * The full tool set is 121 tools ≈ 30k tokens of JSON schema, and that schema is
+ * The full tool set is 133 tools ≈ 33k tokens of JSON schema, and that schema is
  * re-sent on *every* model request for the whole session. Most sessions use a
  * fraction of it. A profile trims the advertised set to what the work actually
  * needs, which cuts per-request cost and leaves more of the context window for
  * the design itself.
  *
  * Select with the FIGMA_MCP_PROFILE environment variable:
- *   core     — ~54 tools (~14k tokens). Layout, text, colour, variables, responsive.
- *   standard — ~93 tools (~22k tokens). Everything except FigJam, REST comments
+ *   core     — ~64 tools (~18k tokens). Layout, text, colour, variables, responsive.
+ *   standard — ~105 tools (~25k tokens). Everything except FigJam, REST comments
  *              and activity tracking. **Default.**
- *   full     — all 121 tools (~30k tokens). The previous behaviour.
+ *   full     — all 133 tools (~33k tokens). The previous behaviour.
  *
  * A profile only changes what is advertised, never what the plugin can do:
  * anything omitted is still reachable through `figma_batch`.

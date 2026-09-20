@@ -176,7 +176,7 @@ export function registerConnectionTools(server: McpServer): void {
       };
 
       return {
-        content: [{ type: "text", text: JSON.stringify(report, null, 2) }],
+        content: [{ type: "text", text: JSON.stringify(report) }],
       };
     }
   );

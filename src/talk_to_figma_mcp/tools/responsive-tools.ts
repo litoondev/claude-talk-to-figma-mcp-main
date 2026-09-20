@@ -203,6 +203,30 @@ interface ValidationResult {
   truncated: number;
 }
 
+interface PageStructure {
+  breakpoint: string;
+  width: number;
+  height: number;
+  container: string | null;
+  visibleCount: number;
+  hidden: string[];
+  components: string[];
+  instances: string[];
+  suffixMismatches: string[];
+  subPixel: string[];
+  issues: string[];
+  parity: Array<{
+    id: string;
+    name: string;
+    breakpoint: string;
+    onlyHere: string[];
+    onlyThere: string[];
+    hiddenHereAbsentThere: string[];
+    hiddenThereAbsentHere: string[];
+    orderDiffers: boolean;
+  }>;
+}
+
 interface FrameReport {
   breakpoint: string;
   width: number;
@@ -268,7 +292,8 @@ function renderValidation(v: ValidationResult, indent = "  "): string[] {
   lines.push(`${indent}${v.label}: ${verdict}`);
 
   const errors = v.issues.filter((i) => i.severity === "error");
-  const warnings = v.issues.filter((i) => i.severity !== "error");
+  const warnings = v.issues.filter((i) => i.severity === "warning");
+  const tracks = v.issues.filter((i) => i.severity === "info");
 
   for (const issue of errors.slice(0, 15)) {
     lines.push(`${indent}  ✕ ${issue.node} — ${issue.message}`);
@@ -276,8 +301,49 @@ function renderValidation(v: ValidationResult, indent = "  "): string[] {
   for (const issue of warnings.slice(0, 10)) {
     lines.push(`${indent}  ! ${issue.node} — ${issue.message}`);
   }
+  for (const issue of tracks.slice(0, 5)) {
+    lines.push(`${indent}  ✓ ${issue.node} — ${issue.message}`);
+  }
   if (v.truncated > 0) {
     lines.push(`${indent}  … ${v.truncated} further issues not listed`);
+  }
+  return lines;
+}
+
+const list = (names: string[], max = 8): string =>
+  names.slice(0, max).join(", ") + (names.length > max ? `, … ${names.length - max} more` : "");
+
+/** Page contract: visible sections only; everything here is report-only. */
+function renderPageStructure(p: PageStructure): string[] {
+  const lines = [
+    "\n── PAGE STRUCTURE (visible sections only) ─────────────",
+    `  ${p.breakpoint} by width (${p.width}×${p.height})${p.container ? ` · container "${p.container}"` : ""} · ${p.visibleCount} visible sections`,
+  ];
+  if (p.issues.length) for (const issue of p.issues.slice(0, 12)) lines.push(`  ✕ ${issue}`);
+  else lines.push("  ✓ Content height matches the page and sections stack with no overlap.");
+  if (p.hidden.length) {
+    lines.push(`  Hidden sections (excluded from layout checks — never delete or unhide): ${list(p.hidden)}`);
+  }
+  if (p.components.length) lines.push(`  Main components — work on a duplicate first: ${list(p.components)}`);
+  if (p.instances.length) lines.push(`  Instances — edit the main component or overrides only: ${list(p.instances)}`);
+  if (p.suffixMismatches.length) {
+    lines.push(`  ⚠ Suffix contradicts the ${p.width}px frame (reused variant or misnamed — do not act on it): ${list(p.suffixMismatches)}`);
+  }
+  if (p.subPixel.length) lines.push(`  ⚠ Sub-pixel widths (report, do not round): ${list(p.subPixel, 4)}`);
+  for (const peer of p.parity) {
+    const drift: string[] = [];
+    if (peer.onlyHere.length) drift.push(`visible here, not in ${peer.breakpoint}: ${list(peer.onlyHere)}`);
+    if (peer.onlyThere.length) drift.push(`visible in ${peer.breakpoint}, not here: ${list(peer.onlyThere)}`);
+    if (peer.hiddenHereAbsentThere.length) drift.push(`hidden here, absent in ${peer.breakpoint}: ${list(peer.hiddenHereAbsentThere)}`);
+    if (peer.hiddenThereAbsentHere.length) drift.push(`hidden in ${peer.breakpoint}, absent here: ${list(peer.hiddenThereAbsentHere)}`);
+    if (peer.orderDiffers) drift.push("same sections in a different order");
+    if (!drift.length) {
+      lines.push(`  ✓ Section parity with "${peer.name}" (${peer.breakpoint})`);
+      continue;
+    }
+    lines.push(`  ⚠ Section parity with "${peer.name}" (${peer.breakpoint}):`);
+    for (const d of drift) lines.push(`      ${d}`);
+    lines.push("      Intentional omission, or missing work? Confirm before proceeding — never add or delete to match.");
   }
   return lines;
 }
@@ -316,7 +382,11 @@ export function registerResponsiveTools(server: McpServer): void {
       "existing tablet/mobile frames so they can be updated " +
       "rather than duplicated, and returns planned responsive behaviour per section for the " +
       "768/320 defaults or an exact targetWidth. Run this before make_responsive to review the plan, or on its own to " +
-      "audit an existing design for responsive problems.",
+      "audit an existing design for responsive problems. On a 1440/768/320 page frame it also checks the " +
+      "page contract on VISIBLE sections only: content height equals page height (flags the stale 17826px " +
+      "template height), sections stack with no overlap, section parity with sibling breakpoint frames " +
+      "(visible/hidden/absent), breakpoint suffixes that contradict the frame width, main components that need " +
+      "a duplicate first, and sub-pixel widths. Hidden sections are listed, never deleted or unhidden.",
     {
       nodeId: z
         .string()
@@ -355,6 +425,7 @@ export function registerResponsiveTools(server: McpServer): void {
           plans: Record<string, PlanEntry[]>;
           planWidths?: Record<string, number>;
           existingResponsiveFrames: Array<{ id: string; name: string; width: number }>;
+          structure: PageStructure | null;
           sourceIssues: ValidationResult;
           readiness: {
             usesAutoLayout: boolean;
@@ -388,6 +459,8 @@ export function registerResponsiveTools(server: McpServer): void {
             `  Absolutely positioned content: ${r.readiness.sectionsWithAbsoluteChildren.join(", ")}`
           );
         }
+
+        if (r.structure) lines.push(...renderPageStructure(r.structure));
 
         // Existing frames — reuse before creating.
         lines.push("\n── EXISTING RESPONSIVE FRAMES ─────────────────────────");
@@ -1199,7 +1272,8 @@ export function registerResponsiveTools(server: McpServer): void {
     "Run responsive QA on a frame at one or more viewport widths without modifying anything. " +
       "Reports horizontal overflow, off-canvas content, fixed widths wider than the viewport, " +
       "overlapping siblings, text below the readability floor, fixed-size text boxes that may " +
-      "clip, and tap targets under 44px. " +
+      "clip, and tap targets under 44px. Marquee/carousel tracks (1.5×+ wider than a clipping parent, " +
+      "offset left or a uniform repeat) are intentional overflow: listed as verified, not as errors. " +
       "Defaults to checking BOTH 390px and 320px, because a layout that works at 390 and breaks " +
       "at 320 is not fully responsive.",
     {

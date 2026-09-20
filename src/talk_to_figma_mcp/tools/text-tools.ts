@@ -513,7 +513,7 @@ export function registerTextTools(server: McpServer): void {
           content: [
             {
               type: "text",
-              text: JSON.stringify(result, null, 2)
+              text: JSON.stringify(result)
             }
           ]
         };
