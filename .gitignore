@@ -40,3 +40,5 @@ dxt-*/
 
 # Claude Code local settings
 .claude/
+!.claude/
+!.claude/settings.json
