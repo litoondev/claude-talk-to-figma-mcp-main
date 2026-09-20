@@ -93,7 +93,7 @@ describe("rename_variables MCP tool", () => {
       find: "Pages/",
       replace: "Layout/Section/",
     });
-    expect(res.content[0].text).toContain('"renamedCount": 26');
+    expect(res.content[0].text).toContain('"renamedCount":26');
   });
 
   it("forwards list-based bulk rename", async () => {
@@ -117,7 +117,7 @@ describe("rename_variables MCP tool", () => {
         { name: "Pages/B", newName: "Layout/B" },
       ],
     });
-    expect(res.content[0].text).toContain('"renamedCount": 2');
+    expect(res.content[0].text).toContain('"renamedCount":2');
   });
 });
 
@@ -158,7 +158,7 @@ describe("execute_code MCP tool", () => {
     expect(mockSendCommand).toHaveBeenCalledWith("execute_code", {
       code: "return 42;",
     });
-    expect(res.content[0].text).toContain('"result": 42');
+    expect(res.content[0].text).toContain('"result":42');
   });
 });
 
@@ -177,7 +177,7 @@ describe("set_file_key & get_file_key MCP tools", () => {
     expect(mockSendCommand).toHaveBeenCalledWith("set_file_key", {
       url: "https://www.figma.com/design/AbCdEf12345/My-File",
     });
-    expect(res.content[0].text).toContain('"fileKey": "AbCdEf12345"');
+    expect(res.content[0].text).toContain('"fileKey":"AbCdEf12345"');
   });
 
   it("calls get_file_key", async () => {
@@ -190,6 +190,6 @@ describe("set_file_key & get_file_key MCP tools", () => {
     const res = await call("get_file_key");
 
     expect(mockSendCommand).toHaveBeenCalledWith("get_file_key");
-    expect(res.content[0].text).toContain('"available": true');
+    expect(res.content[0].text).toContain('"available":true');
   });
 });

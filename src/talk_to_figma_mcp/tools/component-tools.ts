@@ -248,7 +248,7 @@ export function registerComponentTools(server: McpServer): void {
           content: [
             {
               type: "text",
-              text: JSON.stringify(typedResult, null, 2),
+              text: JSON.stringify(typedResult),
             },
           ],
         };
@@ -284,7 +284,7 @@ export function registerComponentTools(server: McpServer): void {
           content: [
             {
               type: "text",
-              text: JSON.stringify(typedResult, null, 2),
+              text: JSON.stringify(typedResult),
             },
           ],
         };

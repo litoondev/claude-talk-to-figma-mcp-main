@@ -15,6 +15,7 @@ import { SERVER_CONFIG } from "./config/config";
 // Import utilities
 import { logger } from "./utils/logger";
 import { connectToFigma } from "./utils/websocket";
+import { slimJsonSchema } from "./utils/schema-helpers";
 
 // Import tools registration function from tools/index.ts
 import { registerTools } from "./tools";
@@ -62,6 +63,17 @@ async function main() {
 
     // Start the MCP server with stdio transport
     const transport = new StdioServerTransport();
+    // Tool schemas are re-sent with every model request; slim them on the way out.
+    const send = transport.send.bind(transport);
+    transport.send = (message: any, ...rest: any[]) => {
+      const tools = message?.result?.tools;
+      if (Array.isArray(tools)) {
+        for (const tool of tools) {
+          if (tool.inputSchema) tool.inputSchema = slimJsonSchema(tool.inputSchema);
+        }
+      }
+      return (send as any)(message, ...rest);
+    };
     await server.connect(transport);
     logger.info('FigmaMCP server running on stdio');
   } catch (error) {

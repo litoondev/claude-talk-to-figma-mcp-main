@@ -927,7 +927,7 @@ export function registerModificationTools(server: McpServer): void {
           content: [
             {
               type: "text",
-              text: JSON.stringify({ name: typedResult.name, grids: typedResult.grids }, null, 2),
+              text: JSON.stringify({ name: typedResult.name, grids: typedResult.grids }),
             },
           ],
         };
@@ -997,7 +997,7 @@ export function registerModificationTools(server: McpServer): void {
           content: [
             {
               type: "text",
-              text: JSON.stringify({ name: typedResult.name, guides: typedResult.guides }, null, 2),
+              text: JSON.stringify({ name: typedResult.name, guides: typedResult.guides }),
             },
           ],
         };
@@ -1062,7 +1062,7 @@ export function registerModificationTools(server: McpServer): void {
           content: [
             {
               type: "text",
-              text: JSON.stringify({ name: typedResult.name, annotations: typedResult.annotations }, null, 2),
+              text: JSON.stringify({ name: typedResult.name, annotations: typedResult.annotations }),
             },
           ],
         };

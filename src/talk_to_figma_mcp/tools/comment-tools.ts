@@ -396,7 +396,7 @@ export function registerCommentTools(server: McpServer): void {
 
         const body =
           format === "json"
-            ? JSON.stringify(toThreadSummaries(threads), null, 2)
+            ? JSON.stringify(toThreadSummaries(threads))
             : formatThreadDigest(threads);
 
         return ok(`${header}\n\n${body}`);
@@ -517,7 +517,7 @@ export function registerCommentTools(server: McpServer): void {
 
         const body =
           format === "json"
-            ? JSON.stringify(toThreadSummaries(threads), null, 2)
+            ? JSON.stringify(toThreadSummaries(threads))
             : formatThreadDigest(threads);
 
         return ok(`${header}${scopeNotes}${renderFailures(failures)}\n\n${body}`);

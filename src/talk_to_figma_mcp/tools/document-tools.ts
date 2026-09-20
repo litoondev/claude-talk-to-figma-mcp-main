@@ -232,7 +232,7 @@ export function registerDocumentTools(server: McpServer): void {
           content: [
             {
               type: "text",
-              text: JSON.stringify(result, null, 2)
+              text: JSON.stringify(result)
             }
           ]
         };
@@ -298,7 +298,7 @@ export function registerDocumentTools(server: McpServer): void {
               },
               {
                 type: "text" as const,
-                text: JSON.stringify(typedResult.textNodes, null, 2)
+                text: JSON.stringify(typedResult.textNodes)
               }
             ],
           };
@@ -310,7 +310,7 @@ export function registerDocumentTools(server: McpServer): void {
             initialStatus,
             {
               type: "text",
-              text: JSON.stringify(result, null, 2),
+              text: JSON.stringify(result),
             },
           ],
         };
@@ -633,7 +633,7 @@ export function registerDocumentTools(server: McpServer): void {
           content: [
             {
               type: "text",
-              text: JSON.stringify(result, null, 2),
+              text: JSON.stringify(result),
             },
           ],
         };
@@ -666,7 +666,7 @@ export function registerDocumentTools(server: McpServer): void {
           content: [
             {
               type: "text",
-              text: JSON.stringify(result, null, 2),
+              text: JSON.stringify(result),
             },
           ],
         };
@@ -703,7 +703,7 @@ export function registerDocumentTools(server: McpServer): void {
           content: [
             {
               type: "text",
-              text: JSON.stringify(result, null, 2),
+              text: JSON.stringify(result),
             },
           ],
         };

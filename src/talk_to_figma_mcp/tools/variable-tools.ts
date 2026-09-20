@@ -40,7 +40,7 @@ export function registerVariableTools(server: McpServer): void {
       try {
         const result = await sendCommandToFigma("get_variables", args);
         return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          content: [{ type: "text", text: JSON.stringify(result) }],
         };
       } catch (error) {
         return {
@@ -73,7 +73,7 @@ export function registerVariableTools(server: McpServer): void {
       try {
         const result = await sendCommandToFigma("find_variable", args);
         return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          content: [{ type: "text", text: JSON.stringify(result) }],
         };
       } catch (error) {
         return {
@@ -218,7 +218,7 @@ export function registerVariableTools(server: McpServer): void {
       try {
         const result = await sendCommandToFigma("rename_variables", args);
         return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          content: [{ type: "text", text: JSON.stringify(result) }],
         };
       } catch (error) {
         return {
@@ -311,7 +311,7 @@ export function registerVariableTools(server: McpServer): void {
       try {
         const result = await sendCommandToFigma("apply_variable_bindings", args);
         return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          content: [{ type: "text", text: JSON.stringify(result) }],
         };
       } catch (error) {
         return {
@@ -339,7 +339,7 @@ export function registerVariableTools(server: McpServer): void {
       try {
         const result = await sendCommandToFigma("get_node_variable_bindings", { nodeId });
         return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          content: [{ type: "text", text: JSON.stringify(result) }],
         };
       } catch (error) {
         return {
@@ -421,7 +421,7 @@ export function registerVariableTools(server: McpServer): void {
       try {
         const result = await sendCommandToFigma("import_library_variable", args);
         return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          content: [{ type: "text", text: JSON.stringify(result) }],
         };
       } catch (error) {
         return {
