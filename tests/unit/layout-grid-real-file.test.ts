@@ -261,3 +261,59 @@ describe("real file: Page Header / 04", () => {
   });
 });
 
+/**
+ * # Partner Logo (19979:138121, probed 2026-09-17): a section with a 1px top
+ * stroke included in layout and paddingTop 60 bound to a token. The heading row
+ * (two 1px line instances beside the title) sits inside two wrappers. Live, the
+ * first layer renders 61px down, so the measured padding was 61; writing it
+ * unbound the token and Figma added the stroke again — everything moved 1px.
+ */
+describe("real file: # Partner Logo", () => {
+  it("measures padding inside strokes the layout counts, and keeps the padding token", async () => {
+    ({ api, figma } = loadPlugin({
+      layoutEngine: true,
+      collections: [{ id: "c", name: "Spacing", modes: [{ modeId: "m", name: "Desk" }], variableIds: ["v:tb", "v:gap"] }],
+      variables: [
+        { id: "v:tb", name: "Top-Bottom", resolvedType: "FLOAT", scopes: ["GAP"], variableCollectionId: "c", valuesByMode: { m: 60 } },
+        { id: "v:gap", name: "Gap", resolvedType: "FLOAT", scopes: ["GAP"], variableCollectionId: "c", valuesByMode: { m: 60 } },
+      ],
+    }));
+    const line = () => makeNode({ name: "Content", type: "INSTANCE", layoutMode: "HORIZONTAL", itemSpacing: 10, paddingTop: 1, paddingRight: 100,
+      width: 320.5, height: 1, fills: [{ type: "SOLID" }], layoutSizingHorizontal: "FILL", layoutSizingVertical: "HUG" });
+    const lineA = line();
+    const lineB = line();
+    const title = text("Leading USA chambers, partnerships & legal", 575, 24, { layoutSizingHorizontal: "HUG", layoutSizingVertical: "HUG" });
+    const row = al("Container", "HORIZONTAL", { width: 1240, height: 24, itemSpacing: 12, primaryAxisAlignItems: "CENTER", counterAxisAlignItems: "CENTER",
+      layoutSizingHorizontal: "FILL", layoutSizingVertical: "HUG" }, [lineA, title, lineB]);
+    const padded = al("Container", "VERTICAL", { width: 1440, height: 24, ...pad(0, 100, 0, 100), counterAxisAlignItems: "CENTER",
+      layoutSizingHorizontal: "FILL", layoutSizingVertical: "HUG" }, [row]);
+    const marquee = makeNode({ name: "Marquee Fade", type: "INSTANCE", width: 1440, height: 50, clipsContent: true,
+      layoutSizingHorizontal: "FIXED", layoutSizingVertical: "FIXED" });
+    const column = al("Conteriner", "VERTICAL", { width: 1440, height: 114, itemSpacing: 40,
+      layoutSizingHorizontal: "FILL", layoutSizingVertical: "HUG" }, [padded, marquee]);
+    const section = al("Section", "VERTICAL", { width: 1440, height: 1, paddingLeft: 100, layoutSizingHorizontal: "FILL", layoutSizingVertical: "FIXED" }, []);
+    const alias = (id: string) => ({ type: "VARIABLE_ALIAS", id });
+    const root = onPage(al("# Partner Logo", "VERTICAL", { id: "pl", width: 1440, height: 236, itemSpacing: 60, ...pad(60, 0, 0, 0),
+      fills: [{ type: "SOLID" }], strokes: stroke, strokesIncludedInLayout: true,
+      strokeTopWeight: 1, strokeRightWeight: 0, strokeBottomWeight: 0, strokeLeftWeight: 0,
+      boundVariables: { paddingTop: alias("v:tb"), itemSpacing: alias("v:gap") },
+      layoutSizingHorizontal: "FIXED", layoutSizingVertical: "HUG" }, [column, section]));
+    const before = snapshot([root, lineA, title, lineB, marquee, section]);
+    expect(before[2].box.y).toBe(61); // the stroke counts: 1 + 60
+
+    const dry = await api.convertLayoutCommand({ nodeId: "pl", mode: "grid", dryRun: true });
+    expect(dry.proposals[0]).toMatchObject({ padding: [60, 0, 0, 0], flattened: ["Container"] });
+
+    const r = await api.convertLayoutCommand({ nodeId: "pl", mode: "grid", confirmedIds: ["pl"] });
+
+    expect(r.skipped).toEqual([]);
+    expect(root.paddingTop).toBe(60);
+    expect(root.boundVariables.paddingTop).toEqual(alias("v:tb"));
+    // The two "Container" wrappers held the same layers: one is kept as the row, the other removed.
+    const kept = [padded, row].filter((node) => !node.removed);
+    expect(kept).toHaveLength(1);
+    expect(kept[0].children).toEqual([lineA, title, lineB]);
+    expectUnmoved(before);
+  });
+});
+

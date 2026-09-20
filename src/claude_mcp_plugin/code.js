@@ -6380,6 +6380,33 @@ function pickOverlayLayers(leaves, frameBox) {
   return overlay;
 }
 
+/**
+ * How far a frame's layout starts inside its edges because of its strokes.
+ * Confirmed live: with "include strokes in layout" and a 1px inside top stroke,
+ * paddingTop 60 places the first layer 61px down. Without it, strokes take no space.
+ */
+function layoutStrokeInset(node) {
+  const none = { top: 0, right: 0, bottom: 0, left: 0 };
+  try {
+    if (!node.strokesIncludedInLayout) return none;
+    if (!Array.isArray(node.strokes) || !node.strokes.some((paint) => paint && paint.visible !== false)) return none;
+    const all = typeof node.strokeWeight === "number" ? node.strokeWeight : 0;
+    const side = (key) => (typeof node[key] === "number" ? node[key] : all);
+    return { top: side("strokeTopWeight"), right: side("strokeRightWeight"), bottom: side("strokeBottomWeight"), left: side("strokeLeftWeight") };
+  } catch (e) {
+    return none;
+  }
+}
+
+function insetBox(box, inset) {
+  return {
+    x: box.x + inset.left,
+    y: box.y + inset.top,
+    width: box.width - inset.left - inset.right,
+    height: box.height - inset.top - inset.bottom,
+  };
+}
+
 /** Padding that places a stack's children exactly where they sit inside the frame. */
 function stackPadding(stack, frameBox) {
   const main = stack.direction === "VERTICAL" ? "y" : "x";
@@ -6728,6 +6755,8 @@ function planLayoutConversion(container, mode, keepDirect) {
     );
   }
 
+  // Padding is measured from inside the strokes the frame's layout counts.
+  const contentBox = insetBox(frameBox, layoutStrokeInset(container));
   const plan = {
     container,
     mode,
@@ -6738,7 +6767,8 @@ function planLayoutConversion(container, mode, keepDirect) {
     absolute,
     dissolved: collected.dissolved,
     hidden: collected.hidden,
-    body: mode === "grid" ? planGridBody(flow, frameBox) : planStackBody(flow, frameBox),
+    contentBox,
+    body: mode === "grid" ? planGridBody(flow, contentBox) : planStackBody(flow, contentBox),
   };
   keepSpaceBetween(plan);
   orderOverlayLayers(plan);
@@ -6947,7 +6977,7 @@ function placeStackChildren(frame, stack, built) {
 function restoreFillWidth(frame, plan) {
   const body = plan.body;
   if (body.direction !== "VERTICAL") return;
-  const inner = plan.frameBox.width - body.padding.left - body.padding.right;
+  const inner = plan.contentBox.width - body.padding.left - body.padding.right;
   body.children.forEach((child, i) => {
     let sizing = null;
     if (child.kind === "leaf") sizing = child.leaf.sizing;

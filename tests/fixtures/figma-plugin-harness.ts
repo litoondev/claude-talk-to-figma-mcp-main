@@ -90,6 +90,12 @@ export function makeNode(spec: any = {}): any {
     primaryAxisAlignItems: spec.primaryAxisAlignItems ?? "MIN",
     counterAxisAlignItems: spec.counterAxisAlignItems ?? "MIN",
     clipsContent: spec.clipsContent ?? false,
+    strokesIncludedInLayout: spec.strokesIncludedInLayout ?? false,
+    strokeWeight: spec.strokeWeight ?? 1,
+    strokeTopWeight: spec.strokeTopWeight ?? spec.strokeWeight ?? 1,
+    strokeRightWeight: spec.strokeRightWeight ?? spec.strokeWeight ?? 1,
+    strokeBottomWeight: spec.strokeBottomWeight ?? spec.strokeWeight ?? 1,
+    strokeLeftWeight: spec.strokeLeftWeight ?? spec.strokeWeight ?? 1,
     // Figma: a number on every frame and shape, figma.mixed when the corners differ.
     cornerRadius: spec.cornerRadius ?? 0,
     gridRowGap: 0,
@@ -446,19 +452,35 @@ function intrinsicSize(node: any): { width: number; height: number } {
   return { width: node.width, height: node.height };
 }
 
+/**
+ * Padding as layout uses it. Confirmed live: with strokesIncludedInLayout and
+ * visible strokes, each side's stroke weight adds to that side's padding.
+ */
+function layoutPadding(frame: any) {
+  const strokes = frame.strokesIncludedInLayout && Array.isArray(frame.strokes) && frame.strokes.some((p: any) => p && p.visible !== false);
+  const w = (key: string) => (strokes ? frame[key] ?? 0 : 0);
+  return {
+    top: frame.paddingTop + w("strokeTopWeight"),
+    right: frame.paddingRight + w("strokeRightWeight"),
+    bottom: frame.paddingBottom + w("strokeBottomWeight"),
+    left: frame.paddingLeft + w("strokeLeftWeight"),
+  };
+}
+
 function measureLayout(frame: any, outer: { width: number; height: number } | null) {
   return frame.layoutMode === "GRID" ? measureGrid(frame, outer) : measureStack(frame, outer);
 }
 
 function measureStack(frame: any, outer: { width: number; height: number } | null) {
+  const P = layoutPadding(frame);
   const vertical = frame.layoutMode === "VERTICAL";
   const kids = frame.children.filter(inFlow);
   const sizes = kids.map(intrinsicSize);
   const mainOf = (s: any) => (vertical ? s.height : s.width);
   const crossOf = (s: any) => (vertical ? s.width : s.height);
   const [padMainStart, padMainEnd, padCrossStart, padCrossEnd] = vertical
-    ? [frame.paddingTop, frame.paddingBottom, frame.paddingLeft, frame.paddingRight]
-    : [frame.paddingLeft, frame.paddingRight, frame.paddingTop, frame.paddingBottom];
+    ? [P.top, P.bottom, P.left, P.right]
+    : [P.left, P.right, P.top, P.bottom];
   const mainAxis = vertical ? "v" : "h";
   const crossAxis = vertical ? "h" : "v";
   const hugMain = sizingOf(frame, mainAxis) === "HUG";
@@ -517,6 +539,7 @@ function alignInTrack(align: string, start: number, track: number, size: number)
 }
 
 function measureGrid(frame: any, outer: { width: number; height: number } | null) {
+  const P = layoutPadding(frame);
   const kids = frame.children.filter(inFlow);
   const placement = autoFlowPlacement(frame);
   const sizes = new Map<any, { width: number; height: number }>(kids.map((kid: any) => [kid, intrinsicSize(kid)]));
@@ -538,8 +561,8 @@ function measureGrid(frame: any, outer: { width: number; height: number } | null
     }
     return cell;
   };
-  const widthOuter = hugW ? null : (outer ? outer.width : frame.width) - frame.paddingLeft - frame.paddingRight;
-  const heightOuter = hugH ? null : (outer ? outer.height : frame.height) - frame.paddingTop - frame.paddingBottom;
+  const widthOuter = hugW ? null : (outer ? outer.width : frame.width) - P.left - P.right;
+  const heightOuter = hugH ? null : (outer ? outer.height : frame.height) - P.top - P.bottom;
   const columns = trackSizes(frame.gridColumnSizes, frame.gridColumnGap, widthOuter, (c) =>
     Math.max(0, ...kids.filter((kid: any) => cellOf(kid).column === c && (kid.gridColumnSpan ?? 1) === 1).map((kid: any) => sizes.get(kid)!.width))
   );
@@ -553,9 +576,9 @@ function measureGrid(frame: any, outer: { width: number; height: number } | null
   for (const kid of kids) {
     const cell = cellOf(kid);
     const span = Math.min(kid.gridColumnSpan ?? 1, columns.length - cell.column);
-    const trackX = frame.paddingLeft + offset(columns, frame.gridColumnGap, cell.column);
+    const trackX = P.left + offset(columns, frame.gridColumnGap, cell.column);
     const trackW = columns.slice(cell.column, cell.column + span).reduce((sum, value) => sum + value, 0) + (span - 1) * frame.gridColumnGap;
-    const trackY = frame.paddingTop + offset(rows, frame.gridRowGap, cell.row);
+    const trackY = P.top + offset(rows, frame.gridRowGap, cell.row);
     const trackH = rows[cell.row];
     const size = sizes.get(kid)!;
     const width = sizingOf(kid, "h") === "FILL" ? trackW : size.width;
@@ -568,10 +591,10 @@ function measureGrid(frame: any, outer: { width: number; height: number } | null
     });
   }
   const width = hugW
-    ? frame.paddingLeft + offset(columns, frame.gridColumnGap, columns.length) - frame.gridColumnGap + frame.paddingRight
+    ? P.left + offset(columns, frame.gridColumnGap, columns.length) - frame.gridColumnGap + P.right
     : outer ? outer.width : frame.width;
   const height = hugH
-    ? frame.paddingTop + offset(rows, frame.gridRowGap, rows.length) - frame.gridRowGap + frame.paddingBottom
+    ? P.top + offset(rows, frame.gridRowGap, rows.length) - frame.gridRowGap + P.bottom
     : outer ? outer.height : frame.height;
   return { width, height, slots };
 }
