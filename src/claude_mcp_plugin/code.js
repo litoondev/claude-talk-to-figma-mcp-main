@@ -1111,6 +1111,12 @@ figma.showUI(__html__, { width: UI_SIZE.defaultWidth, height: UI_SIZE.defaultHei
 loadActivitySettings();
 restoreUiSize();
 
+// Send Figma theme to UI on startup
+function sendTheme() {
+  figma.ui.postMessage({ type: "theme", isDark: figma.isDarkMode });
+}
+sendTheme();
+
 // Re-apply the last window size the user dragged to.
 async function restoreUiSize() {
   let saved;

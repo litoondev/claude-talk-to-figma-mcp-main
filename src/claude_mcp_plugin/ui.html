@@ -30,6 +30,23 @@
       --mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
     }
 
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) {
+        --bg: #16181d;
+        --sub: #1d2026;
+        --ink: #edeef1;
+        --mute: #969ba5;
+        --line: #2a2e36;
+        --soft: #22262d;
+        --acc: #9a97ff;
+        --on-acc: #16181d;
+        --acc-soft: #25243a;
+        --track: #343945;
+        --dot: #4c525d;
+        --raise: 0 1px 2px rgba(0, 0, 0, 0.5);
+      }
+    }
+
     [data-theme="dark"] {
       --bg: #16181d;
       --sub: #1d2026;
@@ -43,6 +60,24 @@
       --track: #343945;
       --dot: #4c525d;
       --raise: 0 1px 2px rgba(0, 0, 0, 0.5);
+    }
+
+    [data-theme="light"] {
+      --bg: #ffffff;
+      --sub: #f6f7f9;
+      --ink: #14161a;
+      --mute: #6b7280;
+      --line: #e5e7eb;
+      --soft: #eef0f3;
+      --acc: #4f46e5;
+      --on-acc: #ffffff;
+      --acc-soft: #eeedfd;
+      --track: #d9dbe1;
+      --dot: #b4b8c0;
+      --ok: #22c55e;
+      --warn: #f59e0b;
+      --err: #ef4444;
+      --raise: 0 1px 2px rgba(20, 22, 26, 0.14);
     }
 
     *,
@@ -230,10 +265,7 @@
       background: linear-gradient(90deg, currentColor 50%, transparent 50%);
     }
 
-    .icon-btn--close {
-      font-size: 16px;
-      line-height: 1;
-    }
+
 
     /* ── Segmented tabs ────────────────────────────────────────────── */
     .segments {
@@ -952,15 +984,13 @@
       <div class="panel__name">Claude Talk to Figma</div>
       <div class="panel__version">v1.2.0</div>
       <div class="panel__bar-right">
+        <button id="btn-theme" class="icon-btn" title="Toggle light/dark mode" type="button">
+          <svg class="theme-orb" viewBox="0 0 12 12" xmlns="http://www.w3.org/2000/svg"></svg>
+        </button>
         <span class="chip">
           <span class="dot" id="conn-dot" data-state="off"></span>
           <span id="conn-chip-text">Idle</span>
         </span>
-        <button class="icon-btn" id="btn-theme" type="button" title="Toggle theme" aria-label="Toggle theme">
-          <span class="theme-orb"></span>
-        </button>
-        <button class="icon-btn icon-btn--close" id="btn-close" type="button" title="Close plugin"
-          aria-label="Close plugin">&times;</button>
       </div>
     </header>
 
@@ -981,8 +1011,11 @@
             Not connected — start the socket bridge, then connect.
           </div>
           <div class="status-card__actions">
-            <button id="btn-connect" class="btn btn--primary" type="button">Connect</button>
-            <button id="btn-disconnect" class="btn btn--ghost" type="button" disabled>Disconnect</button>
+            <button id="btn-connect-toggle" class="btn btn--primary" type="button">Connect</button>
+            <button id="btn-copy-channel" class="btn btn--ghost hidden" type="button">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin-right:5px"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+              Copy Channel ID
+            </button>
           </div>
         </div>
 
@@ -1279,8 +1312,9 @@
 
         // Cache DOM elements
         this.ui = {
-          connectBtn: document.getElementById("btn-connect"),
-          disconnectBtn: document.getElementById("btn-disconnect"),
+          connectToggleBtn: document.getElementById("btn-connect-toggle"),
+          themeBtn: document.getElementById("btn-theme"),
+          copyChannelBtn: document.getElementById("btn-copy-channel"),
           connectionStatus: document.getElementById("connection-status"),
           connDot: document.getElementById("conn-dot"),
           connDotLarge: document.getElementById("conn-dot-lg"),
@@ -1290,8 +1324,8 @@
           progressMessage: document.getElementById("progress-message"),
           progressStatus: document.getElementById("progress-status"),
           progressPercentage: document.getElementById("progress-percentage"),
-          themeBtn: document.getElementById("btn-theme"),
-          closeBtn: document.getElementById("btn-close"),
+
+
           activityList: document.getElementById("activity-list"),
           activityChip: document.getElementById("activity-chip"),
           activityChipText: document.getElementById("activity-chip-text"),
@@ -1345,25 +1379,41 @@
         // owns clientStorage and the only API that can resize the panel.
 
         // Event Listeners
-        this.ui.connectBtn.addEventListener("click", () => this.connect());
-        this.ui.disconnectBtn.addEventListener("click", () => this.disconnect());
+        // Connect / Disconnect toggle button
+        this.ui.connectToggleBtn.addEventListener("click", () => {
+          if (this.state.connected) {
+            this.disconnect();
+          } else {
+            this.connect();
+          }
+        });
+
+        // Copy Channel ID button
+        this.ui.copyChannelBtn.addEventListener("click", () => {
+          const channel = this.state.channel;
+          if (channel) {
+            this.copyToClipboard(`Connect to Figma, channel ${channel}`);
+            this.ui.copyChannelBtn.textContent = "✓ Copied!";
+            setTimeout(() => {
+              this.ui.copyChannelBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin-right:5px"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>Copy Channel ID`;
+            }, 1500);
+          }
+        });
+
         // Pointer events (not mouse) so the drag keeps tracking when the cursor
         // leaves the plugin iframe, and still ends if the button is released
         // outside it.
         this.ui.resizeHandle.addEventListener("pointerdown", (e) => this.startResize(e));
 
-        // Clipboard feature using event delegation
-        this.ui.connectionStatus.addEventListener("click", (e) => {
-          if (e.target.classList.contains("mcp-plugin__channel-name")) {
-            this.copyToClipboard(`Connect to Figma, channel ${e.target.textContent}`);
-          }
-        });
+        // Manual theme toggle button
+        if (this.ui.themeBtn) {
+          this.ui.themeBtn.addEventListener("click", () => this.toggleTheme());
+        }
 
-        // Theme + window chrome
-        this.ui.themeBtn.addEventListener("click", () => this.toggleTheme());
-        this.ui.closeBtn.addEventListener("click", () => {
-          parent.postMessage({ pluginMessage: { type: "close-plugin" } }, "*");
-        });
+        // Note: Theme is applied by Figma via handleFigmaMessage when the UI loads.
+        // We don't use window.matchMedia because it's unreliable in plugin iframes.
+
+
 
         // Activity controls
         this.ui.clearActivityBtn.addEventListener("click", () => this.clearActivity());
@@ -1440,8 +1490,12 @@
         this.ui.connectionStatus.className = `mcp-plugin__connection-status ${isConnected ? "connected" : (connecting ? "info" : "disconnected")
           }`;
 
-        this.ui.connectBtn.disabled = isConnected;
-        this.ui.disconnectBtn.disabled = !isConnected;
+        // Toggle Connect/Disconnect button label and style
+        this.ui.connectToggleBtn.textContent = isConnected ? "Disconnect" : "Connect";
+        this.ui.connectToggleBtn.className = isConnected ? "btn btn--ghost" : "btn btn--primary";
+
+        // Show Copy Channel ID button only when connected
+        this.ui.copyChannelBtn.classList.toggle("hidden", !isConnected);
 
         // Header chip and the status card's dot track the same three states.
         const state = isConnected ? "on" : (connecting ? "wait" : "off");
@@ -1624,6 +1678,11 @@
           case "activity-settings":
             this.applyActivitySettingsToUi(message.settings);
             break;
+          case "theme":
+            console.log("Applying theme from Figma:", message.isDark ? "dark" : "light");
+            this.applyTheme(message.isDark);
+            break;
+
         }
       }
 
@@ -2185,12 +2244,23 @@
       }
 
       /**
-       * Toggle between dark and light mode
+       * Apply dark or light theme
+       */
+      applyTheme(isDark) {
+        const theme = isDark ? 'dark' : 'light';
+        document.documentElement.setAttribute('data-theme', theme);
+        console.log(`Theme applied: ${theme}`, `Current: ${document.documentElement.getAttribute('data-theme')}`);
+      }
+
+      /**
+       * Manually toggle between dark and light mode
        */
       toggleTheme() {
         const root = document.documentElement;
-        const next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
-        root.setAttribute("data-theme", next);
+        const current = root.getAttribute('data-theme');
+        const next = current === 'dark' ? 'light' : 'dark';
+        root.setAttribute('data-theme', next);
+        console.log(`Theme toggled: ${current} → ${next}`);
       }
 
       /**
