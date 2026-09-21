@@ -1343,6 +1343,10 @@ async function handleCommand(command, params) {
       return await createComponentInstance(params);
     case "export_node_as_image":
       return await exportNodeAsImage(params);
+    case "scan_assets":
+      return await scanAssets(params);
+    case "export_asset_chunk":
+      return await exportAssetChunk(params);
     case "set_corner_radius":
       return await setCornerRadius(params);
     case "set_text_content":
@@ -15598,5 +15602,303 @@ async function createEffectStyle(params) {
     name: style.name,
     key: style.key,
     effectCount: style.effects.length,
+  };
+}
+
+// ── Asset pipeline ──────────────────────────────────────────────────────────
+//
+// Two commands back the `export_assets` MCP tool:
+//
+//   scan_assets          walk the tree and describe every exportable asset,
+//                        carrying no bytes at all
+//   export_asset_chunk   return one <=1MB base64 slice of a single asset
+//
+// The split exists because bytes must never travel through model context and a
+// whole file must never travel in one WebSocket frame. Bun's default frame cap
+// is 16MB and base64 inflates by a third, so a 12MB photo sent whole is a
+// silent failure. The server asks for slices and reassembles them on disk.
+
+const ASSET_VECTOR_TYPES = ["VECTOR", "BOOLEAN_OPERATION", "STAR", "POLYGON", "LINE", "ELLIPSE"];
+
+/** Bytes cached between chunk requests so a file is only exported once. */
+const assetByteCache = new Map();
+
+function assetSlugify(name) {
+  const slug = String(name || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+  // "Rectangle 12" and friends carry no meaning; the server renames by context.
+  if (!slug || /^(rectangle|frame|group|vector|ellipse|image|layer)(-\d+)?$/.test(slug)) return "";
+  return slug;
+}
+
+/** Short, stable id from a string — enough to disambiguate, short enough to read. */
+function assetShortHash(input) {
+  let h1 = 0x811c9dc5;
+  let h2 = 0x01000193;
+  for (let i = 0; i < input.length; i++) {
+    const c = input.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0;
+    h2 = Math.imul(h2 + c, 0x85ebca6b) >>> 0;
+  }
+  return (h1.toString(16) + h2.toString(16)).slice(0, 8);
+}
+
+/** Sniff the real container format. getBytesAsync returns the ORIGINAL bytes, */
+/** which are just as often JPEG or GIF as PNG — assuming PNG corrupts them. */
+function sniffImageMime(bytes) {
+  if (!bytes || bytes.length < 4) return { mime: "application/octet-stream", ext: "bin" };
+  const b = bytes;
+  if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return { mime: "image/png", ext: "png" };
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return { mime: "image/jpeg", ext: "jpg" };
+  if (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46) return { mime: "image/gif", ext: "gif" };
+  if (b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46) return { mime: "image/webp", ext: "webp" };
+  return { mime: "application/octet-stream", ext: "bin" };
+}
+
+function assetFillsOf(node) {
+  if (!("fills" in node)) return [];
+  const fills = node.fills;
+  if (!Array.isArray(fills)) return []; // figma.mixed
+  return fills;
+}
+
+function firstImageFill(node) {
+  return assetFillsOf(node).find((f) => f && f.type === "IMAGE" && f.visible !== false);
+}
+
+/** Text must never be rasterized, so a node with text below it is never rendered whole. */
+function hasTextDescendant(node) {
+  if (node.type === "TEXT") return true;
+  if (!("children" in node) || !node.children) return false;
+  return node.children.some((child) => hasTextDescendant(child));
+}
+
+function isVectorish(node) {
+  return ASSET_VECTOR_TYPES.indexOf(node.type) !== -1;
+}
+
+/** A group/component whose entire subtree is vectors — an icon or a logo. */
+function isPureVectorContainer(node) {
+  if (!("children" in node) || !node.children || node.children.length === 0) return false;
+  if (["GROUP", "FRAME", "COMPONENT", "INSTANCE", "COMPONENT_SET"].indexOf(node.type) === -1) return false;
+  let sawVector = false;
+  const walk = (n) => {
+    for (const child of n.children || []) {
+      if (child.visible === false) continue;
+      if (child.type === "TEXT") return false;
+      if (isVectorish(child)) { sawVector = true; continue; }
+      if ("children" in child && child.children) { if (walk(child) === false) return false; continue; }
+      return false; // a rectangle with an image fill, a slice, etc.
+    }
+    return true;
+  };
+  return walk(node) !== false && sawVector;
+}
+
+/**
+ * An image fill must be rendered rather than taken raw when the design applies
+ * something the raw file does not contain: a crop, a filter, a rotation.
+ */
+function imageFillNeedsRender(node, fill) {
+  if (fill.scaleMode === "CROP") return true;
+  if (fill.filters && Object.keys(fill.filters).some((k) => fill.filters[k])) return true;
+  if (fill.rotation) return true;
+  if (fill.imageTransform) {
+    const t = fill.imageTransform;
+    const identity = t[0][0] === 1 && t[0][1] === 0 && t[1][0] === 0 && t[1][1] === 1 && t[0][2] === 0 && t[1][2] === 0;
+    if (!identity) return true;
+  }
+  return false;
+}
+
+function focalPointOf(fill) {
+  if (!fill.imageTransform) return null;
+  const t = fill.imageTransform;
+  const sx = t[0][0] || 1;
+  const sy = t[1][1] || 1;
+  return { x: Number((t[0][2] + sx / 2).toFixed(4)), y: Number((t[1][2] + sy / 2).toFixed(4)) };
+}
+
+/**
+ * Walk the tree and describe every asset. Returns descriptors only — the server
+ * decides what to pull and in what order.
+ */
+async function scanAssets(params) {
+  const { rootNodeIds, includeInstances = true, maxNodes = 20000 } = params || {};
+  if (!rootNodeIds || !rootNodeIds.length) throw new Error("rootNodeIds is required");
+
+  const assets = [];
+  const failures = [];
+  const seen = new Set();
+  let visited = 0;
+
+  for (const rootId of rootNodeIds) {
+    let root;
+    try {
+      root = await getNodeByIdSafe(rootId);
+    } catch (err) {
+      failures.push({ nodeId: rootId, reason: `could not be read: ${err && err.message ? err.message : String(err)}` });
+      continue;
+    }
+    if (!root) {
+      failures.push({ nodeId: rootId, reason: "node not found" });
+      continue;
+    }
+
+    // The breakpoint a node belongs to is decided by the top frame it sits in.
+    const rootWidth = "width" in root ? Math.round(root.width) : null;
+    const pageName = (root.parent && root.parent.type === "PAGE" && root.parent.name) || (root.type === "PAGE" ? root.name : "");
+
+    const record = (node, kind, mode, extra) => {
+      const key = `${node.id}:${kind}:${mode}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+
+      const box = ("absoluteBoundingBox" in node && node.absoluteBoundingBox) || null;
+      const slug = assetSlugify(node.name);
+      assets.push(Object.assign(
+        {
+          assetId: `${kind === "icon" || kind === "logo" ? "icon" : "img"}-${slug || "unnamed"}-${assetShortHash(node.id + mode)}`,
+          nodeId: node.id,
+          name: node.name,
+          slug,
+          kind,
+          mode, // "bytes" | "render" | "svg"
+          page: pageName,
+          rootId,
+          rootWidth,
+          rendered: box ? { width: Math.round(box.width), height: Math.round(box.height) } : null,
+          layout: ("layoutSizingHorizontal" in node && node.layoutSizingHorizontal) || null,
+          cornerRadius: ("cornerRadius" in node && typeof node.cornerRadius === "number") ? node.cornerRadius : null,
+          opacity: "opacity" in node ? node.opacity : 1,
+          insideInstance: false,
+        },
+        extra || {}
+      ));
+    };
+
+    const walk = async (node, insideInstance) => {
+      if (visited++ > maxNodes) return;
+      if (node.visible === false && !insideInstance) return;
+      if (node.type === "TEXT") return; // never an asset
+
+      const fill = firstImageFill(node);
+      if (fill) {
+        const nodeHasChildren = "children" in node && node.children && node.children.length > 0;
+        const render = imageFillNeedsRender(node, fill);
+        let intrinsic = null;
+        if (fill.imageHash) {
+          try {
+            const img = figma.getImageByHash(fill.imageHash);
+            if (img && img.getSizeAsync) intrinsic = await img.getSizeAsync();
+          } catch (err) { /* size is a nicety; absence must not fail the scan */ }
+        }
+        record(node, nodeHasChildren ? "background" : "image", render ? "render" : "bytes", {
+          imageHash: fill.imageHash || null,
+          scaleMode: fill.scaleMode || "FILL",
+          focalPoint: focalPointOf(fill),
+          intrinsic,
+          isBackground: nodeHasChildren,
+          insideInstance,
+          // A frame with children on top is never rendered whole: the children
+          // stay live code. Only its fill is taken.
+          renderWholeNode: render && !nodeHasChildren && !hasTextDescendant(node),
+        });
+        // A background frame still has children worth walking.
+        if (nodeHasChildren) {
+          for (const child of node.children) await walk(child, insideInstance);
+        }
+        return;
+      }
+
+      if (isVectorish(node) || isPureVectorContainer(node)) {
+        const looksLikeLogo = /logo|brand|wordmark/i.test(node.name || "");
+        record(node, looksLikeLogo ? "logo" : "icon", "svg", { insideInstance });
+        return;
+      }
+
+      if ("isMask" in node && node.isMask && node.parent && !hasTextDescendant(node.parent)) {
+        record(node.parent, "illustration", "render", { insideInstance });
+        return;
+      }
+
+      if ("children" in node && node.children) {
+        const nextInsideInstance = insideInstance || node.type === "INSTANCE";
+        if (node.type === "INSTANCE" && !includeInstances) return;
+        for (const child of node.children) await walk(child, nextInsideInstance);
+      }
+    };
+
+    try {
+      await walk(root, false);
+    } catch (err) {
+      failures.push({ nodeId: rootId, reason: `walk failed: ${err && err.message ? err.message : String(err)}` });
+    }
+  }
+
+  return { assets, failures, scanned: visited };
+}
+
+/**
+ * Return one base64 slice of one asset. The first call (chunkIndex 0) produces
+ * the bytes and caches them; later calls read the cache, so a file is exported
+ * exactly once however many slices it takes.
+ */
+async function exportAssetChunk(params) {
+  const { assetId, nodeId, imageHash, mode, scale = 2, chunkIndex = 0, chunkSize = 700000 } = params || {};
+  if (!assetId) throw new Error("assetId is required");
+
+  let entry = assetByteCache.get(assetId);
+
+  if (!entry || chunkIndex === 0) {
+    let bytes;
+    let mime;
+    let ext;
+
+    if (mode === "bytes") {
+      if (!imageHash) throw new Error(`asset ${assetId} has no imageHash to read`);
+      const image = figma.getImageByHash(imageHash);
+      if (!image) throw new Error(`image not found for hash ${imageHash}`);
+      bytes = await image.getBytesAsync();
+      const sniffed = sniffImageMime(bytes);
+      mime = sniffed.mime;
+      ext = sniffed.ext;
+    } else {
+      const node = await getNodeByIdSafe(nodeId);
+      if (!node) throw new Error(`node not found: ${nodeId}`);
+      if (!("exportAsync" in node)) throw new Error(`node does not support export: ${nodeId}`);
+
+      if (mode === "svg") {
+        bytes = await node.exportAsync({ format: "SVG", svgOutlineText: false, svgIdAttribute: false });
+        mime = "image/svg+xml";
+        ext = "svg";
+      } else {
+        bytes = await node.exportAsync({ format: "PNG", constraint: { type: "SCALE", value: scale } });
+        mime = "image/png";
+        ext = "png";
+      }
+    }
+
+    entry = { base64: customBase64Encode(bytes), byteSize: bytes.length, mime, ext };
+    assetByteCache.set(assetId, entry);
+  }
+
+  const total = Math.max(1, Math.ceil(entry.base64.length / chunkSize));
+  if (chunkIndex >= total) throw new Error(`chunk ${chunkIndex} out of range (${total} total)`);
+
+  const data = entry.base64.slice(chunkIndex * chunkSize, (chunkIndex + 1) * chunkSize);
+  if (chunkIndex === total - 1) assetByteCache.delete(assetId); // done; release it
+
+  return {
+    assetId,
+    chunkIndex,
+    totalChunks: total,
+    data,
+    mimeType: entry.mime,
+    ext: entry.ext,
+    byteSize: entry.byteSize,
   };
 }

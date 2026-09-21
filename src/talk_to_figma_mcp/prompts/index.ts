@@ -744,37 +744,3 @@ SEQUENCE THAT WORKS
     }
   );
 }
-
-// Export individual prompt registration functions
-export function registerDesignStrategyPrompt(server: McpServer): void {
-  server.prompt(
-    "design_strategy",
-    "Best practices for working with Figma designs",
-    (extra) => {
-      // Implementation is the same as above
-      // This function is exported for individual usage if needed
-    }
-  );
-}
-
-export function registerReadDesignStrategyPrompt(server: McpServer): void {
-  server.prompt(
-    "read_design_strategy",
-    "Best practices for reading Figma designs",
-    (extra) => {
-      // Implementation is the same as above
-      // This function is exported for individual usage if needed
-    }
-  );
-}
-
-export function registerTextReplacementStrategyPrompt(server: McpServer): void {
-  server.prompt(
-    "text_replacement_strategy",
-    "Systematic approach for replacing text in Figma designs",
-    (extra) => {
-      // Implementation is the same as above
-      // This function is exported for individual usage if needed
-    }
-  );
-}

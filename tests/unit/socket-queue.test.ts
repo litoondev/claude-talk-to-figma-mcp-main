@@ -197,12 +197,12 @@ describe("Socket Queue Integration", () => {
     server = Bun.serve({
       port: testPort,
       fetch(req, srv) {
-        if (srv.upgrade(req)) return;
+        if (srv.upgrade(req, { data: { clientId: `test_${Date.now()}` } })) return;
         return new Response("test server");
       },
       websocket: {
-        open(ws) {
-          ws.data = { clientId: `test_${Date.now()}` };
+        open() {
+          // clientId is attached at upgrade time.
         },
         message(ws, message) {
           const data = JSON.parse(message as string);

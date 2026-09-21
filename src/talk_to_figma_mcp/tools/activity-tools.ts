@@ -137,7 +137,7 @@ export function registerActivityTools(server: McpServer): void {
         if (!response.ok) {
           throw new Error(`relay responded ${response.status} ${response.statusText}`);
         }
-        payload = await response.json();
+        payload = (await response.json()) as typeof payload;
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         return {
@@ -156,7 +156,7 @@ export function registerActivityTools(server: McpServer): void {
 
       let events = payload.events || [];
       if (kinds && kinds.length) {
-        const allowed = new Set(kinds);
+        const allowed = new Set<string>(kinds);
         events = events.filter((e) => allowed.has(e.kind));
         const cap = limit ?? 50;
         if (events.length > cap) events = events.slice(events.length - cap);

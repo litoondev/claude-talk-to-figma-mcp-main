@@ -67,6 +67,8 @@ export type FigmaCommand =
   | "get_team_components"
   | "create_component_instance"
   | "export_node_as_image"
+  | "scan_assets"
+  | "export_asset_chunk"
   | "join"
   | "ping"
   | "set_corner_radius"

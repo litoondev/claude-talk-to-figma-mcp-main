@@ -435,3 +435,99 @@ export async function getFileMetadata(
   }>(`/v1/files/${encodeURIComponent(fileKey)}?depth=1`);
   return { name: data.name, lastModified: data.lastModified, thumbnailUrl: data.thumbnailUrl };
 }
+
+// ---------------------------------------------------------------------------
+// Asset endpoints — the fallback path for the asset pipeline
+// ---------------------------------------------------------------------------
+//
+// These back `export_assets` when the plugin bridge cannot deliver bytes (a
+// closed plugin, an export that times out, a node the sandbox refuses).
+//
+// Both need only the `files:read` scope. Downloading a file's images does NOT
+// require edit access — being asked for editor rights to fetch assets is a
+// sign something is reaching for the wrong endpoint.
+
+/**
+ * GET /v1/files/:file_key/images
+ *
+ * Every image fill in the file, as `imageHash -> download URL`. These are the
+ * ORIGINAL uploaded files, the same bytes `getBytesAsync()` returns in the
+ * plugin — full resolution, uncropped.
+ */
+export async function getImageFillUrls(fileKey: string): Promise<Record<string, string>> {
+  const data = await figmaRest<{
+    error?: boolean;
+    status?: number;
+    meta?: { images?: Record<string, string> };
+  }>(`/v1/files/${encodeURIComponent(fileKey)}/images`);
+
+  if (data.error) {
+    throw new FigmaRestError(
+      `Figma reported an error listing image fills (status ${data.status ?? "unknown"})`,
+      data.status,
+      "/v1/files/:key/images"
+    );
+  }
+  return data.meta?.images ?? {};
+}
+
+/**
+ * GET /v1/images/:file_key?ids=…&format=…&scale=…
+ *
+ * Server-side renders of specific nodes. A null URL means Figma declined to
+ * render that node — usually because it is empty or has no visible bounds —
+ * and is reported rather than quietly skipped.
+ *
+ * Figma rejects very long id lists, so requests are batched.
+ */
+export async function getRenderedImageUrls(
+  fileKey: string,
+  nodeIds: string[],
+  format: "png" | "jpg" | "svg" | "pdf" = "png",
+  scale = 2
+): Promise<Record<string, string | null>> {
+  const out: Record<string, string | null> = {};
+  const BATCH = 50;
+
+  for (let i = 0; i < nodeIds.length; i += BATCH) {
+    const batch = nodeIds.slice(i, i + BATCH);
+    const params = new URLSearchParams({ ids: batch.join(","), format });
+    // scale applies to raster output only; sending it with svg is an error.
+    if (format === "png" || format === "jpg") params.set("scale", String(scale));
+
+    const data = await figmaRest<{ err?: string | null; images?: Record<string, string | null> }>(
+      `/v1/images/${encodeURIComponent(fileKey)}?${params.toString()}`
+    );
+
+    if (data.err) {
+      throw new FigmaRestError(`Figma could not render nodes: ${data.err}`, undefined, "/v1/images/:key");
+    }
+    Object.assign(out, data.images ?? {});
+  }
+
+  return out;
+}
+
+/**
+ * Fetch a rendered/original asset from the URL Figma hands back.
+ *
+ * These URLs point at Figma's CDN, not the API, and are pre-signed — sending
+ * the access token would be both useless and a credential leak to a third
+ * party, so no auth header is attached.
+ */
+export async function downloadAssetBinary(url: string): Promise<Buffer> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FIGMA_REST_CONFIG.timeoutMs);
+
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) {
+      throw new FigmaRestError(`asset download failed: ${response.status} ${response.statusText}`, response.status, url);
+    }
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (buffer.length === 0) throw new FigmaRestError("asset download returned zero bytes", undefined, url);
+    return buffer;
+  } finally {
+    clearTimeout(timer);
+  }
+}

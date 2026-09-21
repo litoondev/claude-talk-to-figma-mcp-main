@@ -187,10 +187,11 @@ export function registerSectionScopeTools(server: McpServer): void {
         // card inside it. Treat the nearest enclosing SECTION as the target
         // rather than bouncing the request back as a question.
         const selected = nodes[0];
-        resolvedId =
+        resolvedId = String(
           selected.type === "SECTION"
             ? selected.id
-            : selected.enclosingSection?.id ?? selected.id;
+            : selected.enclosingSection?.id ?? selected.id
+        );
         if (resolvedId !== selected.id) {
           resolvedFrom = `the section containing the selected ${selected.type.toLowerCase()} "${selected.name}"`;
         }

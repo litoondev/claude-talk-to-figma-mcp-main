@@ -425,7 +425,7 @@ export function elementChildren(el: HtmlElement): HtmlElement[] {
   return el.children.filter((c): c is HtmlElement => typeof c !== "string");
 }
 
-function classList(el: HtmlElement): string[] {
+export function classList(el: HtmlElement): string[] {
   return (el.attrs.class ?? "").split(/\s+/).filter(Boolean);
 }
 
@@ -458,7 +458,7 @@ function findElement(el: HtmlElement, tag: string): HtmlElement | null {
 
 // ── Selector matching (subject compound only) ───────────────────────────────
 
-interface Subject {
+export interface Subject {
   tag: string | null;
   id: string | null;
   classes: string[];
@@ -481,7 +481,7 @@ export function subjectOf(selector: string): Subject | null {
   return { tag, id, classes };
 }
 
-function elementMatches(el: HtmlElement, subject: Subject): boolean {
+export function elementMatches(el: HtmlElement, subject: Subject): boolean {
   if (subject.tag && subject.tag !== el.tag) return false;
   if (subject.id && el.attrs.id !== subject.id) return false;
   const classes = classList(el);

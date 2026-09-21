@@ -1,38 +1,865 @@
 <!DOCTYPE html>
-<html>
+<html data-theme="light">
 
 <head>
   <meta charset="utf-8" />
-  <title>Claude MCP Plugin</title>
+  <title>Claude Talk to Figma</title>
   <style>
-    /* The window is resizable, so every ancestor of the layout has to carry a
-       real height; a percentage height against an auto-height parent resolves
-       to auto and the flex chain below stops filling the window. */
-    html {
+    /* ── Tokens ────────────────────────────────────────────────────────
+       One palette, two themes. Everything below is expressed in these
+       variables, so a theme flip is a single attribute on <html>.
+       System font stacks only: the plugin iframe has no network access to
+       a font CDN, so a webfont would simply fail to load.            */
+    :root {
+      --bg: #ffffff;
+      --sub: #f6f7f9;
+      --ink: #14161a;
+      --mute: #6b7280;
+      --line: #e5e7eb;
+      --soft: #eef0f3;
+      --acc: #4f46e5;
+      --on-acc: #ffffff;
+      --acc-soft: #eeedfd;
+      --track: #d9dbe1;
+      --dot: #b4b8c0;
+      --ok: #22c55e;
+      --warn: #f59e0b;
+      --err: #ef4444;
+      --raise: 0 1px 2px rgba(20, 22, 26, 0.14);
+      --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      --mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
+    }
+
+    [data-theme="dark"] {
+      --bg: #16181d;
+      --sub: #1d2026;
+      --ink: #edeef1;
+      --mute: #969ba5;
+      --line: #2a2e36;
+      --soft: #22262d;
+      --acc: #9a97ff;
+      --on-acc: #16181d;
+      --acc-soft: #25243a;
+      --track: #343945;
+      --dot: #4c525d;
+      --raise: 0 1px 2px rgba(0, 0, 0, 0.5);
+    }
+
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box;
+    }
+
+    /* The window is resizable, so every ancestor of the layout carries a real
+       height; a percentage height against an auto-height parent resolves to
+       auto and the flex chain below stops filling the window. */
+    html,
+    body {
       height: 100%;
     }
 
     body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       margin: 0;
-      font-size: 12px;
-      padding: 16px;
-      color: #400B55;
-      background-color: #FDF8FF;
+      font-family: var(--font);
+      font-size: 13px;
+      line-height: 1.5;
+      color: var(--ink);
+      background: var(--bg);
       overflow: hidden;
-      width: 100%;
+      user-select: none;
+    }
+
+    button,
+    input {
+      font: inherit;
+      color: inherit;
+    }
+
+    :focus-visible {
+      outline: 2px solid var(--acc);
+      outline-offset: 2px;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    /* ── Shell ─────────────────────────────────────────────────────── */
+    .panel {
+      position: relative;
       height: 100%;
       display: flex;
       flex-direction: column;
-      box-sizing: border-box;
-      transition: padding 0.3s ease;
     }
 
-    body .mcp-plugin.collapsed {
-      padding: 8px;
+    .panel__bar {
+      flex: none;
+      height: 46px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 10px 0 14px;
+      border-bottom: 1px solid var(--line);
+      background: var(--sub);
     }
 
-    /* ── Resize & Window Management ───────────────────────────────────── */
+    .panel__mark {
+      width: 22px;
+      height: 22px;
+      flex: none;
+      display: grid;
+      place-items: center;
+      border-radius: 6px;
+      background: var(--acc);
+      color: var(--on-acc);
+      font-size: 11px;
+      font-weight: 600;
+    }
+
+    .panel__name {
+      font-size: 13px;
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .panel__version {
+      flex: none;
+      font-family: var(--mono);
+      font-size: 10px;
+      color: var(--mute);
+      padding: 2px 6px;
+      border-radius: 5px;
+      background: var(--soft);
+    }
+
+    .panel__bar-right {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .panel__body {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      padding: 0 16px 16px;
+      user-select: text;
+    }
+
+    /* ── Status chip ───────────────────────────────────────────────── */
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      font-size: 11.5px;
+      color: var(--mute);
+      white-space: nowrap;
+    }
+
+    .dot {
+      flex: none;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--dot);
+    }
+
+    .dot--lg {
+      width: 9px;
+      height: 9px;
+    }
+
+    [data-state="on"] {
+      background: var(--ok);
+    }
+
+    [data-state="wait"] {
+      background: var(--warn);
+      animation: pulse 1s ease-in-out infinite;
+    }
+
+    [data-state="err"] {
+      background: var(--err);
+    }
+
+    @keyframes pulse {
+
+      0%,
+      100% {
+        opacity: 0.35;
+      }
+
+      50% {
+        opacity: 1;
+      }
+    }
+
+    /* ── Icon buttons ──────────────────────────────────────────────── */
+    .icon-btn {
+      width: 28px;
+      height: 28px;
+      flex: none;
+      display: grid;
+      place-items: center;
+      padding: 0;
+      border: 0;
+      border-radius: 8px;
+      background: transparent;
+      color: var(--mute);
+      cursor: pointer;
+    }
+
+    .icon-btn:hover {
+      background: var(--soft);
+      color: var(--ink);
+    }
+
+    /* Half-filled circle: the usual light/dark switch. */
+    .theme-orb {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      border: 1.5px solid currentColor;
+      background: linear-gradient(90deg, currentColor 50%, transparent 50%);
+    }
+
+    .icon-btn--close {
+      font-size: 16px;
+      line-height: 1;
+    }
+
+    /* ── Segmented tabs ────────────────────────────────────────────── */
+    .segments {
+      flex: none;
+      display: flex;
+      gap: 4px;
+      margin: 14px 16px 12px;
+      padding: 4px;
+      border-radius: 10px;
+      background: var(--soft);
+    }
+
+    .segment {
+      flex: 1;
+      padding: 7px 4px;
+      border: 0;
+      border-radius: 7px;
+      background: transparent;
+      color: var(--mute);
+      font-size: 12.5px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+
+    .segment:hover {
+      color: var(--ink);
+    }
+
+    .segment.active {
+      background: var(--bg);
+      color: var(--ink);
+      box-shadow: var(--raise);
+    }
+
+    .mcp-plugin__tab-content {
+      display: none;
+    }
+
+    .mcp-plugin__tab-content.active {
+      display: block;
+    }
+
+    /* ── Generic surfaces ──────────────────────────────────────────── */
+    .card {
+      padding: 14px 16px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+    }
+
+    .note {
+      padding: 14px 16px;
+      border-radius: 12px;
+      background: var(--soft);
+      font-size: 12.5px;
+      color: var(--mute);
+      line-height: 1.6;
+    }
+
+    .section-title {
+      margin: 0;
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    /* ── Buttons ───────────────────────────────────────────────────── */
+    .btn {
+      flex: none;
+      padding: 9px 18px;
+      border: 1px solid transparent;
+      border-radius: 9px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+
+    .btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    .btn--primary {
+      background: var(--acc);
+      color: var(--on-acc);
+    }
+
+    .btn--primary:hover:not(:disabled) {
+      opacity: 0.88;
+    }
+
+    .btn--ghost {
+      background: transparent;
+      border-color: var(--line);
+      color: var(--ink);
+    }
+
+    .btn--ghost:hover:not(:disabled) {
+      background: var(--soft);
+    }
+
+    .link-btn {
+      padding: 5px 11px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: transparent;
+      color: var(--mute);
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+
+    .link-btn:hover {
+      color: var(--ink);
+      background: var(--soft);
+    }
+
+    /* ── Text input ────────────────────────────────────────────────── */
+    .input {
+      width: 100%;
+      padding: 10px 14px;
+      font-size: 13px;
+      background: var(--soft);
+      border: 1px solid transparent;
+      border-radius: 10px;
+      outline: none;
+    }
+
+    .input::placeholder {
+      color: var(--mute);
+    }
+
+    .input:focus {
+      border-color: var(--acc);
+      background: var(--bg);
+    }
+
+    /* ── Switches ──────────────────────────────────────────────────── */
+    .switch {
+      display: inline-flex;
+      align-items: flex-start;
+      gap: 9px;
+      cursor: pointer;
+      font-size: 12.5px;
+      color: var(--mute);
+    }
+
+    .switch input {
+      position: absolute;
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+
+    .switch__box {
+      flex: none;
+      margin-top: 2px;
+      width: 30px;
+      height: 17px;
+      padding: 2px;
+      display: flex;
+      border-radius: 999px;
+      background: var(--track);
+      transition: background 0.16s ease;
+    }
+
+    .switch__knob {
+      width: 13px;
+      height: 13px;
+      border-radius: 50%;
+      background: #fff;
+      transition: transform 0.16s ease;
+    }
+
+    .switch input:checked+.switch__box {
+      background: var(--acc);
+    }
+
+    .switch input:checked+.switch__box .switch__knob {
+      transform: translateX(13px);
+    }
+
+    .switch input:focus-visible+.switch__box {
+      outline: 2px solid var(--acc);
+      outline-offset: 2px;
+    }
+
+    .switch__label {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--ink);
+    }
+
+    .switch__note {
+      font-size: 11.5px;
+      line-height: 1.45;
+      color: var(--mute);
+      margin-top: 2px;
+    }
+
+    /* ── Connect tab ───────────────────────────────────────────────── */
+    .status-card {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 12px 14px;
+      padding: 16px 18px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--sub);
+    }
+
+    .mcp-plugin__connection-status {
+      flex: 1 1 180px;
+      min-width: 0;
+      font-size: 13px;
+      line-height: 1.5;
+      color: var(--mute);
+    }
+
+    .mcp-plugin__connection-status.connected {
+      color: var(--ink);
+    }
+
+    .mcp-plugin__channel-name {
+      display: inline-block;
+      font-family: var(--mono);
+      font-size: 12.5px;
+      padding: 2px 8px;
+      margin-top: 4px;
+      border-radius: 6px;
+      background: var(--acc-soft);
+      color: var(--acc);
+      cursor: pointer;
+    }
+
+    .status-card__actions {
+      flex: 0 0 auto;
+      margin-left: auto;
+      display: flex;
+      gap: 8px;
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .stat__value {
+      font-family: var(--mono);
+      font-size: 22px;
+      font-weight: 500;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .stat__label {
+      font-size: 11.5px;
+      color: var(--mute);
+      margin-top: 3px;
+    }
+
+    /* ── Progress ──────────────────────────────────────────────────── */
+    .mcp-plugin__progress {
+      margin-top: 12px;
+    }
+
+    .mcp-plugin__progress-bar {
+      height: 4px;
+      border-radius: 999px;
+      background: var(--track);
+      overflow: hidden;
+    }
+
+    .mcp-plugin__progress-bar-fill {
+      height: 100%;
+      width: 0%;
+      background: var(--acc);
+      transition: width 0.25s ease;
+    }
+
+    .mcp-plugin__progress-indicators {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 6px;
+      font-size: 11.5px;
+      color: var(--mute);
+    }
+
+    .mcp-plugin__progress-message {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .mcp-plugin__progress-indicators .operation-complete {
+      color: var(--ok);
+    }
+
+    .mcp-plugin__progress-indicators .operation-error {
+      color: var(--err);
+    }
+
+    /* ── Operations tab ────────────────────────────────────────────── */
+    .mcp-plugin__operations-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+      margin-top: 12px;
+    }
+
+    .mcp-plugin__operations-tab {
+      padding: 5px 12px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: transparent;
+      color: var(--mute);
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      text-transform: capitalize;
+    }
+
+    .mcp-plugin__operations-tab:hover {
+      color: var(--ink);
+    }
+
+    .mcp-plugin__operations-tab.active {
+      background: var(--acc);
+      border-color: var(--acc);
+      color: var(--on-acc);
+    }
+
+    .mcp-plugin__operations-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+      gap: 10px;
+      margin-top: 14px;
+    }
+
+    .mcp-plugin__operation-item {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      padding: 14px 16px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+    }
+
+    .mcp-plugin__operation-item:hover {
+      border-color: var(--acc);
+    }
+
+    .mcp-plugin__operation-category {
+      font-size: 10.5px;
+      font-weight: 500;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--acc);
+    }
+
+    .mcp-plugin__operation-name {
+      font-size: 14.5px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+
+    .mcp-plugin__operation-description {
+      font-size: 12.5px;
+      line-height: 1.5;
+      color: var(--mute);
+    }
+
+    .mcp-plugin__operation-action {
+      align-self: flex-start;
+      margin-top: 6px;
+      padding: 6px 12px;
+      border: 0;
+      border-radius: 8px;
+      background: var(--soft);
+      color: var(--ink);
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+
+    .mcp-plugin__operation-action:hover {
+      background: var(--acc);
+      color: var(--on-acc);
+    }
+
+    .mcp-plugin__operations-empty {
+      grid-column: 1 / -1;
+      padding: 44px 0;
+      text-align: center;
+      font-size: 13px;
+      color: var(--mute);
+    }
+
+    /* ── Activity tab ──────────────────────────────────────────────── */
+    .mcp-plugin__activity {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .mcp-plugin__activity-head {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .mcp-plugin__activity-spacer {
+      flex: 1;
+    }
+
+    .mcp-plugin__status-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      font-size: 11.5px;
+      color: var(--mute);
+    }
+
+    .mcp-plugin__status-chip .dot {
+      background: var(--dot);
+    }
+
+    .mcp-plugin__status-chip.working .dot {
+      background: var(--warn);
+      animation: pulse 1s ease-in-out infinite;
+    }
+
+    .mcp-plugin__recent-commands {
+      padding: 10px 14px;
+      border-radius: 10px;
+      background: var(--soft);
+    }
+
+    .mcp-plugin__recent-commands-title {
+      font-size: 10.5px;
+      font-weight: 500;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--mute);
+      margin-bottom: 7px;
+    }
+
+    .mcp-plugin__recent-command-btn {
+      padding: 4px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--bg);
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--mute);
+      cursor: pointer;
+    }
+
+    .mcp-plugin__recent-command-btn:hover {
+      color: var(--acc);
+      border-color: var(--acc);
+    }
+
+    .mcp-plugin__activity-list {
+      min-height: 240px;
+      max-height: 46vh;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+    }
+
+    .mcp-plugin__activity-row {
+      display: grid;
+      grid-template-columns: 62px 14px 1fr auto;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .mcp-plugin__activity-row:last-child {
+      border-bottom: 0;
+    }
+
+    .mcp-plugin__activity-row .t {
+      font-family: var(--mono);
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+      color: var(--mute);
+    }
+
+    .mcp-plugin__activity-row .i {
+      font-size: 11px;
+      color: var(--mute);
+      text-align: center;
+    }
+
+    .mcp-plugin__activity-row.completed .i {
+      color: var(--ok);
+    }
+
+    .mcp-plugin__activity-row.error .i {
+      color: var(--err);
+    }
+
+    .mcp-plugin__activity-row .m {
+      font-size: 13px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .mcp-plugin__activity-row .d {
+      font-family: var(--mono);
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+      color: var(--mute);
+      background: var(--soft);
+      padding: 3px 8px;
+      border-radius: 6px;
+    }
+
+    .mcp-plugin__activity-row .n {
+      grid-column: 3 / -1;
+      font-size: 11.5px;
+      color: var(--mute);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .mcp-plugin__activity-row.has-command {
+      cursor: pointer;
+    }
+
+    .mcp-plugin__activity-row.has-command:hover {
+      background: var(--soft);
+    }
+
+    .mcp-plugin__activity-empty {
+      padding: 100px 20px;
+      text-align: center;
+      font-size: 13px;
+      color: var(--mute);
+    }
+
+    .mcp-plugin__activity-opts {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 18px;
+    }
+
+    .mcp-plugin__activity-opts .switch {
+      align-items: center;
+    }
+
+    .mcp-plugin__activity-opts .switch__box {
+      margin-top: 0;
+    }
+
+    /* ── Settings tab ──────────────────────────────────────────────── */
+    .settings-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+      gap: 10px;
+      margin-top: 10px;
+    }
+
+    .settings-grid .switch {
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+    }
+
+    .settings-grid .switch:hover {
+      background: var(--sub);
+    }
+
+    .file-key-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .file-key-hint {
+      font-size: 11.5px;
+      color: var(--mute);
+      margin-top: 7px;
+    }
+
+    .about {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 14px;
+      margin-top: 18px;
+      padding-top: 16px;
+      border-top: 1px solid var(--line);
+    }
+
+    .about__text {
+      flex: 1;
+      min-width: 180px;
+    }
+
+    .about__meta {
+      font-size: 12px;
+      color: var(--mute);
+      margin-top: 2px;
+    }
+
+    .about a {
+      font-size: 12.5px;
+      font-weight: 500;
+      color: var(--acc);
+      text-decoration: none;
+    }
+
+    /* ── Resize grip ───────────────────────────────────────────────── */
     .mcp-plugin__resize-handle {
       position: fixed;
       bottom: 0;
@@ -56,16 +883,12 @@
         linear-gradient(135deg, transparent 43%, currentColor 43%, currentColor 57%, transparent 57%) no-repeat;
       background-size: 100% 100%, 55% 55%;
       background-position: 100% 100%, 100% 100%;
-      color: rgba(115, 35, 146, 0.75);
+      color: var(--mute);
     }
 
     .mcp-plugin__resize-handle:hover,
     .mcp-plugin__resize-handle.is-resizing {
       opacity: 1;
-    }
-
-    .dark .mcp-plugin__resize-handle::after {
-      color: rgba(255, 255, 255, 0.75);
     }
 
     /* While dragging, the pointer must not select text or land on a button. */
@@ -75,1154 +898,251 @@
       cursor: nwse-resize !important;
     }
 
-    .dark {
-      color: #fff;
-      background-color: #2c2c2c;
-    }
-
-    .mcp-plugin__mode {
-      position: absolute;
-      bottom: -8px;
-      right: 16px;
-      cursor: pointer;
-      transition: ease 0.2s;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 4px;
-      font-size: 10px;
-      opacity: 0.4;
-    }
-
-    .mcp-plugin__mode:hover {
-      opacity: 1;
-    }
-
-    .mcp-plugin {
-      position: relative;
-      display: flex;
-      flex-direction: column;
-      gap: 24px;
-      height: 100%;
-      width: 100%;
-      margin: 0 auto;
-      box-sizing: border-box;
-      overflow: hidden;
-      transition: gap 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-      user-select: none;
-    }
-
-    /* Allow text selection inside content */
-    .mcp-plugin__content,
-    .mcp-plugin__activity,
-    .mcp-plugin__tab-content {
-      user-select: text;
-    }
-
-    /* Responsive width constraints */
-    .mcp-plugin {
-      max-width: 100%;
-      flex: 1;
-      min-height: 0;
-      padding: 16px;
-    }
-
-    @media (max-width: 900px) {
-      .mcp-plugin {
-        max-width: 100%;
-        padding: 12px;
-        gap: 16px;
-      }
-    }
-
-    @media (max-width: 800px) {
-      .mcp-plugin {
-        padding: 8px;
-        gap: 12px;
-      }
-    }
-
-    /* Responsive content adjustments */
-    .mcp-plugin__tabs-container {
-      flex-wrap: wrap;
-    }
-
-    @media (max-width: 800px) {
-      .mcp-plugin__tab {
-        flex: 0 1 auto;
-        padding: 10px 12px;
-        font-size: 11px;
+    /* Narrow windows: the panel can be dragged down to 320px wide. */
+    @media (max-width: 460px) {
+      .panel__body {
+        padding: 0 12px 12px;
       }
 
-      .mcp-plugin__tab-icon {
-        margin-right: 2px;
-        font-size: 12px;
+      .segments {
+        margin: 12px;
       }
 
-      .mcp-plugin__content {
-        gap: 12px;
+      .panel__version {
+        display: none;
       }
 
-      .mcp-plugin__operations-grid {
+      .status-card__actions {
+        width: 100%;
+        margin-left: 0;
+      }
+
+      .status-card__actions .btn {
+        flex: 1;
+        padding-inline: 10px;
+      }
+
+      .stats {
         grid-template-columns: 1fr;
       }
 
-      .mcp-plugin__button {
-        width: 80px;
-        font-size: 11px;
-      }
-    }
-
-    /* Very small screens */
-    @media (max-width: 800px) {
-      .mcp-plugin {
-        padding: 4px;
+      /* Same squeeze as the status card: the field keeps a readable width and
+         the button takes the row below it. */
+      .file-key-row {
+        flex-wrap: wrap;
       }
 
-      .mcp-plugin__header-title {
-        font-size: 14px;
+      .file-key-row .input {
+        flex: 1 1 100%;
       }
 
-      .mcp-plugin__header-description {
-        font-size: 10px;
+      .mcp-plugin__activity-head {
+        flex-wrap: wrap;
+        row-gap: 8px;
       }
     }
-
-    .mcp-plugin__header {
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-      padding-top: 4px;
-    }
-
-    .mcp-plugin__header-title {
-      font-size: 16px;
-      font-weight: 600;
-      margin: 0;
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-
-    .mcp-plugin__header-title::before {
-      content: "🤖";
-      font-size: 18px;
-    }
-
-    .mcp-plugin__header-description {
-      font-size: 12px;
-      margin: 0;
-      opacity: 0.75;
-    }
-
-    .dark .mcp-plugin__header-description {
-      color: #AAAAAA;
-    }
-
-    .mcp-plugin__content {
-      display: flex;
-      flex-direction: column;
-      gap: 16px;
-      width: 100%;
-      box-sizing: border-box;
-      overflow-x: hidden;
-      overflow-y: auto;
-    }
-
-    .mcp-plugin__connection-status {
-      padding: 8px;
-      border-radius: 4px;
-      height: 32px;
-      line-height: 1.35;
-    }
-
-    .mcp-plugin__content-activity {
-      display: flex;
-    }
-
-    .mcp-plugin__connection-status.connected {
-      background: #D8FFBB;
-      color: #223005;
-    }
-
-    .mcp-plugin__connection-status.disconnected {
-      background-color: #FFC8BD;
-      color: #280B06;
-    }
-
-    .mcp-plugin__connection-status.info {
-      background-color: #BBFFFD;
-      color: #0B4240;
-    }
-
-    .mcp-plugin__channel-name {
-      font-weight: bold;
-      text-decoration: underline;
-      cursor: pointer;
-      position: relative;
-    }
-
-    .mcp-plugin__channel-name:hover {
-      text-decoration: none;
-    }
-
-    .mcp-plugin__channel-name::after {
-      content: "Click to copy";
-      position: absolute;
-      bottom: 16px;
-      left: 50%;
-      transform: translateX(-50%);
-      background-color: #223005;
-      color: #fff;
-      padding: 4px 8px;
-      border-radius: 4px;
-      font-size: 10px;
-      font-weight: normal;
-      white-space: nowrap;
-      opacity: 0;
-      visibility: hidden;
-      transition: opacity 0.2s, visibility 0.2s;
-      pointer-events: none;
-      z-index: 100;
-    }
-
-    .dark .mcp-plugin__channel-name::after {
-      background-color: #2c2c2c;
-    }
-
-    .mcp-plugin__channel-name:hover::after {
-      opacity: 1;
-      visibility: visible;
-    }
-
-    .mcp-plugin__button {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      height: 32px;
-      width: 96px;
-      border: 1px solid #732392;
-      background-color: #732392;
-      color: #fff;
-      border-radius: 4px;
-      font-size: 12px;
-      cursor: pointer;
-      transition: ease 0.2s;
-      margin-left: auto;
-    }
-
-    .dark .mcp-plugin__button {
-      border-color: #5467F7;
-      background-color: #5467F7;
-      color: #ffffff;
-    }
-
-    .mcp-plugin__button:hover {
-      background-color: transparent;
-      color: #732392;
-    }
-
-    .dark .mcp-plugin__button:hover {
-      background-color: transparent;
-      color: #ffffff;
-      border-color: #5467F7;
-    }
-
-    .mcp-plugin__button--secondary {
-      background-color: transparent;
-      color: #732392;
-    }
-
-    .dark .mcp-plugin__button--secondary {
-      background-color: transparent;
-      color: #fff;
-      border-color: #5467F7;
-    }
-
-    .mcp-plugin__button--secondary:hover {
-      background-color: #732392;
-      color: #fff;
-    }
-
-    .dark .mcp-plugin__button--secondary:hover {
-      background-color: #5467F7;
-      color: #ffffff;
-      border-color: #5467F7;
-    }
-
-    .mcp-plugin__button:disabled {
-      display: none;
-    }
-
-    .hidden {
-      display: none !important;
-    }
-
-    .mcp-plugin__progress {
-      display: flex;
-      flex-direction: column;
-      width: calc(100% - 112px);
-      gap: 4px;
-    }
-
-    .mcp-plugin__progress-bar {
-      width: 100%;
-      height: 4px;
-      background-color: #EDD0F8;
-      border-radius: 4px;
-    }
-
-    .dark .mcp-plugin__progress-bar {
-      background-color: #575757;
-    }
-
-    .mcp-plugin__progress-bar-fill {
-      width: 0%;
-      height: 4px;
-      background-color: #732392;
-      border-radius: 4px;
-      transition: width 0.3s;
-    }
-
-    .dark .mcp-plugin__progress-bar-fill {
-      background-color: #5467F7;
-    }
-
-    .mcp-plugin__progress-indicators {
-      display: flex;
-      justify-content: space-between;
-      gap: 16px;
-      font-size: 10px;
-    }
-
-    .dark .mcp-plugin__progress-indicators {
-      color: #ABABAB;
-    }
-
-    #progress-status {
-      display: none;
-    }
-
-    .operation-error {
-      color: #f87359ff;
-    }
-
-    /* ── Live activity feed ─────────────────────────────────────────── */
-    .mcp-plugin__activity {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      min-height: 0;
-      flex: 1;
-      width: 100%;
-      box-sizing: border-box;
-      overflow-x: hidden;
-    }
-
-    .mcp-plugin__activity-head {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-
-    .mcp-plugin__activity-title {
-      font-size: 11px;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-      font-weight: 600;
-      opacity: 0.55;
-      margin: 0;
-    }
-
-    .mcp-plugin__activity-spacer {
-      flex: 1;
-    }
-
-    .mcp-plugin__status-chip {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      font-size: 10px;
-      padding: 3px 8px;
-      border-radius: 999px;
-      background: #EDD0F8;
-      color: #400B55;
-      white-space: nowrap;
-    }
-
-    .dark .mcp-plugin__status-chip {
-      background: #3a3a3a;
-      color: #ddd;
-    }
-
-    .mcp-plugin__status-chip .dot {
-      width: 6px;
-      height: 6px;
-      border-radius: 50%;
-      background: #999;
-      flex: none;
-    }
-
-    .mcp-plugin__status-chip.working {
-      background: #732392;
-      color: #fff;
-    }
-
-    .dark .mcp-plugin__status-chip.working {
-      background: #5467F7;
-    }
-
-    .mcp-plugin__status-chip.working .dot {
-      background: #fff;
-      animation: mcp-pulse 1.3s ease-in-out infinite;
-    }
-
-    @keyframes mcp-pulse {
-
-      0%,
-      100% {
-        opacity: 1
-      }
-
-      50% {
-        opacity: 0.25
-      }
-    }
-
-    .mcp-plugin__activity-list {
-      flex: 1;
-      min-height: 90px;
-      overflow-y: auto;
-      overflow-x: hidden;
-      border: 1px solid #EDD0F8;
-      border-radius: 6px;
-      background: #fff;
-      padding: 4px;
-      width: 100%;
-      box-sizing: border-box;
-    }
-
-    .dark .mcp-plugin__activity-list {
-      border-color: #3d3d3d;
-      background: #232323;
-    }
-
-    .mcp-plugin__activity-empty {
-      padding: 18px 8px;
-      text-align: center;
-      font-size: 11px;
-      opacity: 0.45;
-    }
-
-    .mcp-plugin__activity-row {
-      display: grid;
-      grid-template-columns: 52px 12px 1fr auto;
-      gap: 6px;
-      align-items: baseline;
-      padding: 4px 5px;
-      border-radius: 4px;
-      font-size: 11px;
-      line-height: 1.4;
-      width: 100%;
-      box-sizing: border-box;
-      overflow-x: hidden;
-    }
-
-    .mcp-plugin__activity-row+.mcp-plugin__activity-row {
-      border-top: 1px solid rgba(128, 128, 128, 0.14);
-    }
-
-    .mcp-plugin__activity-row .t {
-      opacity: 0.45;
-      font-size: 10px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    }
-
-    .mcp-plugin__activity-row .i {
-      font-size: 10px;
-    }
-
-    .mcp-plugin__activity-row .m {
-      word-break: break-word;
-    }
-
-    .mcp-plugin__activity-row .d {
-      opacity: 0.45;
-      font-size: 10px;
-      white-space: nowrap;
-      font-variant-numeric: tabular-nums;
-    }
-
-    .mcp-plugin__activity-row.started .i {
-      color: #732392;
-    }
-
-    .dark .mcp-plugin__activity-row.started .i {
-      color: #8f9bff;
-    }
-
-    .mcp-plugin__activity-row.completed .i {
-      color: #2e9e57;
-    }
-
-    .mcp-plugin__activity-row.error .i {
-      color: #d94f36;
-    }
-
-    .mcp-plugin__activity-row.error .m {
-      color: #d94f36;
-    }
-
-    .mcp-plugin__activity-row .n {
-      grid-column: 3 / -1;
-      display: block;
-      opacity: 0.45;
-      font-size: 10px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    }
-
-    .mcp-plugin__activity-opts {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      font-size: 10px;
-      opacity: 0.75;
-    }
-
-    .mcp-plugin__activity-opts label {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      cursor: pointer;
-    }
-
-    .mcp-plugin__activity-opts input {
-      margin: 0;
-    }
-
-    .mcp-plugin__link {
-      background: none;
-      border: none;
-      padding: 0;
-      font: inherit;
-      font-size: 10px;
-      color: inherit;
-      opacity: 0.6;
-      text-decoration: underline;
-      cursor: pointer;
-    }
-
-    .mcp-plugin__link:hover {
-      opacity: 1;
-    }
-
-    /* ── Command history & reuse ───────────────────────────────────────── */
-    .mcp-plugin__activity-row {
-      transition: background-color 0.15s ease;
-    }
-
-    .mcp-plugin__activity-row.has-command {
-      cursor: pointer;
-    }
-
-    .mcp-plugin__activity-row.has-command:hover {
-      background-color: rgba(115, 35, 146, 0.08);
-    }
-
-    .dark .mcp-plugin__activity-row.has-command:hover {
-      background-color: rgba(84, 103, 247, 0.12);
-    }
-
-    .mcp-plugin__activity-row.has-command::after {
-      content: attr(data-copy-hint);
-      position: absolute;
-      bottom: 20px;
-      left: 50%;
-      transform: translateX(-50%);
-      background-color: #223005;
-      color: #fff;
-      padding: 4px 8px;
-      border-radius: 4px;
-      font-size: 9px;
-      font-weight: normal;
-      white-space: nowrap;
-      opacity: 0;
-      visibility: hidden;
-      transition: opacity 0.15s, visibility 0.15s;
-      pointer-events: none;
-      z-index: 100;
-    }
-
-    .dark .mcp-plugin__activity-row.has-command::after {
-      background-color: #3d3d3d;
-    }
-
-    .mcp-plugin__activity-row.has-command:hover::after {
-      opacity: 1;
-      visibility: visible;
-    }
-
-    .mcp-plugin__activity-row {
-      position: relative;
-    }
-
-    /* ── Recent commands quick access ──────────────────────────────────── */
-    .mcp-plugin__recent-command-btn {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      padding: 4px 8px;
-      border-radius: 3px;
-      font-size: 10px;
-      background: #fff;
-      border: 1px solid #ddd;
-      color: #400B55;
-      cursor: pointer;
-      transition: all 0.15s ease;
-      white-space: nowrap;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    }
-
-    .dark .mcp-plugin__recent-command-btn {
-      background: #2a2a2a;
-      border-color: #444;
-      color: #ddd;
-    }
-
-    .mcp-plugin__recent-command-btn:hover {
-      background: #732392;
-      color: #fff;
-      border-color: #732392;
-    }
-
-    .dark .mcp-plugin__recent-command-btn:hover {
-      background: #5467F7;
-      border-color: #5467F7;
-      color: #fff;
-    }
-
-    .mcp-plugin__recent-command-btn::before {
-      content: "📋";
-      font-size: 9px;
-    }
-
-    /* ── Operations Menu ────────────────────────────────────────────── */
-    .mcp-plugin__operations {
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-      padding: 12px;
-      border-radius: 6px;
-      background: rgba(115, 35, 146, 0.04);
-      border-left: 3px solid #732392;
-      width: 100%;
-      box-sizing: border-box;
-      overflow-x: hidden;
-    }
-
-    .dark .mcp-plugin__operations {
-      background: rgba(84, 103, 247, 0.04);
-      border-left-color: #5467F7;
-    }
-
-    .mcp-plugin__operations-title {
-      font-size: 11px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-      opacity: 0.7;
-      margin: 0;
-    }
-
-    .mcp-plugin__operations-search {
-      display: flex;
-      gap: 6px;
-      width: 100%;
-      box-sizing: border-box;
-    }
-
-    .mcp-plugin__operations-search input {
-      flex: 1;
-      padding: 6px 8px;
-      border-radius: 4px;
-      border: 1px solid rgba(115, 35, 146, 0.2);
-      background: rgba(255, 255, 255, 0.5);
-      color: #400B55;
-      font-size: 11px;
-      width: 100%;
-      box-sizing: border-box;
-    }
-
-    .dark .mcp-plugin__operations-search input {
-      border-color: rgba(84, 103, 247, 0.3);
-      background: rgba(50, 50, 50, 0.8);
-      color: #ddd;
-    }
-
-    .mcp-plugin__operations-search input::placeholder {
-      opacity: 0.5;
-    }
-
-    .mcp-plugin__operations-tabs {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 4px;
-      font-size: 10px;
-    }
-
-    .mcp-plugin__operations-tab {
-      padding: 4px 8px;
-      border-radius: 3px;
-      border: 1px solid rgba(115, 35, 146, 0.3);
-      background: transparent;
-      color: #400B55;
-      cursor: pointer;
-      transition: all 0.15s ease;
-      font-weight: 500;
-    }
-
-    .dark .mcp-plugin__operations-tab {
-      border-color: rgba(84, 103, 247, 0.3);
-      color: #ddd;
-    }
-
-    .mcp-plugin__operations-tab:hover,
-    .mcp-plugin__operations-tab.active {
-      background: #732392;
-      color: #fff;
-      border-color: #732392;
-    }
-
-    .dark .mcp-plugin__operations-tab:hover,
-    .dark .mcp-plugin__operations-tab.active {
-      background: #5467F7;
-      border-color: #5467F7;
-      color: #fff;
-    }
-
-    .mcp-plugin__operations-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 8px;
-      width: 100%;
-      box-sizing: border-box;
-    }
-
-    .mcp-plugin__operation-item {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-      padding: 8px;
-      border-radius: 4px;
-      background: #fff;
-      border: 1px solid #E8DFF5;
-      cursor: pointer;
-      transition: all 0.15s ease;
-      width: 100%;
-      box-sizing: border-box;
-      overflow: hidden;
-    }
-
-    .dark .mcp-plugin__operation-item {
-      background: #2a2a2a;
-      border-color: #3d3d3d;
-    }
-
-    .mcp-plugin__operation-item:hover {
-      background: #f8f5fc;
-      border-color: #732392;
-      transform: translateY(-2px);
-      box-shadow: 0 2px 8px rgba(115, 35, 146, 0.12);
-    }
-
-    .dark .mcp-plugin__operation-item:hover {
-      background: #333;
-      border-color: #5467F7;
-      box-shadow: 0 2px 8px rgba(84, 103, 247, 0.12);
-    }
-
-    .mcp-plugin__operation-header {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-
-    .mcp-plugin__operation-icon {
-      font-size: 14px;
-    }
-
-    .mcp-plugin__operation-name {
-      font-size: 11px;
-      font-weight: 600;
-      color: #400B55;
-    }
-
-    .dark .mcp-plugin__operation-name {
-      color: #fff;
-    }
-
-    .mcp-plugin__operation-description {
-      font-size: 9px;
-      opacity: 0.65;
-      line-height: 1.3;
-    }
-
-    .mcp-plugin__operation-action {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      padding: 4px 6px;
-      border-radius: 3px;
-      background: #732392;
-      color: #fff;
-      border: none;
-      font-size: 9px;
-      cursor: pointer;
-      transition: all 0.15s ease;
-      align-self: flex-start;
-      font-weight: 500;
-    }
-
-    .dark .mcp-plugin__operation-action {
-      background: #5467F7;
-    }
-
-    .mcp-plugin__operation-action:hover {
-      background: #5a1a6f;
-      transform: scale(1.05);
-    }
-
-    .dark .mcp-plugin__operation-action:hover {
-      background: #4758d9;
-    }
-
-    .mcp-plugin__operation-action::before {
-      content: "📋";
-      font-size: 8px;
-    }
-
-    .mcp-plugin__operations-empty {
-      padding: 12px 8px;
-      text-align: center;
-      font-size: 10px;
-      opacity: 0.5;
-    }
-
-    /* ── Tabbed Interface ───────────────────────────────────────────── */
-    .mcp-plugin__tabs-container {
-      display: flex;
-      gap: 0;
-      border-bottom: 1px solid #E8DFF5;
-      margin: -16px -16px 0 -16px;
-      width: calc(100% + 32px);
-      box-sizing: border-box;
-      overflow-x: hidden;
-      padding: 0;
-    }
-
-    .dark .mcp-plugin__tabs-container {
-      border-bottom-color: #3d3d3d;
-    }
-
-    .mcp-plugin__tab {
-      flex: 1;
-      min-width: 0;
-      padding: 14px 16px;
-      border: none;
-      background: transparent;
-      color: #666;
-      cursor: pointer;
-      font-size: 13px;
-      font-weight: 500;
-      border-bottom: 2px solid transparent;
-      transition: all 0.2s ease;
-      position: relative;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 6px;
-    }
-
-    .dark .mcp-plugin__tab {
-      color: #999;
-    }
-
-    .mcp-plugin__tab:hover {
-      background: rgba(115, 35, 146, 0.04);
-      color: #732392;
-    }
-
-    .dark .mcp-plugin__tab:hover {
-      background: rgba(84, 103, 247, 0.04);
-      color: #5467F7;
-    }
-
-    .mcp-plugin__tab.active {
-      color: #732392;
-      border-bottom-color: #732392;
-      font-weight: 600;
-    }
-
-    .dark .mcp-plugin__tab.active {
-      color: #5467F7;
-      border-bottom-color: #5467F7;
-    }
-
-    .mcp-plugin__tab-icon {
-      font-size: 16px;
-      display: flex;
-      align-items: center;
-    }
-
-    /* Tab content sections */
-    .mcp-plugin__tab-content {
-      display: none;
-      flex-direction: column;
-      gap: 16px;
-      overflow-y: auto;
-      overflow-x: hidden;
-      flex: 1;
-      min-height: 0;
-      padding: 16px;
-      padding-top: 16px;
-      width: 100%;
-      box-sizing: border-box;
-    }
-
-    .mcp-plugin__tab-content.active {
-      display: flex;
-    }
-
-    .mcp-plugin__main-container {
-      display: flex;
-      flex-direction: column;
-      gap: 0;
-      flex: 1;
-      min-height: 0;
-      padding: 0;
-    }
-
-    /* Header and tab bar keep their natural height at any window size; only
-       the content area gives and takes. */
-    .mcp-plugin__header,
-    .mcp-plugin__tabs-container {
-      flex-shrink: 0;
-    }
-
-    /* Dark mode adjustments for tabs */
-    .dark .mcp-plugin__tabs-container {
-      border-bottom-color: #3d3d3d;
-    }
-
-    .dark .mcp-plugin__tab-content {
-      padding: 16px;
-      padding-top: 16px;
-    }
-
   </style>
 </head>
 
-<body class="dark">
-  <div class="container mcp-plugin" id="mcp-plugin-container">
-    <div class="mcp-plugin__resize-handle" id="resize-handle"></div>
-    <div class="mcp-plugin__mode">
-      <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="#400b55" class="mcp-plugin__mode-moon hidden"
-        viewBox="0 -960 960 960">
-        <path
-          d="M483.11-116q-76.3 0-143.05-28.93-66.76-28.93-116.48-78.65t-78.65-116.48Q116-406.81 116-483.11q0-125.27 75.12-223.93 75.11-98.65 198.19-129.65-10.08 96.31 20.34 181.27 30.43 84.96 97.12 151.65 64.69 64.69 151.65 94.62 86.96 29.92 178.27 19.84-29.38 121.08-128.85 197.19Q608.38-116 483.11-116m-.11-52q88 0 164-45t115-122.11q-83-5.01-158.5-39.56T469-468.3q-60-60.08-94-134.89T335-762q-77 41-122 116.18-45 75.19-45 162.82 0 131.25 91.88 223.12Q351.75-168 483-168m-14-300.38" />
-      </svg>
-      <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="#fff" class="mcp-plugin__mode-sun"
-        viewBox="0 -960 960 960">
-        <path
-          d="M454-794.31V-902h52v107.69zM454-58v-107.69h52V-58zm340.31-396v-52H902v52zM58-454v-52h107.69v52zm660.31-227.15-37.16-37.16L759-798.38 798.38-759zM202-162.62 162.62-202l79.07-76.85 37.16 37.16zm557 0-77.85-79.07 37.16-37.16L798.38-202zM241.69-681.15 162.62-759 202-798.38l76.85 80.07zm82.54 356.92Q260-388.46 260-480t64.23-155.77T480-700t155.77 64.23T700-480t-64.23 155.77T480-260t-155.77-64.23M599-360.5q49-49.5 49-119.75 0-70.24-48.75-119-48.76-48.75-119-48.75Q410-648 361-599.25q-49 48.76-49 119 0 70.25 48.75 119.75 48.76 49.5 119 49.5Q550-311 599-360.5M481-481" />
-      </svg>
-    </div>
-    <div class="header mcp-plugin__header">
-      <h1 class="mcp-plugin__header-title">Claude Talk to Figma</h1>
-      <p class="mcp-plugin__header-description">AI agents reading and modifing Figma designs</p>
-    </div>
+<body>
+  <div class="panel" id="mcp-plugin-container">
 
-    <!-- Tab Navigation -->
-    <div class="mcp-plugin__tabs-container">
-      <button class="mcp-plugin__tab active" data-tab="connection">
-        Connect
-      </button>
-      <button class="mcp-plugin__tab" data-tab="operations">
-        Operations
-      </button>
-      <button class="mcp-plugin__tab" data-tab="activity">
-        Activity
-      </button>
-      <button class="mcp-plugin__tab" data-tab="settings">
-        Settings
-      </button>
-    </div>
+    <header class="panel__bar">
+      <div class="panel__mark">C</div>
+      <div class="panel__name">Claude Talk to Figma</div>
+      <div class="panel__version">v1.2.0</div>
+      <div class="panel__bar-right">
+        <span class="chip">
+          <span class="dot" id="conn-dot" data-state="off"></span>
+          <span id="conn-chip-text">Idle</span>
+        </span>
+        <button class="icon-btn" id="btn-theme" type="button" title="Toggle theme" aria-label="Toggle theme">
+          <span class="theme-orb"></span>
+        </button>
+        <button class="icon-btn icon-btn--close" id="btn-close" type="button" title="Close plugin"
+          aria-label="Close plugin">&times;</button>
+      </div>
+    </header>
 
-    <div class="content mcp-plugin__content mcp-plugin__main-container">
+    <nav class="segments">
+      <button class="segment active" data-tab="connection" type="button">Connect</button>
+      <button class="segment" data-tab="operations" type="button">Operations</button>
+      <button class="segment" data-tab="activity" type="button">Activity</button>
+      <button class="segment" data-tab="settings" type="button">Settings</button>
+    </nav>
+
+    <main class="panel__body">
 
       <!-- Tab 1: Connection -->
-      <div id="tab-connection" class="mcp-plugin__tab-content active">
-        <div id="connection-status" class="disconnected mcp-plugin__connection-status">
-          Disconnected from server…<br>Try to reconnect clicking the button
-        </div>
-        <div class="mcp-plugin__content-activity">
-          <div id="progress-container" class="hidden mcp-plugin__progress">
-            <div class="mcp-plugin__progress-bar">
-              <div id="progress-bar" class="mcp-plugin__progress-bar-fill"></div>
-            </div>
-            <div class="mcp-plugin__progress-indicators">
-              <div id="progress-status">Not started</div>
-              <div id="progress-message" class="mcp-plugin__progress-message">No operation in progress</div>
-              <div id="progress-percentage">0%</div>
-            </div>
+      <section id="tab-connection" class="mcp-plugin__tab-content active">
+        <div class="status-card">
+          <span class="dot dot--lg" id="conn-dot-lg" data-state="off"></span>
+          <div id="connection-status" class="mcp-plugin__connection-status disconnected">
+            Not connected — start the socket bridge, then connect.
           </div>
-          <button id="btn-connect" class="mcp-plugin__button mcp-plugin__button--primary">Connect</button>
-          <button id="btn-disconnect" class="mcp-plugin__button mcp-plugin__button--secondary" disabled>
-            Disconnect
-          </button>
+          <div class="status-card__actions">
+            <button id="btn-connect" class="btn btn--primary" type="button">Connect</button>
+            <button id="btn-disconnect" class="btn btn--ghost" type="button" disabled>Disconnect</button>
+          </div>
         </div>
 
-        <div
-          style="margin-top: 16px; padding: 12px; border-radius: 6px; background: rgba(115, 35, 146, 0.04); border-left: 3px solid #732392;">
-          <div style="font-size: 11px; font-weight: 600; margin-bottom: 8px; opacity: 0.7; text-transform: uppercase;">
-            📝 Connection Info</div>
-          <p style="font-size: 10px; margin: 0 0 8px 0; opacity: 0.7; line-height: 1.4;">
-            To connect Claude to Figma, get your channel ID from the connection status above, then use it in Claude's
-            chat interface.
-          </p>
+        <div id="progress-container" class="hidden mcp-plugin__progress">
+          <div class="mcp-plugin__progress-bar">
+            <div id="progress-bar" class="mcp-plugin__progress-bar-fill"></div>
+          </div>
+          <div class="mcp-plugin__progress-indicators">
+            <div id="progress-status">Not started</div>
+            <div id="progress-message" class="mcp-plugin__progress-message">No operation in progress</div>
+            <div id="progress-percentage">0%</div>
+          </div>
         </div>
-      </div>
+
+        <div class="stats">
+          <div class="card">
+            <div class="stat__value" id="stat-nodes">00</div>
+            <div class="stat__label">Nodes touched</div>
+          </div>
+          <div class="card">
+            <div class="stat__value" id="stat-ops">00</div>
+            <div class="stat__label">Operations run</div>
+          </div>
+          <div class="card">
+            <div class="stat__value" id="stat-uptime">00:00</div>
+            <div class="stat__label">Session</div>
+          </div>
+        </div>
+
+        <div class="note" style="margin-top:12px">
+          Start the socket bridge, then paste the channel ID into Claude. The agent joins the same channel and every
+          edit it makes is mirrored back into the activity feed.
+        </div>
+      </section>
 
       <!-- Tab 2: Operations -->
-      <div id="tab-operations" class="mcp-plugin__tab-content">
-        <div class="mcp-plugin__operations">
-          <h3 class="mcp-plugin__operations-title">⚡ Quick Operations</h3>
-
-          <div class="mcp-plugin__operations-search">
-            <input id="operations-search" type="text" placeholder="Search operations..." style="flex: 1;">
-          </div>
-
-          <div class="mcp-plugin__operations-tabs" id="operations-categories">
-            <!-- Populated dynamically -->
-          </div>
-
-          <div class="mcp-plugin__operations-grid" id="operations-grid">
-            <!-- Populated dynamically -->
-          </div>
+      <section id="tab-operations" class="mcp-plugin__tab-content">
+        <input id="operations-search" class="input" type="text" placeholder="Search operations" />
+        <div class="mcp-plugin__operations-tabs" id="operations-categories">
+          <!-- Populated dynamically -->
         </div>
-      </div>
+        <div class="mcp-plugin__operations-grid" id="operations-grid">
+          <!-- Populated dynamically -->
+        </div>
+      </section>
 
       <!-- Tab 3: Activity -->
-      <div id="tab-activity" class="mcp-plugin__tab-content">
+      <section id="tab-activity" class="mcp-plugin__tab-content">
         <div class="mcp-plugin__activity">
           <div class="mcp-plugin__activity-head">
-            <h2 class="mcp-plugin__activity-title">Live activity</h2>
+            <h2 class="section-title">Live activity</h2>
             <span class="mcp-plugin__activity-spacer"></span>
             <span id="activity-chip" class="mcp-plugin__status-chip">
               <span class="dot"></span><span id="activity-chip-text">Idle</span>
             </span>
-            <button id="btn-clear-activity" class="mcp-plugin__link" type="button">Clear</button>
+            <button id="btn-clear-activity" class="link-btn" type="button">Clear</button>
           </div>
 
-          <div id="recent-commands" class="mcp-plugin__recent-commands"
-            style="display: none; margin-bottom: 8px; padding: 8px; border-radius: 4px; background: rgba(115, 35, 146, 0.06); border-left: 3px solid #732392;">
-            <div
-              style="font-size: 10px; font-weight: 600; margin-bottom: 6px; opacity: 0.7; text-transform: uppercase;">📌
-              Recent Commands</div>
-            <div id="recent-commands-list" style="display: flex; flex-wrap: wrap; gap: 4px;">
+          <div id="recent-commands" class="mcp-plugin__recent-commands" style="display:none">
+            <div class="mcp-plugin__recent-commands-title">Recent commands</div>
+            <div id="recent-commands-list" style="display:flex;flex-wrap:wrap;gap:6px">
               <!-- Populated dynamically -->
             </div>
           </div>
 
           <div id="activity-list" class="mcp-plugin__activity-list">
             <div class="mcp-plugin__activity-empty">
-              No activity yet. Actions will appear here as Claude works.
+              No activity yet — actions appear here as Claude works.
             </div>
           </div>
 
           <div class="mcp-plugin__activity-opts">
-            <label
+            <label class="switch"
               title="Draw a moving cursor on the canvas that travels to each element as it is edited. Everyone with the file open sees it.">
-              <input type="checkbox" id="opt-cursor"> Live cursor
+              <input type="checkbox" data-opt="cursor" />
+              <span class="switch__box"><span class="switch__knob"></span></span>
+              <span>Live cursor</span>
             </label>
-            <label
+            <label class="switch"
               title="Select each node as it is changed, so collaborators watching the file see what is being edited">
-              <input type="checkbox" id="opt-highlight" checked> Highlight nodes
+              <input type="checkbox" data-opt="highlight" checked />
+              <span class="switch__box"><span class="switch__knob"></span></span>
+              <span>Highlight nodes</span>
             </label>
-            <label
+            <label class="switch"
               title="Write a live status frame onto the canvas so anyone with the file open can follow progress. Adds nodes to your document.">
-              <input type="checkbox" id="opt-overlay"> Canvas overlay
+              <input type="checkbox" data-opt="overlay" />
+              <span class="switch__box"><span class="switch__knob"></span></span>
+              <span>Canvas overlay</span>
             </label>
-            <label title="Pan and zoom the canvas to follow each change">
-              <input type="checkbox" id="opt-follow"> Follow viewport
+            <label class="switch" title="Pan and zoom the canvas to follow each change">
+              <input type="checkbox" data-opt="follow" />
+              <span class="switch__box"><span class="switch__knob"></span></span>
+              <span>Follow viewport</span>
             </label>
           </div>
-
         </div>
-      </div>
+      </section>
 
       <!-- Tab 4: Settings -->
-      <div id="tab-settings" class="mcp-plugin__tab-content">
-        <div style="display: flex; flex-direction: column; gap: 12px;">
-          <div
-            style="padding: 12px; border-radius: 6px; background: rgba(115, 35, 146, 0.04); border-left: 3px solid #732392;">
-            <div
-              style="font-size: 11px; font-weight: 600; margin-bottom: 8px; opacity: 0.7; text-transform: uppercase;">
-              👁️ Display Options</div>
-            <div class="mcp-plugin__activity-opts">
-              <label
-                title="Draw a moving cursor on the canvas that travels to each element as it is edited. Everyone with the file open sees it.">
-                <input type="checkbox" id="opt-cursor"> Live cursor
-              </label>
-              <label
-                title="Select each node as it is changed, so collaborators watching the file see what is being edited">
-                <input type="checkbox" id="opt-highlight" checked> Highlight nodes
-              </label>
-              <label
-                title="Write a live status frame onto the canvas so anyone with the file open can follow progress. Adds nodes to your document.">
-                <input type="checkbox" id="opt-overlay"> Canvas overlay
-              </label>
-              <label title="Pan and zoom the canvas to follow each change">
-                <input type="checkbox" id="opt-follow"> Follow viewport
-              </label>
-            </div>
-          </div>
-
-          <div
-            style="padding: 12px; border-radius: 6px; background: rgba(115, 35, 146, 0.04); border-left: 3px solid #732392;">
-            <div
-              style="font-size: 11px; font-weight: 600; margin-bottom: 8px; opacity: 0.7; text-transform: uppercase;">📄
-              Figma File Configuration</div>
-            <div class="mcp-plugin__file-key" style="display: flex; flex-direction: column; gap: 4px; font-size: 10px;">
-              <div style="display: flex; align-items: center; justify-content: space-between;">
-                <span style="opacity: 0.7; font-weight: 500;">File URL or Key (for REST fallback):</span>
-                <span id="file-key-status" style="font-size: 9px; opacity: 0.5;">Auto</span>
-              </div>
-              <div style="display: flex; gap: 6px;">
-                <input id="input-file-key" type="text" placeholder="Paste figma.com/design/... URL or key"
-                  style="flex: 1; padding: 4px 6px; border-radius: 4px; border: 1px solid rgba(120,120,120,0.3); background: transparent; color: inherit; font-size: 10px;" />
-                <button id="btn-set-file-key" type="button"
-                  style="padding: 4px 8px; border-radius: 4px; border: 1px solid #732392; background: #732392; color: #fff; font-size: 10px; cursor: pointer;">Save</button>
-              </div>
-            </div>
-          </div>
-
-          <div
-            style="padding: 12px; border-radius: 6px; background: rgba(115, 35, 146, 0.04); border-left: 3px solid #732392;">
-            <div
-              style="font-size: 11px; font-weight: 600; margin-bottom: 8px; opacity: 0.7; text-transform: uppercase;">ℹ️
-              About</div>
-            <div style="font-size: 10px; opacity: 0.7; line-height: 1.5;">
-              <strong>Claude Talk to Figma MCP</strong><br>
-              AI-powered design agent for Figma<br>
-              <a href="https://github.com/litoondev/claude-talk-to-figma-mcp-main" target="_blank"
-                style="color: #732392; text-decoration: none;">📖 Documentation</a>
-            </div>
-          </div>
+      <section id="tab-settings" class="mcp-plugin__tab-content">
+        <h2 class="section-title">Display options</h2>
+        <div class="settings-grid">
+          <label class="switch">
+            <input type="checkbox" data-opt="cursor" />
+            <span class="switch__box"><span class="switch__knob"></span></span>
+            <span>
+              <span class="switch__label">Live cursor</span>
+              <span class="switch__note" style="display:block">A gliding pill showing the agent's current action.</span>
+            </span>
+          </label>
+          <label class="switch">
+            <input type="checkbox" data-opt="highlight" checked />
+            <span class="switch__box"><span class="switch__knob"></span></span>
+            <span>
+              <span class="switch__label">Highlight nodes</span>
+              <span class="switch__note" style="display:block">Selection jumps to each edited element.</span>
+            </span>
+          </label>
+          <label class="switch">
+            <input type="checkbox" data-opt="overlay" />
+            <span class="switch__box"><span class="switch__knob"></span></span>
+            <span>
+              <span class="switch__label">Canvas overlay</span>
+              <span class="switch__note" style="display:block">Status frame pinned to the canvas corner.</span>
+            </span>
+          </label>
+          <label class="switch">
+            <input type="checkbox" data-opt="follow" />
+            <span class="switch__box"><span class="switch__knob"></span></span>
+            <span>
+              <span class="switch__label">Follow viewport</span>
+              <span class="switch__note" style="display:block">Pan the canvas to keep the work in frame.</span>
+            </span>
+          </label>
         </div>
-      </div>
 
-    </div>
+        <h2 class="section-title" style="margin-top:18px">Figma file</h2>
+        <div class="file-key-row">
+          <input id="input-file-key" class="input" type="text"
+            placeholder="Paste a figma.com/design/… URL or key" />
+          <button id="btn-set-file-key" class="btn btn--primary" type="button">Save</button>
+        </div>
+        <div class="file-key-hint">
+          Detected automatically while the plugin is open — set it only for REST fallback.
+          <span id="file-key-status">Auto</span>
+        </div>
+
+        <div class="about">
+          <div class="about__text">
+            <div class="section-title">Claude Talk to Figma MCP</div>
+            <div class="about__meta">Version 1.2.0 · socket bridge on port 3055</div>
+          </div>
+          <a href="https://github.com/litoondev/claude-talk-to-figma-mcp-main" target="_blank">Documentation</a>
+        </div>
+      </section>
+
+    </main>
+
+    <div class="mcp-plugin__resize-handle" id="resize-handle"></div>
   </div>
 
   <script>
@@ -1239,8 +1159,7 @@
             title: 'Convert to Grid',
             description: 'Convert to Figma Grid with minimal layers',
             triggers: ['convert to grid', 'gridify'],
-            prompt: 'Convert this selection to a Figma Grid layout. Minimize layers while keeping design identical.',
-            icon: '📊'
+            prompt: 'Convert this selection to a Figma Grid layout. Minimize layers while keeping design identical.'
           },
           {
             id: 'rename_layers',
@@ -1248,8 +1167,7 @@
             title: 'Rename Layers',
             description: 'Semantic naming conventions (BEM-like)',
             triggers: ['rename layers', 'clean up layers'],
-            prompt: 'Rename all layers using professional frontend naming conventions (semantic HTML + BEM-like prefixes).',
-            icon: '📝'
+            prompt: 'Rename all layers using professional frontend naming conventions (semantic HTML + BEM-like prefixes).'
           },
           {
             id: 'make_responsive',
@@ -1257,8 +1175,7 @@
             title: 'Make Responsive',
             description: 'Adapt for tablet (768px) and mobile (320px)',
             triggers: ['make responsive', 'responsive'],
-            prompt: 'Make this design responsive for tablet (768px) and mobile (320px). Adapt layout without redesigning.',
-            icon: '📱'
+            prompt: 'Make this design responsive for tablet (768px) and mobile (320px). Adapt layout without redesigning.'
           },
           {
             id: 'optimize_layers',
@@ -1266,8 +1183,7 @@
             title: 'Optimize Layers',
             description: 'Remove wrappers and flatten structure',
             triggers: ['optimize layers', 'fewer layers'],
-            prompt: 'Optimize layer structure by removing unnecessary wrappers and empty frames.',
-            icon: '✨'
+            prompt: 'Optimize layer structure by removing unnecessary wrappers and empty frames.'
           },
           {
             id: 'design_system',
@@ -1275,8 +1191,7 @@
             title: 'Design System First',
             description: 'Reuse existing components & variables',
             triggers: ['design system', 'reuse'],
-            prompt: 'Inspect the local design system. Reuse existing components, variables, and styles before creating new elements.',
-            icon: '🎨'
+            prompt: 'Inspect the local design system. Reuse existing components, variables, and styles before creating new elements.'
           },
           {
             id: 'fix_typography',
@@ -1284,8 +1199,7 @@
             title: 'Fix Typography',
             description: 'Bind to text styles and ensure hierarchy',
             triggers: ['fix typography', 'text styles'],
-            prompt: 'Review and fix typography. Bind all text to existing text styles and ensure proper hierarchy.',
-            icon: '🔤'
+            prompt: 'Review and fix typography. Bind all text to existing text styles and ensure proper hierarchy.'
           },
           {
             id: 'audit_spacing',
@@ -1293,8 +1207,7 @@
             title: 'Audit Spacing',
             description: 'Standardize padding & gaps with tokens',
             triggers: ['audit spacing', 'spacing review'],
-            prompt: 'Audit spacing throughout. Use design tokens for padding, gaps, and margins. Fix inconsistencies.',
-            icon: '📐'
+            prompt: 'Audit spacing throughout. Use design tokens for padding, gaps, and margins. Fix inconsistencies.'
           },
           {
             id: 'hug_heights',
@@ -1302,8 +1215,7 @@
             title: 'Apply Hug Heights',
             description: 'Replace fixed heights with Hug Contents',
             triggers: ['hug height', 'hug contents'],
-            prompt: 'Convert fixed heights to Hug Contents for all content containers. Ensure responsive growth.',
-            icon: '📏'
+            prompt: 'Convert fixed heights to Hug Contents for all content containers. Ensure responsive growth.'
           }
         ];
 
@@ -1333,6 +1245,7 @@
             !this.searchQuery ||
             op.title.toLowerCase().includes(this.searchQuery) ||
             op.description.toLowerCase().includes(this.searchQuery) ||
+            op.category.toLowerCase().includes(this.searchQuery) ||
             op.triggers.some(t => t.includes(this.searchQuery));
 
           const matchesCategory =
@@ -1349,7 +1262,7 @@
 
     /**
      * ClaudeMCPPlugin Class
-     * Managed WebSocket connection, Figma communication, and UI state.
+     * Manages the WebSocket connection, Figma communication, and UI state.
      */
     class ClaudeMCPPlugin {
       constructor() {
@@ -1369,22 +1282,23 @@
           connectBtn: document.getElementById("btn-connect"),
           disconnectBtn: document.getElementById("btn-disconnect"),
           connectionStatus: document.getElementById("connection-status"),
+          connDot: document.getElementById("conn-dot"),
+          connDotLarge: document.getElementById("conn-dot-lg"),
+          connChipText: document.getElementById("conn-chip-text"),
           progressContainer: document.getElementById("progress-container"),
           progressBar: document.getElementById("progress-bar"),
           progressMessage: document.getElementById("progress-message"),
           progressStatus: document.getElementById("progress-status"),
           progressPercentage: document.getElementById("progress-percentage"),
-          modeToggle: document.querySelector(".mcp-plugin__mode"),
-          modeSun: document.querySelector(".mcp-plugin__mode-sun"),
-          modeMoon: document.querySelector(".mcp-plugin__mode-moon"),
+          themeBtn: document.getElementById("btn-theme"),
+          closeBtn: document.getElementById("btn-close"),
           activityList: document.getElementById("activity-list"),
           activityChip: document.getElementById("activity-chip"),
           activityChipText: document.getElementById("activity-chip-text"),
           clearActivityBtn: document.getElementById("btn-clear-activity"),
-          optCursor: document.getElementById("opt-cursor"),
-          optHighlight: document.getElementById("opt-highlight"),
-          optOverlay: document.getElementById("opt-overlay"),
-          optFollow: document.getElementById("opt-follow"),
+          statNodes: document.getElementById("stat-nodes"),
+          statOps: document.getElementById("stat-ops"),
+          statUptime: document.getElementById("stat-uptime"),
           container: document.getElementById("mcp-plugin-container"),
           resizeHandle: document.getElementById("resize-handle"),
         };
@@ -1412,6 +1326,10 @@
 
         // Track unique recent commands for quick access (latest first, max 10)
         this.recentCommands = { list: [], max: 10 };
+
+        // Session counters shown on the Connect tab. `nodes` is a set so the
+        // same node touched twice is still one node.
+        this.stats = { nodes: new Set(), ops: 0, connectedAt: null };
 
         this.init();
       }
@@ -1441,13 +1359,23 @@
           }
         });
 
-        // Mode toggle
-        this.ui.modeToggle.addEventListener("click", () => this.toggleMode());
+        // Theme + window chrome
+        this.ui.themeBtn.addEventListener("click", () => this.toggleTheme());
+        this.ui.closeBtn.addEventListener("click", () => {
+          parent.postMessage({ pluginMessage: { type: "close-plugin" } }, "*");
+        });
 
         // Activity controls
         this.ui.clearActivityBtn.addEventListener("click", () => this.clearActivity());
-        ["optCursor", "optHighlight", "optOverlay", "optFollow"].forEach((key) => {
-          this.ui[key].addEventListener("change", () => this.pushActivitySettings());
+
+        // The four display options appear twice — compact on Activity, with
+        // descriptions on Settings — so every checkbox writes to the whole
+        // group before the settings are pushed to the plugin core.
+        document.querySelectorAll("input[data-opt]").forEach((input) => {
+          input.addEventListener("change", () => {
+            this.setOpt(input.getAttribute("data-opt"), input.checked);
+            this.pushActivitySettings();
+          });
         });
 
         // File key controls
@@ -1467,29 +1395,65 @@
           });
         }
 
-        // Keeps the "working · 4s" elapsed counter ticking between events.
-        this.activity.elapsedTimer = setInterval(() => this.renderActivityChip(), 1000);
+        // Keeps the "working · 4s" elapsed counter and the session clock ticking
+        // between events.
+        this.activity.elapsedTimer = setInterval(() => {
+          this.renderActivityChip();
+          this.renderStats();
+        }, 1000);
+
+        this.renderStats();
 
         // Figma messages
         window.onmessage = (event) => this.handleFigmaMessage(event.data.pluginMessage);
+      }
+
+      // ── Display options ───────────────────────────────────────────────
+
+      optInputs(name) {
+        return Array.from(document.querySelectorAll(`input[data-opt="${name}"]`));
+      }
+
+      getOpt(name) {
+        const input = this.optInputs(name)[0];
+        return input ? input.checked : false;
+      }
+
+      setOpt(name, value) {
+        this.optInputs(name).forEach((input) => { input.checked = !!value; });
       }
 
       /**
        * Update the connection status UI
        */
       updateStatus(isConnected, message) {
+        const wasConnected = this.state.connected;
         this.state.connected = isConnected;
+
         this.ui.connectionStatus.innerHTML =
           message ||
           (isConnected
             ? "Connected to Claude MCP server"
             : "Not connected to Claude MCP server");
 
-        this.ui.connectionStatus.className = `mcp-plugin__connection-status ${isConnected ? "connected" : (message && message.includes("Connecting") ? "info" : "disconnected")
+        const connecting = !isConnected && !!message && message.indexOf("Connecting") !== -1;
+        this.ui.connectionStatus.className = `mcp-plugin__connection-status ${isConnected ? "connected" : (connecting ? "info" : "disconnected")
           }`;
 
         this.ui.connectBtn.disabled = isConnected;
         this.ui.disconnectBtn.disabled = !isConnected;
+
+        // Header chip and the status card's dot track the same three states.
+        const state = isConnected ? "on" : (connecting ? "wait" : "off");
+        this.ui.connDot.setAttribute("data-state", state);
+        this.ui.connDotLarge.setAttribute("data-state", state);
+        this.ui.connChipText.textContent =
+          isConnected ? "Connected" : (connecting ? "Connecting" : "Idle");
+
+        // Session clock runs from the moment the socket is live.
+        if (isConnected && !wasConnected) this.stats.connectedAt = Date.now();
+        if (!isConnected) this.stats.connectedAt = null;
+        this.renderStats();
       }
 
       /**
@@ -1503,7 +1467,6 @@
           }
 
           this.updateStatus(false, "Connecting...");
-          this.ui.connectionStatus.className = "mcp-plugin__connection-status info";
 
           this.state.serverPort = port;
           this.state.socket = new WebSocket(`ws://localhost:${port}`);
@@ -1532,7 +1495,7 @@
                   const channelName = data.channel;
                   this.updateStatus(
                     true,
-                    `Connected on port ${port}!<br>Copy the channel ID: <span class="mcp-plugin__channel-name" title="Click to copy">${channelName}</span>`
+                    `Connected on port ${port}. Copy the channel ID:<br><span class="mcp-plugin__channel-name" title="Click to copy">${channelName}</span>`
                   );
 
                   parent.postMessage(
@@ -1560,14 +1523,14 @@
           this.state.socket.onclose = () => {
             this.state.connected = false;
             this.state.socket = null;
-            this.updateStatus(false, "Disconnected from server…<br>Try to reconnect clicking the button");
+            this.updateStatus(false, "Disconnected — start the socket server, then reconnect.");
           };
 
           this.state.socket.onerror = (error) => {
             console.error("WebSocket error:", error);
-            this.updateStatus(false, "Connection error");
             this.state.connected = false;
             this.state.socket = null;
+            this.updateStatus(false, "Connection error");
           };
         } catch (error) {
           console.error("Connection error:", error);
@@ -1584,7 +1547,6 @@
       disconnect() {
         if (this.state.socket) {
           this.updateStatus(false, "Disconnecting...");
-          this.ui.connectionStatus.className = "mcp-plugin__connection-status info";
           this.state.socket.close();
           this.state.socket = null;
           this.state.connected = false;
@@ -1783,6 +1745,11 @@
         }
         this.activity.state = state || this.activity.state;
 
+        // Session counters. Only completed work counts as an operation, so a
+        // failure does not inflate the number.
+        (entry.nodeIds || []).forEach((id) => this.stats.nodes.add(id));
+        if (entry.kind === "completed") this.stats.ops += 1;
+
         // Track completed commands for quick access
         if (entry.command && entry.kind === "completed") {
           this.trackRecentCommand(entry.command);
@@ -1790,6 +1757,7 @@
 
         this.renderActivity();
         this.renderActivityChip();
+        this.renderStats();
       }
 
       /**
@@ -1829,13 +1797,27 @@
         return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
       }
 
+      /** Session counters on the Connect tab. */
+      renderStats() {
+        const pad = (n) => String(n).padStart(2, "0");
+        this.ui.statNodes.textContent = pad(this.stats.nodes.size);
+        this.ui.statOps.textContent = pad(this.stats.ops);
+
+        const seconds = this.stats.connectedAt
+          ? Math.max(0, Math.round((Date.now() - this.stats.connectedAt) / 1000))
+          : 0;
+        this.ui.statUptime.textContent =
+          `${pad(Math.floor(seconds / 60))}:${pad(seconds % 60)}`;
+      }
+
       renderActivity() {
         const entries = this.activity.entries;
 
         if (!entries.length) {
           this.ui.activityList.innerHTML =
-            '<div class="mcp-plugin__activity-empty">No activity yet. ' +
-            "Actions will appear here as Claude works.</div>";
+            '<div class="mcp-plugin__activity-empty">No activity yet — ' +
+            "actions appear here as Claude works.</div>";
+          this.renderRecentCommands();
           return;
         }
 
@@ -1867,7 +1849,7 @@
 
         // Add click handlers to rows with commands
         this.ui.activityList.querySelectorAll(".mcp-plugin__activity-row.has-command").forEach((row) => {
-          row.addEventListener("click", (e) => {
+          row.addEventListener("click", () => {
             const command = row.getAttribute("data-command");
             if (command) {
               this.copyCommandToClipboard(command);
@@ -1888,6 +1870,7 @@
       renderRecentCommands() {
         const recentPanel = document.getElementById("recent-commands");
         const recentList = document.getElementById("recent-commands-list");
+        if (!recentPanel || !recentList) return;
 
         if (!this.recentCommands.list.length) {
           recentPanel.style.display = "none";
@@ -1953,10 +1936,10 @@
       /** Reflect settings pushed from the plugin core into the checkboxes. */
       applyActivitySettingsToUi(settings) {
         if (!settings) return;
-        this.ui.optCursor.checked = !!settings.cursorEnabled;
-        this.ui.optHighlight.checked = !!settings.highlightEnabled;
-        this.ui.optOverlay.checked = !!settings.overlayEnabled;
-        this.ui.optFollow.checked = !!settings.followViewport;
+        this.setOpt("cursor", settings.cursorEnabled);
+        this.setOpt("highlight", settings.highlightEnabled);
+        this.setOpt("overlay", settings.overlayEnabled);
+        this.setOpt("follow", settings.followViewport);
       }
 
       /** Send checkbox state back to the plugin core, which persists it. */
@@ -1965,10 +1948,10 @@
           pluginMessage: {
             type: "set-activity-settings",
             settings: {
-              cursorEnabled: this.ui.optCursor.checked,
-              highlightEnabled: this.ui.optHighlight.checked,
-              overlayEnabled: this.ui.optOverlay.checked,
-              followViewport: this.ui.optFollow.checked,
+              cursorEnabled: this.getOpt("cursor"),
+              highlightEnabled: this.getOpt("highlight"),
+              overlayEnabled: this.getOpt("overlay"),
+              followViewport: this.getOpt("follow"),
             },
           },
         }, "*");
@@ -2086,7 +2069,7 @@
        * Initialize the tab system
        */
       initTabs() {
-        const tabs = document.querySelectorAll(".mcp-plugin__tab");
+        const tabs = document.querySelectorAll(".segment");
         const contents = document.querySelectorAll(".mcp-plugin__tab-content");
 
         tabs.forEach(tab => {
@@ -2120,7 +2103,7 @@
         const categories = this.operationsMenu.getCategories();
         categoriesContainer.innerHTML = categories.map(cat => {
           const isActive = cat === this.operationsMenu.selectedCategory;
-          return `<button class="mcp-plugin__operations-tab ${isActive ? 'active' : ''}" data-category="${cat}">${cat}</button>`;
+          return `<button class="mcp-plugin__operations-tab ${isActive ? 'active' : ''}" data-category="${cat}" type="button">${cat}</button>`;
         }).join("");
 
         // Add category filter listeners
@@ -2155,18 +2138,16 @@
         const operations = this.operationsMenu.getFiltered();
 
         if (!operations.length) {
-          grid.innerHTML = '<div class="mcp-plugin__operations-empty">No operations match your search</div>';
+          grid.innerHTML = '<div class="mcp-plugin__operations-empty">No operation matches that search.</div>';
           return;
         }
 
         grid.innerHTML = operations.map(op => `
             <div class="mcp-plugin__operation-item" data-operation-id="${op.id}">
-              <div class="mcp-plugin__operation-header">
-                <span class="mcp-plugin__operation-icon">${op.icon}</span>
-                <span class="mcp-plugin__operation-name">${this.escapeHtml(op.title)}</span>
-              </div>
+              <div class="mcp-plugin__operation-category">${this.escapeHtml(op.category)}</div>
+              <div class="mcp-plugin__operation-name">${this.escapeHtml(op.title)}</div>
               <div class="mcp-plugin__operation-description">${this.escapeHtml(op.description)}</div>
-              <button class="mcp-plugin__operation-action" data-operation-id="${op.id}">Copy prompt</button>
+              <button class="mcp-plugin__operation-action" data-operation-id="${op.id}" type="button">Copy prompt</button>
             </div>
           `).join("");
 
@@ -2177,7 +2158,7 @@
             const operationId = btn.getAttribute("data-operation-id");
             const operation = this.operationsMenu.operations.find(op => op.id === operationId);
             if (operation) {
-              this.copyOperationPrompt(operation);
+              this.copyOperationPrompt(operation, btn);
             }
           });
         });
@@ -2186,9 +2167,14 @@
       /**
        * Copy operation prompt to clipboard
        */
-      copyOperationPrompt(operation) {
+      copyOperationPrompt(operation, button) {
         const prompt = `${operation.title}\n\n${operation.prompt}`;
         this.copyToClipboard(prompt);
+
+        if (button) {
+          button.textContent = "Prompt copied";
+          setTimeout(() => { button.textContent = "Copy prompt"; }, 1400);
+        }
 
         parent.postMessage({
           pluginMessage: {
@@ -2201,16 +2187,10 @@
       /**
        * Toggle between dark and light mode
        */
-      toggleMode() {
-        const isDark = document.body.classList.toggle("dark");
-
-        if (isDark) {
-          this.ui.modeSun.classList.remove("hidden");
-          this.ui.modeMoon.classList.add("hidden");
-        } else {
-          this.ui.modeSun.classList.add("hidden");
-          this.ui.modeMoon.classList.remove("hidden");
-        }
+      toggleTheme() {
+        const root = document.documentElement;
+        const next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
+        root.setAttribute("data-theme", next);
       }
 
       /**
@@ -2220,7 +2200,7 @@
         parent.postMessage({
           pluginMessage: {
             type: "notify",
-            message: `Channel ID copied: ${text}`,
+            message: `Copied: ${text}`,
           },
         }, "*");
       }

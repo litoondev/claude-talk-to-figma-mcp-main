@@ -71,6 +71,9 @@ export const CORE_TOOLS: readonly string[] = [
   "get_local_components",
   "scan_text_nodes",
   "export_node_as_image",
+  "export_assets",
+  "audit_generated_code",
+  "audit_structure_match",
   // creation
   "create_frame",
   "create_text",

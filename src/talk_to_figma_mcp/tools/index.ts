@@ -5,6 +5,9 @@ import { registerModificationTools } from "./modification-tools";
 import { registerTextTools } from "./text-tools";
 import { registerComponentTools } from "./component-tools";
 import { registerImageTools } from "./image-tools";
+import { registerAssetTools } from "./asset-tools";
+import { registerAuditTools } from "./audit-tools";
+import { registerStructureTools } from "./structure-tools";
 import { registerSvgTools } from "./svg-tools";
 import { registerVariableTools } from "./variable-tools";
 import { registerFigJamTools } from "./figjam-tools";
@@ -111,6 +114,10 @@ export function registerTools(server: McpServer): void {
     registerTextTools(server);
     registerComponentTools(server);
     registerImageTools(server);
+    registerAssetTools(server);
+    registerAuditTools(server);
+    // Figma-tree vs generated-DOM comparison — see tools/structure-tools.ts
+    registerStructureTools(server);
     registerSvgTools(server);
     registerVariableTools(server);
     registerFigJamTools(server);
@@ -149,6 +156,9 @@ export {
   registerTextTools,
   registerComponentTools,
   registerImageTools,
+  registerAssetTools,
+  registerAuditTools,
+  registerStructureTools,
   registerSvgTools,
   registerVariableTools,
   registerFigJamTools,
