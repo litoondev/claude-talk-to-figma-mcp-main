@@ -5,6 +5,13 @@
   <meta charset="utf-8" />
   <title>Claude MCP Plugin</title>
   <style>
+    /* The window is resizable, so every ancestor of the layout has to carry a
+       real height; a percentage height against an auto-height parent resolves
+       to auto and the flex chain below stops filling the window. */
+    html {
+      height: 100%;
+    }
+
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       margin: 0;
@@ -14,6 +21,9 @@
       background-color: #FDF8FF;
       overflow: hidden;
       width: 100%;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
       box-sizing: border-box;
       transition: padding 0.3s ease;
     }
@@ -24,34 +34,45 @@
 
     /* ── Resize & Window Management ───────────────────────────────────── */
     .mcp-plugin__resize-handle {
-      position: absolute;
+      position: fixed;
       bottom: 0;
       right: 0;
-      width: 24px;
-      height: 24px;
+      width: 16px;
+      height: 16px;
       cursor: nwse-resize;
-      background: linear-gradient(135deg, transparent 55%, rgba(115, 35, 146, 0.25) 55%);
-      opacity: 0;
-      transition: all 0.2s ease;
+      opacity: 0.45;
+      transition: opacity 0.2s ease;
       z-index: 100;
-      border-radius: 2px 0 0 0;
+      touch-action: none;
     }
 
-    .mcp-plugin:hover .mcp-plugin__resize-handle {
-      opacity: 0.6;
+    /* Two diagonal strokes, the usual "drag me" grip. */
+    .mcp-plugin__resize-handle::after {
+      content: "";
+      position: absolute;
+      inset: 3px;
+      background:
+        linear-gradient(135deg, transparent 43%, currentColor 43%, currentColor 57%, transparent 57%) no-repeat,
+        linear-gradient(135deg, transparent 43%, currentColor 43%, currentColor 57%, transparent 57%) no-repeat;
+      background-size: 100% 100%, 55% 55%;
+      background-position: 100% 100%, 100% 100%;
+      color: rgba(115, 35, 146, 0.75);
     }
 
-    .mcp-plugin__resize-handle:hover {
-      opacity: 1 !important;
-      background: linear-gradient(135deg, transparent 55%, rgba(115, 35, 146, 0.5) 55%);
+    .mcp-plugin__resize-handle:hover,
+    .mcp-plugin__resize-handle.is-resizing {
+      opacity: 1;
     }
 
-    .dark .mcp-plugin__resize-handle {
-      background: linear-gradient(135deg, transparent 55%, rgba(84, 103, 247, 0.25) 55%);
+    .dark .mcp-plugin__resize-handle::after {
+      color: rgba(255, 255, 255, 0.75);
     }
 
-    .dark .mcp-plugin__resize-handle:hover {
-      background: linear-gradient(135deg, transparent 55%, rgba(84, 103, 247, 0.5) 55%);
+    /* While dragging, the pointer must not select text or land on a button. */
+    body.is-resizing,
+    body.is-resizing * {
+      user-select: none !important;
+      cursor: nwse-resize !important;
     }
 
     .dark {
@@ -62,7 +83,7 @@
     .mcp-plugin__mode {
       position: absolute;
       bottom: -8px;
-      right: -4px;
+      right: 16px;
       cursor: pointer;
       transition: ease 0.2s;
       display: flex;
@@ -100,7 +121,9 @@
 
     /* Responsive width constraints */
     .mcp-plugin {
-      max-width: min(100%, 900px);
+      max-width: 100%;
+      flex: 1;
+      min-height: 0;
       padding: 16px;
     }
 
@@ -903,6 +926,7 @@
 
     .mcp-plugin__tab {
       flex: 1;
+      min-width: 0;
       padding: 14px 16px;
       border: none;
       background: transparent;
@@ -973,8 +997,16 @@
       display: flex;
       flex-direction: column;
       gap: 0;
-      height: 100%;
+      flex: 1;
+      min-height: 0;
       padding: 0;
+    }
+
+    /* Header and tab bar keep their natural height at any window size; only
+       the content area gives and takes. */
+    .mcp-plugin__header,
+    .mcp-plugin__tabs-container {
+      flex-shrink: 0;
     }
 
     /* Dark mode adjustments for tabs */
@@ -1357,17 +1389,21 @@
           resizeHandle: document.getElementById("resize-handle"),
         };
 
-        // Window resize state
+        // Window resize state. The limits mirror UI_SIZE in code.js, which
+        // clamps again on the main thread before calling figma.ui.resize().
         this.resizeState = {
           isResizing: false,
+          pointerId: null,
           startX: 0,
           startY: 0,
           startWidth: 0,
           startHeight: 0,
-          minWidth: 300,
-          minHeight: 200,
-          maxWidth: 1200,
-          maxHeight: 1200,
+          width: 0,
+          height: 0,
+          minWidth: 320,
+          minHeight: 320,
+          maxWidth: 2400,
+          maxHeight: 2400,
         };
 
         // Rendered activity entries, newest last. Bounded so a long session
@@ -1387,13 +1423,16 @@
         // Initialize operations menu
         this.initOperationsMenu();
 
-        // Apply saved window size
-        this.restoreWindowSize();
+        // The saved window size is restored by the main thread (code.js), which
+        // owns clientStorage and the only API that can resize the panel.
 
         // Event Listeners
         this.ui.connectBtn.addEventListener("click", () => this.connect());
         this.ui.disconnectBtn.addEventListener("click", () => this.disconnect());
-        this.ui.resizeHandle.addEventListener("mousedown", (e) => this.startResize(e));
+        // Pointer events (not mouse) so the drag keeps tracking when the cursor
+        // leaves the plugin iframe, and still ends if the button is released
+        // outside it.
+        this.ui.resizeHandle.addEventListener("pointerdown", (e) => this.startResize(e));
 
         // Clipboard feature using event delegation
         this.ui.connectionStatus.addEventListener("click", (e) => {
@@ -1629,91 +1668,104 @@
       // ── Window Resize Functionality ────────────────────────────────────
 
       /**
-       * Start resize operation
+       * Start a window resize drag.
+       *
+       * The size being dragged is the plugin window itself (window.inner*),
+       * not the container element: only the main thread can change the window,
+       * so each move posts the wanted size to code.js.
        */
       startResize(e) {
         e.preventDefault();
-        this.resizeState.isResizing = true;
-        this.resizeState.startX = e.clientX;
-        this.resizeState.startY = e.clientY;
-        this.resizeState.startWidth = this.ui.container.offsetWidth;
-        this.resizeState.startHeight = this.ui.container.offsetHeight;
 
-        // Bind context for event handlers
+        this.resizeState.isResizing = true;
+        this.resizeState.pointerId = e.pointerId;
+        this.resizeState.startX = e.screenX;
+        this.resizeState.startY = e.screenY;
+        this.resizeState.startWidth = window.innerWidth;
+        this.resizeState.startHeight = window.innerHeight;
+        this.resizeState.width = window.innerWidth;
+        this.resizeState.height = window.innerHeight;
+
         this.resizeMoveHandler = this.doResize.bind(this);
         this.resizeUpHandler = this.stopResize.bind(this);
 
-        document.addEventListener("mousemove", this.resizeMoveHandler);
-        document.addEventListener("mouseup", this.resizeUpHandler);
+        try {
+          this.ui.resizeHandle.setPointerCapture(e.pointerId);
+        } catch (err) {
+          // Capture is an optimisation; the window listeners below still work.
+        }
+
+        window.addEventListener("pointermove", this.resizeMoveHandler);
+        window.addEventListener("pointerup", this.resizeUpHandler);
+        window.addEventListener("pointercancel", this.resizeUpHandler);
+
+        this.ui.resizeHandle.classList.add("is-resizing");
+        document.body.classList.add("is-resizing");
       }
 
       /**
-       * Handle resize
+       * Handle one resize step.
        */
       doResize(e) {
         if (!this.resizeState.isResizing) return;
 
-        const deltaX = e.clientX - this.resizeState.startX;
-        const deltaY = e.clientY - this.resizeState.startY;
+        // screen coordinates, because client coordinates are relative to the
+        // iframe and the iframe is the thing being resized.
+        const deltaX = e.screenX - this.resizeState.startX;
+        const deltaY = e.screenY - this.resizeState.startY;
 
-        let newWidth = this.resizeState.startWidth + deltaX;
-        let newHeight = this.resizeState.startHeight + deltaY;
+        const width = Math.max(
+          this.resizeState.minWidth,
+          Math.min(this.resizeState.startWidth + deltaX, this.resizeState.maxWidth)
+        );
+        const height = Math.max(
+          this.resizeState.minHeight,
+          Math.min(this.resizeState.startHeight + deltaY, this.resizeState.maxHeight)
+        );
 
-        // Apply constraints
-        newWidth = Math.max(this.resizeState.minWidth, Math.min(newWidth, this.resizeState.maxWidth));
-        newHeight = Math.max(this.resizeState.minHeight, Math.min(newHeight, this.resizeState.maxHeight));
+        if (width === this.resizeState.width && height === this.resizeState.height) return;
 
-        this.ui.container.style.width = newWidth + "px";
-        this.ui.container.style.height = newHeight + "px";
-
-        // Save size preference
-        this.saveWindowSize(newWidth, newHeight);
+        this.resizeState.width = width;
+        this.resizeState.height = height;
+        this.sendResize(width, height, false);
       }
 
       /**
-       * Stop resize operation
+       * End the drag and persist the final size once.
        */
       stopResize() {
+        if (!this.resizeState.isResizing) return;
         this.resizeState.isResizing = false;
-        document.removeEventListener("mousemove", this.resizeMoveHandler);
-        document.removeEventListener("mouseup", this.resizeUpHandler);
-      }
 
-      /**
-       * Load window size from localStorage
-       */
-      loadWindowSize() {
+        window.removeEventListener("pointermove", this.resizeMoveHandler);
+        window.removeEventListener("pointerup", this.resizeUpHandler);
+        window.removeEventListener("pointercancel", this.resizeUpHandler);
+
         try {
-          const saved = localStorage.getItem("mcp-plugin-size");
-          if (saved) {
-            return JSON.parse(saved);
+          if (this.resizeState.pointerId !== null) {
+            this.ui.resizeHandle.releasePointerCapture(this.resizeState.pointerId);
           }
-        } catch (e) {
-          console.warn("Could not load window size:", e);
+        } catch (err) {
+          // Already released, e.g. on pointercancel.
         }
-        return { width: null, height: null };
+        this.resizeState.pointerId = null;
+
+        this.ui.resizeHandle.classList.remove("is-resizing");
+        document.body.classList.remove("is-resizing");
+
+        this.sendResize(this.resizeState.width, this.resizeState.height, true);
       }
 
       /**
-       * Save window size to localStorage
+       * Ask the main thread for a window size. `persist` marks the last message
+       * of a drag, the only one written to clientStorage.
        */
-      saveWindowSize(width, height) {
-        try {
-          localStorage.setItem("mcp-plugin-size", JSON.stringify({ width, height }));
-        } catch (e) {
-          console.warn("Could not save window size:", e);
-        }
-      }
-
-      /**
-       * Restore window size from saved preferences
-       */
-      restoreWindowSize() {
-        const { width, height } = this.loadWindowSize();
-        if (width && height) {
-          this.ui.container.style.width = width + "px";
-          this.ui.container.style.height = height + "px";
-        }
+      sendResize(width, height, persist) {
+        if (!width || !height) return;
+        parent.postMessage(
+          { pluginMessage: { type: "resize-ui", width: width, height: height, persist: !!persist } },
+          "*"
+        );
       }
 
       // ── Live activity feed ────────────────────────────────────────────

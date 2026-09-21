@@ -10,6 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **🪟 Resizable plugin window**: the panel is dragged to any size from the grip in its bottom-right corner, and reopens at the size it was left.
+  - The UI posts each drag step to the main thread, which is the only side that can call `figma.ui.resize`; the drag handle in `ui.html` previously resized an inner `<div>`, so the window itself never changed.
+  - Size is clamped to 320×320 and 2400×2400 on both sides, written to `figma.clientStorage` once per drag (on release, not on every mouse move), and re-applied on open.
+  - The drag uses pointer capture and screen coordinates, so it keeps tracking when the cursor leaves the plugin iframe and still ends when the button is released outside it.
+  - Layout follows the window: `html`/`body` carry a real height so the content area fills it and scrolls instead of being clipped, tabs shrink and wrap, and the grip is pinned to the window corner clear of the theme toggle. Measured at 320×320 through 1400×900: no overflow, nothing clipped.
 - **📐 Convert static designs to Auto Layout or Grid (`convert_layout`)**: turns free-positioned frames and groups into Auto Layout or a Figma Grid that renders exactly where the layers were, with as few frames as possible.
   - **Scope:** the given node, the selection, or the whole current page when nothing is selected.
   - **Analysis:** layers are read by their absolute bounds and split into rows and columns wherever their projections leave a gap. Gap and padding are calculated. When one gap cannot describe a stack (heading 8px above its text, the button 24px below), the closest layers are grouped first, so a row/column frame is added only where it is needed. Alignment must be exactly left/centre/right (top/centre/bottom) within 0.5px; anything else is refused with the layer names and the offset, never snapped.

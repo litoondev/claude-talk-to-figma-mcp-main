@@ -875,7 +875,14 @@ export function createMockFigma(options: MockFigmaOptions = {}) {
   return {
     mixed,
     showUI: () => undefined,
-    ui: { onmessage: null as unknown, postMessage: () => undefined },
+    // `resize` is modelled because the plugin calls it: the panel is
+    // user-resizable and re-applies its stored size on load. Tests that need
+    // to assert the size replace these with spies.
+    ui: {
+      onmessage: null as unknown,
+      postMessage: () => undefined,
+      resize: (_width: number, _height: number): void => undefined,
+    },
     on: () => undefined,
     notify: () => undefined,
     commitUndo: () => undefined,
@@ -887,8 +894,10 @@ export function createMockFigma(options: MockFigmaOptions = {}) {
     root: { children: [] },
     loadAllPagesAsync: async () => undefined,
     clientStorage: {
-      getAsync: async () => undefined,
-      setAsync: async () => undefined,
+      // Typed loosely on purpose: real clientStorage returns whatever was
+      // stored, so a test must be able to hand back a value.
+      getAsync: async (_key?: string): Promise<any> => undefined,
+      setAsync: async (_key?: string, _value?: any): Promise<void> => undefined,
     },
     getNodeByIdAsync: async (id: string) => nodeRegistry.get(id) ?? null,
     variables: {

@@ -1083,8 +1083,56 @@ function describeForLog(command, params) {
 }
 
 // Show UI
-figma.showUI(__html__, { width: 360, height: 520 });
+// The window is user-resizable (see the drag handle in ui.html). Figma has no
+// "remember my size" of its own, so the last size is kept in clientStorage and
+// re-applied here. clientStorage is async and showUI is not, so the panel opens
+// at the default size and is resized as soon as the stored size arrives.
+const UI_SIZE = {
+  defaultWidth: 360,
+  defaultHeight: 520,
+  minWidth: 320,
+  minHeight: 320,
+  maxWidth: 2400,
+  maxHeight: 2400,
+  storageKey: "mcp_ui_size",
+};
+
+function clampUiSize(width, height) {
+  const w = Math.round(Number(width));
+  const h = Math.round(Number(height));
+  if (isNaN(w) || isNaN(h)) return null;
+  return {
+    width: Math.max(UI_SIZE.minWidth, Math.min(w, UI_SIZE.maxWidth)),
+    height: Math.max(UI_SIZE.minHeight, Math.min(h, UI_SIZE.maxHeight)),
+  };
+}
+
+figma.showUI(__html__, { width: UI_SIZE.defaultWidth, height: UI_SIZE.defaultHeight });
 loadActivitySettings();
+restoreUiSize();
+
+// Re-apply the last window size the user dragged to.
+async function restoreUiSize() {
+  let saved;
+  try {
+    saved = await figma.clientStorage.getAsync(UI_SIZE.storageKey);
+  } catch (error) {
+    // A storage read that fails is not worth bothering the user about; the
+    // panel simply opens at its default size.
+    console.warn("Could not read stored UI size:", (error && error.message) || String(error));
+    return;
+  }
+  if (!saved) return;
+
+  const size = clampUiSize(saved.width, saved.height);
+  if (!size) return;
+
+  try {
+    figma.ui.resize(size.width, size.height);
+  } catch (error) {
+    console.warn("Could not restore UI size:", (error && error.message) || String(error));
+  }
+}
 
 // Plugin commands from UI
 figma.ui.onmessage = async (msg) => {
@@ -1095,6 +1143,25 @@ figma.ui.onmessage = async (msg) => {
     case "notify":
       figma.notify(msg.message);
       break;
+    case "resize-ui": {
+      // Sent continuously while the user drags the corner handle in ui.html.
+      const size = clampUiSize(msg.width, msg.height);
+      if (!size) break;
+      try {
+        figma.ui.resize(size.width, size.height);
+      } catch (error) {
+        figma.notify(`Could not resize the panel: ${(error && error.message) || String(error)}`);
+        break;
+      }
+      // Only the drag-end message persists, so a drag writes storage once
+      // instead of on every mouse move.
+      if (msg.persist) {
+        figma.clientStorage.setAsync(UI_SIZE.storageKey, size).catch((error) => {
+          console.warn("Could not save UI size:", (error && error.message) || String(error));
+        });
+      }
+      break;
+    }
     case "close-plugin":
       figma.closePlugin();
       break;

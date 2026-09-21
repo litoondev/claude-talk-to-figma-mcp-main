@@ -83,4 +83,25 @@ Read at the start of every change. Sweep at QA.
 - **Root cause:** the harness modelled `resize()` as "fixes both axes", and nothing modelled what switching a row to a column does to sizing. Replayed live on a temporary copy: a Fixed-width row became a Hug-width column, and `resize()` to the size it already had changed nothing. The plugin relied on that resize, so removing the empty wrapper shrank the section from 1859 to 889px. The harness also let a Hug frame ignore its Fill children, which Figma does not do.
 - **Guard:** set sizing explicitly (`pinFrameSize`) and never rely on a side effect of another call. Each harness behaviour that decides geometry carries a "confirmed live" note, and one without it is treated as a guess.
 - **QA test:** when a real conversion is put back, replay its steps on a temporary copy through the relay (`execute_code`, clone, delete in `finally`), snapshotting boxes and sizing after each step. Then encode the observed behaviour in the harness before fixing the plugin, so the fixture fails first.
-- **Recurred (same day):** # Partner Logo was put back as "Content would move". The harness did not model `strokesIncludedInLayout`, so a 1px top stroke counted in layout was measured as padding (61 instead of 60) and applied twice. Found the same way: read the node's layout properties live, replay the steps on a temporary copy, then encode the behaviour in the harness so the fixture fails first. **Stronger guard:** the probe that feeds a real-file fixture reads every property that changes where children render: padding, `strokesIncludedInLayout` with stroke weights and alignment, `itemReverseZIndex`, sizing, and positioning.
+- **Recurred (same day):** # Partner Logo was put back as "Content would move". The harness did not model `strokesIncludedInLayout`, so a 1px top stroke counted in layout was measured as padding (61 instead of 60) and applied twice. Found the same way: read the node's layout properties live, replay the steps on a temporary copy, then encode the behaviour in the harness so the fixture fails first. **Stronger guard:** the probe that feeds a real-file fixture reads every property that changes where children render: padding, `strokesIncludedInLayout` with stroke weights and alignment, `itemReverseZIndex`, sizing, and positioning.## L10 — A rendering tool used as a measurement tool
+
+- **Looked like:** the resizable-panel work was QA'd by rendering `ui.html` with
+  `chrome --headless --screenshot --window-size=360,520`. The picture showed the
+  Settings tab cut off and the status banner running past the right edge, which
+  looked like the responsive layout breaking at the default size. It was about to
+  be reported as a defect, and "fixed".
+- **Root cause:** `--window-size` with `--screenshot` is not the CSS viewport the
+  page is laid out in; the capture is scaled. The same file measured through CDP
+  (`Emulation.setDeviceMetricsOverride` + `getBoundingClientRect`) had
+  `scrollWidth === clientWidth` and all four tabs inside the viewport, and the
+  user's own screenshot of the running plugin agreed. A second trap sat next to
+  it: reusing one browser for several sizes silently kept the first size, so four
+  "different" measurements came back identical and looked like a stable result.
+- **Guard:** a screenshot is evidence of appearance, never of geometry. Any
+  PASS/FAIL about clipping, overflow or fit comes from measured numbers, and the
+  probe prints the viewport it actually got so a size that did not apply is
+  visible. Before calling a rendering difference a defect, render the unchanged
+  HEAD file the same way and compare.
+- **QA test:** every layout probe asserts `viewport === requested size` and
+  reports it; a run whose viewport does not match is discarded, not read.
+
