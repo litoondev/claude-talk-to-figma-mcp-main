@@ -523,10 +523,17 @@ report what remains):
 7. **Responsive:** no horizontal scroll at 320, 375, 768, 1024, 1440, 1920.
 8. **1:1 audit** — run `audit_generated_code({ projectDir })`. It checks the
    claims mechanically: every image path resolves to a file that exists, no
-   placeholder service or lorem ipsum survived, every exported asset is
-   referenced, and no raw hex/px sits in component code. **AUDIT FAILED means
-   the work is not done** — fix the findings; never satisfy the audit by
-   deleting the reference or substituting a placeholder.
+   placeholder service or lorem ipsum survived, no image slot is a painted box
+   (a gradient with an aspect ratio, an inline SVG and a caption, standing in
+   for a picture), the project wires at least one real image, every exported
+   asset is referenced, and no raw hex/px sits in component code.
+   **AUDIT FAILED means the work is not done** — fix the findings; never
+   satisfy the audit by deleting the reference or substituting a placeholder.
+   **AUDIT INCOMPLETE is not a pass either**: a check it could not run is
+   UNVERIFIED, and the usual cause is that `export_assets` never ran, i.e. the
+   project was built without reading Figma. Run Phase 1 properly and re-run.
+   `requireAssets: false` exists only for a design that genuinely contains no
+   images — reaching for it to quiet the audit is falsifying the gate.
 9. **Structure audit** — run `audit_structure_match({ projectDir })`. It
    compares the generated tree against `design-contract.json`: every node
    present, nothing invented, children in Figma's order and nesting, layout
@@ -648,6 +655,12 @@ node ids to fix.
 - Editing the Figma file without explicit permission
 - Placeholder images of any kind — placehold.co, via.placeholder, picsum,
   unsplash source, gray boxes, "image here"
+- Painting an image slot instead of loading it: a div with an aspect ratio and
+  a gradient or flat fill, an inline SVG glyph, and a caption naming the
+  picture that belongs there (`imageAlt: "… website mockup"`). It looks like
+  design rather than a placeholder, which is exactly why it is forbidden — a
+  Figma image slot is an `<img>`/`next/image` pointing at an exported file, or
+  it is an issue to report
 - Stock or AI-generated images standing in for Figma images
 - Rasterizing text, or exporting a whole section as one image
 - Model-written base64 or inline data URIs for images over 4 KB

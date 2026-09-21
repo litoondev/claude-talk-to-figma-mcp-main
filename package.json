@@ -1,7 +1,7 @@
 {
   "name": "claude-talk-to-figma-mcp",
   "description": "Claude Desktop Talk to Figma MCP",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "module": "dist/talk_to_figma_mcp/server.js",
   "main": "dist/talk_to_figma_mcp/server.js",
   "bin": {
@@ -67,7 +67,7 @@
     "design",
     "automation"
   ],
-  "author": "X\u00falio Z\u00e9",
+  "author": "Xúlio Zé",
   "license": "MIT",
   "repository": {
     "type": "git",

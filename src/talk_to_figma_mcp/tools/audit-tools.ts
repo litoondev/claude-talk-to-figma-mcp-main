@@ -68,6 +68,43 @@ const RAW_VALUE_PATTERNS: Array<{ re: RegExp; label: string }> = [
   { re: /\[\d+(\.\d+)?px\]/, label: "arbitrary Tailwind size" },
 ];
 
+/**
+ * A model that never reached Figma does not usually write `placehold.co`. It
+ * paints the slot instead: a box with an aspect ratio, a gradient fill, an
+ * inline SVG glyph and a caption naming the picture that should have been
+ * there. That reads as design, not as a placeholder, so every URL-shaped
+ * pattern above misses it — and the audit used to report PASS on a project
+ * whose every image was fabricated this way.
+ *
+ * These patterns only count in a file that loads no real image at all; a
+ * gradient beside an actual `<img>` is just a gradient.
+ */
+const FABRICATED_SLOT_PATTERNS: Array<{ re: RegExp; label: string; needsPaint?: boolean }> = [
+  {
+    re: /\b(?:image|img|photo|mockup|thumb(?:nail)?|screenshot|poster|artwork|avatar)[A-Za-z]*\s*[:=]\s*["'`]/i,
+    label: "image slot described in a string instead of loaded from a file",
+  },
+  {
+    re: /\baspect-?ratio\s*:\s*["'`]?\s*[\d.]+\s*\/\s*[\d.]+/i,
+    label: "aspect-ratio box with no image in it",
+    needsPaint: true,
+  },
+];
+
+/** The fill that turns an empty box into something that looks like a picture. */
+const PAINT_PATTERN = /(?:linear|radial|conic)-gradient\s*\(|background(?:-color)?\s*:\s*(?:#|rgb|var\()/i;
+
+/** Ways real image content actually enters a file. */
+const REAL_IMAGE_PATTERNS: RegExp[] = [
+  /<img\b/i,
+  /<(?:Image|ExpoImage|NextImage)\b/,
+  /\bfrom\s+["']next\/image["']/,
+  /\bfrom\s+["']expo-image["']/,
+  /\bpainterResource\s*\(/,
+  /\bAsyncImage\s*\(/,
+  /url\(\s*["']?[^"')]*\.(?:png|jpe?g|gif|webp|avif|svg)/i,
+];
+
 interface Finding {
   file: string;
   line: number;
@@ -85,8 +122,10 @@ export function registerAuditTools(server: McpServer): void {
   server.tool(
     "audit_generated_code",
     "Audit a generated frontend project for 1:1 fidelity before calling it done: broken image paths, placeholder " +
-      "images, unreferenced exported assets, and raw hex/px values that should be tokens. Run this at the end of " +
-      "every Figma-to-code run. Returns PASS/FAIL per check with file and line.",
+      "images, image slots faked with gradients and inline SVG, a project that wires no images at all, " +
+      "unreferenced exported assets, and raw hex/px values that should be tokens. Run this at the end of " +
+      "every Figma-to-code run. Returns PASS/FAIL per check with file and line; a check that could not be run " +
+      "is UNVERIFIED and blocks the pass, never a silent PASS.",
     {
       projectDir: z.string().describe("Absolute path of the generated project root"),
       manifestPath: z
@@ -97,8 +136,16 @@ export function registerAuditTools(server: McpServer): void {
         .boolean()
         .optional()
         .describe("Also fail on raw hex/px values in component code (default true)"),
+      requireAssets: z
+        .boolean()
+        .optional()
+        .describe(
+          "Whether this project is expected to carry assets exported from Figma (default true). When true, a " +
+            "missing manifest is UNVERIFIED and a project that resolves no image at all fails. Set false only " +
+            "for a design that genuinely has no images, or one serving every image from a remote CDN."
+        ),
     },
-    async ({ projectDir, manifestPath, checkTokens }) => {
+    async ({ projectDir, manifestPath, checkTokens, requireAssets }) => {
       try {
         if (!path.isAbsolute(projectDir)) return text(`projectDir must be an absolute path. Received: ${projectDir}`);
         if (!fs.existsSync(projectDir)) return text(`projectDir does not exist: ${projectDir}`);
@@ -108,10 +155,13 @@ export function registerAuditTools(server: McpServer): void {
           return text(`No source files found under ${projectDir}. Nothing to audit — is this the right directory?`);
         }
 
+        const assetsExpected = requireAssets !== false;
         const placeholders: Finding[] = [];
         const broken: Finding[] = [];
         const rawValues: Finding[] = [];
+        const fabricated: Finding[] = [];
         const referenced = new Set<string>();
+        let resolvedImages = 0;
 
         for (const file of files) {
           let contents: string;
@@ -122,10 +172,25 @@ export function registerAuditTools(server: McpServer): void {
           }
           const rel = path.relative(projectDir, file);
           const lines = contents.split(/\r?\n/);
+          const references = extractReferences(contents);
+
+          // A file that loads no image anywhere is the only place a painted
+          // box can be standing in for one.
+          const imageRefs = references.filter((reference) => IMAGE_EXT.test(reference));
+          const loadsRealImage = imageRefs.length > 0 || REAL_IMAGE_PATTERNS.some((re) => re.test(contents));
+          const painted = PAINT_PATTERN.test(contents);
 
           lines.forEach((line, index) => {
             for (const { re, label } of PLACEHOLDER_PATTERNS) {
               if (re.test(line)) placeholders.push({ file: rel, line: index + 1, detail: label });
+            }
+
+            if (!loadsRealImage && isComponentFile(file)) {
+              for (const { re, label, needsPaint } of FABRICATED_SLOT_PATTERNS) {
+                if (!re.test(line)) continue;
+                if (needsPaint && !painted) continue;
+                fabricated.push({ file: rel, line: index + 1, detail: `${label}: ${line.trim().slice(0, 60)}` });
+              }
             }
 
             if (checkTokens !== false && isComponentFile(file)) {
@@ -138,10 +203,10 @@ export function registerAuditTools(server: McpServer): void {
             }
           });
 
-          for (const reference of extractReferences(contents)) {
-            if (!IMAGE_EXT.test(reference)) continue;
+          for (const reference of imageRefs) {
             referenced.add(path.basename(reference.split("?")[0].split("#")[0]));
             const resolved = resolveReference(reference, file, projectDir);
+            if (resolved) resolvedImages++;
             if (!resolved) {
               broken.push({
                 file: rel,
@@ -173,8 +238,34 @@ export function registerAuditTools(server: McpServer): void {
           manifestNote = `no manifest at ${manifestFile} — run export_assets first, or pass manifestPath`;
         }
 
+        // A design that produced no image at all was never wired to Figma's
+        // assets. Only meaningful when assets were expected in the first place.
+        const noImagesWired: Finding[] =
+          assetsExpected && resolvedImages === 0
+            ? [
+                {
+                  file: path.basename(projectDir),
+                  line: 0,
+                  detail:
+                    "no image reference in the whole project resolves to a file — the design's images were " +
+                    "never exported or never wired. Run export_assets, or pass requireAssets: false if this " +
+                    "design genuinely has none.",
+                },
+              ]
+            : [];
+
         const checks = [
           { name: "No placeholder images or lorem ipsum", failures: placeholders.length, findings: placeholders },
+          {
+            name: "Image slots are real assets, not painted boxes",
+            failures: fabricated.length,
+            findings: fabricated,
+          },
+          // Claiming PASS for an expectation that was switched off would be
+          // the same dishonesty this tool exists to catch. Omit the row.
+          ...(assetsExpected
+            ? [{ name: "The project wires at least one real image", failures: noImagesWired.length, findings: noImagesWired }]
+            : []),
           { name: "Every image path resolves to a real file", failures: broken.length, findings: broken },
           {
             name: "Every exported asset is referenced",
@@ -194,9 +285,13 @@ export function registerAuditTools(server: McpServer): void {
           ...checks.map((c) => `${c.failures === 0 ? "PASS" : "FAIL"}  ${c.name}${c.failures ? ` — ${c.failures} issue(s)` : ""}`),
         ].filter(Boolean);
 
-        if (manifestNote && manifestCount === 0) {
-          lines.push("", `UNVERIFIED  Asset coverage — ${manifestNote}`);
+        // An unrunnable check is not a passed check. It is listed here and it
+        // blocks the verdict, the same way audit_structure_match treats one.
+        const unverified: string[] = [];
+        if (assetsExpected && manifestNote && manifestCount === 0) {
+          unverified.push(`Asset coverage — ${manifestNote}`);
         }
+        for (const note of unverified) lines.push("", `UNVERIFIED  ${note}`);
 
         for (const check of failed) {
           lines.push("", `${check.name}:`);
@@ -206,13 +301,22 @@ export function registerAuditTools(server: McpServer): void {
           if (check.findings.length > 25) lines.push(`  …and ${check.findings.length - 25} more`);
         }
 
-        lines.push(
-          "",
-          failed.length === 0
-            ? "AUDIT PASSED. Every image resolves, nothing is a placeholder."
-            : `AUDIT FAILED — ${failed.length} check(s). Fix these before reporting the work as done; ` +
-                `do not substitute a placeholder for an asset that failed to export.`
-        );
+        lines.push("");
+        if (failed.length === 0 && unverified.length === 0) {
+          lines.push("AUDIT PASSED. Every image resolves, nothing is a placeholder.");
+        } else if (failed.length === 0) {
+          lines.push(
+            `AUDIT INCOMPLETE — every executed check passed, but ${unverified.length} item(s) could not be ` +
+              `verified here. They are not passes. Resolve them and re-run before reporting the work as done.`
+          );
+        } else {
+          lines.push(
+            `AUDIT FAILED — ${failed.length} check(s)${
+              unverified.length ? ` and ${unverified.length} unverified item(s)` : ""
+            }. Fix these before reporting the work as done; ` +
+              `do not substitute a placeholder for an asset that failed to export.`
+          );
+        }
 
         return text(lines.join("\n"));
       } catch (error) {

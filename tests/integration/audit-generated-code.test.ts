@@ -152,7 +152,7 @@ describe("audit_generated_code", () => {
     const call = makeServer();
     const dir = project({ "src/Card.tsx": `<div style={{ color: "#abcdef" }} />` });
 
-    const out = await call({ projectDir: dir, checkTokens: false });
+    const out = await call({ projectDir: dir, checkTokens: false, requireAssets: false });
     expect(out).not.toContain("raw hex");
     expect(out).toContain("AUDIT PASSED");
   });
@@ -164,7 +164,7 @@ describe("audit_generated_code", () => {
       "node_modules/pkg/demo.html": `<img src="https://placehold.co/1x1">`,
     });
 
-    const out = await call({ projectDir: dir });
+    const out = await call({ projectDir: dir, requireAssets: false });
     expect(out).toContain("AUDIT PASSED");
   });
 
@@ -175,6 +175,69 @@ describe("audit_generated_code", () => {
     const out = await call({ projectDir: dir });
     expect(out).toContain("UNVERIFIED");
     expect(out).toContain("run export_assets first");
+  });
+
+  // The bug this suite missed: the UNVERIFIED line above was printed, but the
+  // verdict ignored it, so a project that never reached Figma read as PASSED.
+  it("does not report PASSED while the asset check is unverified", async () => {
+    const call = makeServer();
+    const dir = project({ "index.html": `<img src="assets/hero.png">` }, ["assets/hero.png"]);
+
+    const out = await call({ projectDir: dir });
+    expect(out).toContain("UNVERIFIED  Asset coverage");
+    expect(out).not.toContain("AUDIT PASSED");
+    expect(out).toContain("AUDIT INCOMPLETE");
+  });
+
+  it("fails a project that wires no image at all", async () => {
+    const call = makeServer();
+    const dir = project({ "src/Hero.tsx": `export const H = () => <section><h1>Hello</h1></section>;` });
+
+    const out = await call({ projectDir: dir });
+    expect(out).toContain("FAIL  The project wires at least one real image");
+    expect(out).not.toContain("AUDIT PASSED");
+  });
+
+  it("catches an image slot painted with a gradient instead of loaded", async () => {
+    const call = makeServer();
+    const dir = project({
+      "src/Work.tsx":
+        `const card = { imageAlt: 'Farren McRae website mockup' };\n` +
+        `export const W = () => <div style={{ aspectRatio: '16/10', background: 'linear-gradient(135deg, #eee, #ccc)' }} />;`,
+    });
+
+    const out = await call({ projectDir: dir });
+    expect(out).toContain("FAIL  Image slots are real assets, not painted boxes");
+    expect(out).toContain("image slot described in a string");
+    expect(out).toContain("aspect-ratio box with no image in it");
+    expect(out).toContain("src/Work.tsx:1");
+  });
+
+  it("does not flag a gradient in a file that loads a real image", async () => {
+    const call = makeServer();
+    const dir = project(
+      {
+        "src/Hero.tsx":
+          `export const H = () => (<div style={{ aspectRatio: '16/10', background: 'linear-gradient(135deg, #eee, #ccc)' }}>` +
+          `<img src="/assets/hero.png" alt="Team" /></div>);`,
+        "assets/assets.manifest.json": manifest(["hero.png"]),
+      },
+      ["public/assets/hero.png"]
+    );
+
+    const out = await call({ projectDir: dir, checkTokens: false });
+    expect(out).toContain("PASS  Image slots are real assets, not painted boxes");
+    expect(out).toContain("AUDIT PASSED");
+  });
+
+  it("requireAssets false turns off both asset expectations", async () => {
+    const call = makeServer();
+    const dir = project({ "src/Hero.tsx": `export const H = () => <h1>Text only</h1>;` });
+
+    const out = await call({ projectDir: dir, requireAssets: false });
+    expect(out).not.toContain("UNVERIFIED");
+    expect(out).not.toContain("The project wires at least one real image");
+    expect(out).toContain("AUDIT PASSED");
   });
 
   it("refuses a relative or absent projectDir", async () => {

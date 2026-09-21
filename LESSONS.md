@@ -105,3 +105,37 @@ Read at the start of every change. Sweep at QA.
 - **QA test:** every layout probe asserts `viewport === requested size` and
   reports it; a run whose viewport does not match is discarded, not read.
 
+
+## L10 — A gate whose "unverified" was printed but not counted
+
+- **Looked like:** `audit_generated_code` reported `AUDIT PASSED. Every image
+  resolves, nothing is a placeholder.` on a React project that had never been
+  connected to Figma: zero `<img>` tags, zero assets on disk, no
+  `assets.manifest.json`, and every image slot faked with a gradient box, an
+  inline SVG glyph and a caption (`imageAlt: 'Farren McRae website mockup'`).
+  The designer found it by eye; the gate that exists to find it said pass.
+- **Root cause:** two separate holes that only added up to a false PASS
+  together. (1) The missing manifest produced a printed `UNVERIFIED  Asset
+  coverage` line, but the verdict read `failed.length` only, so an unrunnable
+  check cost nothing — the sibling tool `audit_structure_match` had always
+  blocked on its own `unverified.length`, so the two gates disagreed about what
+  a pass means. (2) `PLACEHOLDER_PATTERNS` only knew URL-shaped placeholders
+  (`placehold.co`, `picsum`, `lorem ipsum`, empty `src`). A model that never
+  reached Figma does not write those; it paints the slot, which reads as design
+  and matched nothing. Nothing checked the simplest fact of all: that the
+  project references any real image.
+- **Guard:** an unrunnable check is now tracked in `unverified[]` and blocks the
+  verdict — `AUDIT INCOMPLETE`, never `AUDIT PASSED`, matching
+  `audit_structure_match`. Added `FABRICATED_SLOT_PATTERNS` (image-ish
+  identifier assigned a string; aspect-ratio box with a paint fill) which only
+  count in a file that loads no real image, and a project-level check that at
+  least one image reference resolves. `requireAssets: false` is the only opt-out
+  and it removes the check row rather than printing PASS for an expectation that
+  was switched off. `Code_Generate_v1.md` names `AUDIT INCOMPLETE` so the skill
+  and the tool agree on the states.
+- **QA test:** run the audit on a project with a painted image slot and no
+  manifest — it must say `AUDIT FAILED` or `AUDIT INCOMPLETE`, never `PASSED`.
+  More generally: when a tool prints a status line, assert the verdict it
+  produces, not that the line appears. The test
+  `says the manifest is missing rather than claiming coverage` asserted the
+  string and passed for the whole life of the bug.
