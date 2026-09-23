@@ -581,6 +581,25 @@ That limit is stated on the tools it actually governs, not on all of them. It us
 
 > 💡 **"Create a new site" not working?** On any plan below Enterprise, Webflow refuses site creation over the API however your token is scoped. Create it in the Webflow dashboard (**+ New site**), then every other tool here works on it normally. This is a Webflow plan limit, not a token or setup problem.
 
+#### Turning on the canvas tools
+
+The 16 tools above are the **content** half. There are 12 more that build on the
+Webflow canvas — elements, classes, tag styles, variables, components — through
+this plugin's own Webflow Designer Extension.
+
+They are **off by default**, because they cost schema on every request and do
+nothing without the extension running. Turn them on in Claude Desktop →
+Settings → Extensions → this extension → **Webflow Designer tools**, then quit
+Claude Desktop completely and reopen.
+
+> ⚠️ **If Claude says it cannot build layout and asks you to install Webflow's
+> own connector or MCP Bridge App, this switch is off.** This plugin replaces
+> both; you do not need them.
+
+Setting up the extension itself is in [`webflow_extension/README.md`](webflow_extension/README.md).
+To try the canvas tools with no Webflow account at all, `npm run webflow:harness -- <channel-id>`
+stands in for the extension.
+
 #### Why these are the safe ones for a team
 
 Every call is addressed by an explicit id and holds no session state. There is no "current active page" to fight over, so **several people on several machines can run these at the same time**. That is the opposite of the Designer half, which must be serialised to one agent per site.

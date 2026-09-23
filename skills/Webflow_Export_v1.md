@@ -161,30 +161,60 @@ builds Figma, this one reads Figma and builds a page.
 
 ## What this skill does and does not do
 
-This plugin has **no Webflow tools**. It reads Figma; Webflow's own MCP server
-writes the site. Both must be connected in the same client for this skill to
-work.
+This plugin has **both halves** of Webflow, and they arrive by different routes:
 
-The Webflow tools this skill instructs you to call (names as Webflow's MCP
-server registers them):
+| | Tools | Route | Needs |
+| --- | --- | --- | --- |
+| **Canvas** — elements, classes, tag styles, variables, components | `webflow_designer_*` (12) | The relay, to this plugin's own Webflow Designer Extension | The extension open and joined to this channel |
+| **Content** — sites, pages, SEO, page copy, CMS, publishing | `webflow_*` (16) | Webflow's Data API over HTTP | A `WEBFLOW_TOKEN` with the right scopes |
 
-| Job | Webflow tool |
+**Use these tools. Do not tell the user to install Webflow's own MCP server or
+its Bridge App** — this plugin replaces both, and routes by channel rather than
+by site id so one agent gets one editor.
+
+### If the `webflow_designer_*` tools are missing
+
+They are off by default, because they cost schema on every request and do
+nothing without a running extension. If you cannot see them, say exactly this
+rather than reaching for another integration:
+
+> The Webflow Designer tools are turned off. Enable them in Claude Desktop →
+> Settings → Extensions → Claude Talk to Figma → **Webflow Designer tools**,
+> then quit Claude Desktop completely and reopen it.
+
+Then the extension has to be running: see `webflow_extension/README.md`. To test
+without a Webflow account at all, `npm run webflow:harness -- <channel-id>`
+stands in for it.
+
+### Canvas tools, by job
+
+| Job | Tool |
 | --- | --- |
-| Confirm the Designer bridge is live | `get_designer_app_connection_info` |
-| Create / read / update / delete elements | `element_tool` |
-| Insert elements on the active page | `element_builder` |
-| Insert elements from an HTML + CSS string | `whtml_builder` |
-| Read what is currently on the canvas | `element_snapshot_tool` |
-| Create and edit styles (classes) | `style_tool` |
-| Create and edit variables | `variable_tool` |
-| Create / read components | `component_tool`, `de_component_tool` |
-| Insert component instances | `component_builder`, `insert_in_element`, `insert_in_slot` |
-| Create and switch pages | `de_page_tool`, `page_tool` |
-| Assets and asset folders | `asset_tool`, `get_image_preview` |
-| Sites, pages and CMS over the Data API | `data_sites_tool`, `data_pages_tool`, `data_cms_tool` |
+| Confirm the extension is connected | `webflow_designer_status` |
+| Read the element tree | `webflow_designer_get_structure` |
+| Read existing classes | `webflow_designer_get_styles` |
+| Read existing variables | `webflow_designer_get_variables` |
+| Create variables from Figma tokens | `webflow_designer_create_variables` |
+| Set base typography on h1–h6 / paragraph / body | `webflow_designer_set_tag_style` |
+| Create or update a class | `webflow_designer_set_style` |
+| Create an element | `webflow_designer_create_element` |
+| Replace copy | `webflow_designer_set_text` |
+| Remove an element | `webflow_designer_delete_element` |
+| Make a component | `webflow_designer_create_component` |
+| Place an instance | `webflow_designer_insert_component` |
 
-If any of these are missing from the session, **stop and tell the user** the
-Webflow MCP server is not connected, rather than improvising with custom code.
+### Content tools, by job
+
+| Job | Tool |
+| --- | --- |
+| Find the site and its ids | `webflow_list_sites`, `webflow_get_site` |
+| Pages and their SEO | `webflow_list_pages`, `webflow_get_page`, `webflow_update_page_settings` |
+| Copy inside existing text nodes | `webflow_get_page_content`, `webflow_update_page_content` |
+| CMS | `webflow_list_collections`, `webflow_get_collection`, `webflow_list_items`, `webflow_create_items`, `webflow_update_items` |
+| Publishing | `webflow_publish_items`, `webflow_publish_site` |
+
+Creating a site (`webflow_create_site`) needs an **Enterprise** workspace; on any
+other plan it returns 403 and the site is created in the Webflow dashboard.
 
 ---
 
@@ -195,14 +225,12 @@ report which one failed.
 
 1. **Figma side.** `check_figma_connection`, then `join_channel`. Confirm the
    frame to export with `get_selection`, or ask the user which frame.
-2. **Webflow side.** Call `get_designer_app_connection_info`. The Designer
-   tools (`element_*`, `style_tool`, `variable_tool`, `component_*`,
-   `de_page_tool`) reach the canvas only through the **Webflow MCP Bridge
-   App**, which the user launches from the Designer's Apps panel (press `E`).
-   If it asks for a local connection URL, give it the `http://localhost:<port>`
-   that `get_designer_app_connection_info` returned. The Data API tools
-   (`data_sites_tool`, `data_pages_tool`, `data_cms_tool`) work without any of
-   this — they are addressed by ID and need no open Designer.
+2. **Webflow canvas.** Call `webflow_designer_status`. It answers only when this
+   plugin's Webflow Designer Extension is open in the Designer's Apps panel
+   (press `E`) and joined to **this same channel**. If the tool does not exist,
+   it is switched off — see above. If it exists but errors, the extension is not
+   running or is on another channel. The content tools need none of this; they
+   are addressed by id over HTTP.
 3. **Target.** Ask which site and which page. Never create a page on a site the
    user has not named. Use `data_sites_tool` to list sites if the user is
    unsure.
@@ -259,7 +287,7 @@ Do this **before** creating a single element. Styles created against literals
 have to be rewritten later; styles created against variables do not.
 
 1. For each Figma variable collection, create the matching Webflow variable
-   collection with `variable_tool`. Keep the Figma names verbatim
+   collection with `webflow_designer_create_variables`. Keep the Figma names verbatim
    (`spacing/40`, `color/brand/primary`) so the two systems stay traceable.
 2. Type mapping:
 
@@ -326,7 +354,7 @@ This is the whole job. Get the table right and the page is right.
 | Text node | Heading (`h1`–`h6`) if it uses a heading style, otherwise Paragraph or Text block |
 | Rectangle / frame with an image fill | Image, or a div with a background image |
 | Vector / boolean / icon | Embed with inline SVG, or an Image if it is raster |
-| Component instance | Component instance (`component_builder`) |
+| Component instance | Component instance (`webflow_designer_insert_component`) |
 | Frame with `clipsContent: true` | add `overflow: hidden` |
 
 **Never mirror the Figma layer tree.** Designers nest frames for organisation
@@ -394,24 +422,21 @@ starting the next. A whole page built blind is a whole page to debug.
 
 Two ways to create elements; pick per section:
 
-- **`whtml_builder`** — hand it an HTML + CSS string and it constructs and
-  inserts the elements. Fastest for a section with a lot of structure, and it
-  reuses the same HTML thinking as `Html_Import_v1`. Prefer this for dense
-  content-heavy sections.
-- **`element_builder` / `element_tool`** — explicit element-by-element
-  creation. Use it when you need precise control, when you are inserting into an
-  existing tree, or when `whtml_builder` produced a structure you have to
-  correct.
+Build with `webflow_designer_create_element`, one element at a time, passing
+`parentId` from the element you just created so the tree grows in reading order.
+There is no bulk-HTML shortcut here: the Designer API builds elements, not
+markup, and a structure assembled one node at a time is one you can verify one
+node at a time.
 
-Either way:
+As you go:
 
 1. Create the section element first, then its children in reading order.
-2. Create the class with `style_tool` **before** applying properties, and give
+2. Create the class with `webflow_designer_set_style` **before** applying it, and give
    every repeated element the **same class** — never style two identical cards
    separately. Name classes by role, lower-case and hyphenated
    (`section-hero`, `card-feature`, `heading-title`).
 3. Apply properties referencing the Step 2 variables.
-4. Confirm placement with `element_snapshot_tool` before moving on.
+4. Confirm placement with `webflow_designer_get_structure` before moving on.
 
 ### Components
 
@@ -424,10 +449,14 @@ Decide per element:
 | Appears once | Plain elements with a reused class |
 
 To create one: build the first occurrence, confirm it against the design,
-create the component with `component_tool`, then place instances with
-`component_builder` — `insert_in_element` for a container, `insert_in_slot` for
-a slot on an existing instance. Override only what differs per occurrence (text,
-image), never the styling.
+create the component with `webflow_designer_create_component`, then place
+instances with `webflow_designer_insert_component`. Override only what differs
+per occurrence (text, image), never the styling.
+
+`webflow_designer_create_component` reports any property or variant this
+Designer API version cannot define, rather than flattening it into a hard-coded
+value. When it does, pass the report on to the user — those are set by hand in
+the Designer, and section 17.3 is not met until they are.
 
 **Carry the Figma component's properties and variants across.** A component
 rebuilt as a static block loses the thing that made it a component, and the

@@ -62,6 +62,13 @@
       "max": 10,
       "required": false
     },
+    "webflow_designer": {
+      "type": "boolean",
+      "title": "Webflow Designer tools",
+      "description": "Turn on to add 12 tools that build on the Webflow canvas - elements, classes, tag styles, variables and components - through this plugin's own Webflow Designer Extension. They need the extension open in the Webflow Designer and joined to the same channel as Figma; see webflow_extension/README.md. Leave off and only the Webflow content tools (pages, SEO, CMS, publishing) are advertised, which costs fewer tokens per request.",
+      "default": false,
+      "required": false
+    },
     "figma_max_response_chars": {
       "type": "number",
       "title": "Maximum tool response size (characters)",
@@ -102,7 +109,8 @@
         "FIGMA_MCP_SKILLS_DIR": "${user_config.figma_skills_dir}",
         "FIGMA_MCP_SKILL_AUTOREPAIR": "${user_config.figma_skill_autorepair}",
         "WEBFLOW_TOKEN": "${user_config.webflow_token}",
-        "WEBFLOW_API_CONCURRENCY": "${user_config.webflow_api_concurrency}"
+        "WEBFLOW_API_CONCURRENCY": "${user_config.webflow_api_concurrency}",
+        "FIGMA_MCP_WEBFLOW_DESIGNER": "${user_config.webflow_designer}"
       }
     }
   },
