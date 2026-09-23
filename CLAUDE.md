@@ -287,8 +287,20 @@ which job:
 | Figma | Plugin API, via the bridge | REST API (`figma-rest.ts`) |
 | Webflow | **Designer API** — a Designer Extension | **Data API** (`webflow-rest.ts`) |
 
-The `webflow_*` tools in this server are **content only**: sites, pages, SEO,
-page copy, CMS collections and items, publishing. They cannot create or restyle
-elements, classes, variables or components. Everything in 17.1–17.3 is canvas
-work and runs through Webflow's own MCP server until the Designer Extension
-exists.
+This repo has **both** halves, and each is switched on separately:
+
+| Half | Tools | Route | Switch |
+| --- | --- | --- | --- |
+| Content | `webflow_*` (16) | Data API over HTTP | **Webflow API token** |
+| Canvas | `webflow_designer_*` (12) | The relay, to `webflow_extension/` | **Webflow Designer tools** checkbox |
+
+Everything in 17.1–17.3 is canvas work, so it needs the second switch **and** the
+Designer Extension running and joined to the same channel as Figma.
+
+**Webflow's own MCP server, connector and Bridge App are not used and not
+needed.** If a session reaches for them, the canvas tools are switched off — that
+is the fix, not another integration.
+
+`webflow_preflight` reports all three legs — Figma channel, token and scopes,
+extension — in one call. Call it before planning Webflow work, not after hitting
+a wall.

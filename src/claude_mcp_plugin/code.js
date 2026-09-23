@@ -1532,6 +1532,10 @@ async function handleCommand(command, params) {
       return await createTextStyle(params);
     case "create_paint_style":
       return await createPaintStyle(params);
+    case "audit_remote_styles":
+      return await auditRemoteStylesCommand(params);
+    case "rebind_remote_styles":
+      return await rebindRemoteStylesCommand(params);
     case "create_effect_style":
       return await createEffectStyle(params);
     default:
@@ -15906,5 +15910,600 @@ async function exportAssetChunk(params) {
     mimeType: entry.mime,
     ext: entry.ext,
     byteSize: entry.byteSize,
+  };
+}
+
+// ─── Foreign (remote) style and variable bindings ──────────────────────────
+//
+// WHY THIS EXISTS
+// ---------------
+// Figma groups the style and variable pickers by the *owner file* of every
+// style the document references — not by which libraries the file subscribes
+// to. A style arrives by copy-paste or with an instance dragged in from
+// another file, and from then on that file is its own section in the picker.
+// The Libraries modal cannot switch it off, because the library was never
+// subscribed; the section disappears only when nothing references the style
+// any more.
+//
+// Every other style reader in this plugin calls getLocal*StylesAsync, which by
+// definition cannot see any of this. These two commands close that gap:
+// `audit_remote_styles` reports what is bound to a foreign source, and
+// `rebind_remote_styles` repoints it at the local equivalent.
+//
+// The Plugin API exposes `style.remote` and the style's `key`, but not the
+// name of the file that owns it. Naming the source is the server's job — see
+// tools/style-tools.ts, which resolves keys through the REST API.
+
+/** L6: Figma rejects some promises with no Error object. Never read `.message` bare. */
+function remoteStyleErrText(err) {
+  return err && err.message ? err.message : String(err);
+}
+
+/** The style-carrying properties a node can hold, and the setter for each. */
+const REMOTE_STYLE_FIELDS = [
+  { property: "fillStyleId", setter: "setFillStyleIdAsync", kind: "paint" },
+  { property: "strokeStyleId", setter: "setStrokeStyleIdAsync", kind: "paint" },
+  { property: "effectStyleId", setter: "setEffectStyleIdAsync", kind: "effect" },
+  { property: "gridStyleId", setter: "setGridStyleIdAsync", kind: "grid" },
+  { property: "textStyleId", setter: "setTextStyleIdAsync", kind: "text" },
+];
+
+/**
+ * Resolve the scan roots. `nodeId` wins over `scope` so a caller can always
+ * name an exact subtree; otherwise selection (default), page, or document.
+ */
+async function resolveRemoteStyleRoots(params) {
+  const opts = params || {};
+  if (opts.nodeId) {
+    const node = await figma.getNodeByIdAsync(opts.nodeId);
+    if (!node) throw new Error(`No node with id "${opts.nodeId}" — it may have been deleted.`);
+    return { roots: [node], scope: "node" };
+  }
+  const scope = opts.scope || "selection";
+  if (scope === "document") {
+    // Required before touching pages other than the current one on the
+    // incremental-loading API; older builds do not have it.
+    if (typeof figma.loadAllPagesAsync === "function") await figma.loadAllPagesAsync();
+    return { roots: figma.root.children.slice(), scope };
+  }
+  if (scope === "page") return { roots: [figma.currentPage], scope };
+  const selection = figma.currentPage.selection;
+  if (!selection.length) {
+    throw new Error(
+      'Nothing is selected. Select a frame, or pass scope:"page" or scope:"document".'
+    );
+  }
+  return { roots: selection.slice(), scope };
+}
+
+/**
+ * Flatten a `boundVariables` object into { property, variableId } pairs.
+ * The shape is irregular — a bare alias for scalar fields, an array for fills
+ * and strokes, a nested object for text ranges — so this walks it generically
+ * rather than listing the fields it expects.
+ */
+function collectVariableAliases(bound, prefix, out) {
+  if (!bound || typeof bound !== "object") return;
+  for (const key of Object.keys(bound)) {
+    const value = bound[key];
+    if (!value || typeof value !== "object") continue;
+    if (Array.isArray(value)) {
+      value.forEach((entry, index) => collectVariableAliases(entry, prefix + key + "[" + index + "].", out));
+    } else if (value.type === "VARIABLE_ALIAS" && typeof value.id === "string") {
+      out.push({ property: prefix + key, variableId: value.id });
+    } else {
+      collectVariableAliases(value, prefix + key + ".", out);
+    }
+  }
+}
+
+/** Bound variables carried on individual paints (fill/stroke colour tokens). */
+function collectPaintVariableAliases(node, out) {
+  for (const field of ["fills", "strokes"]) {
+    const paints = node[field];
+    if (!Array.isArray(paints)) continue; // figma.mixed, or unsupported on this node
+    paints.forEach((paint, index) => {
+      collectVariableAliases(paint && paint.boundVariables, field + "[" + index + "].", out);
+    });
+  }
+}
+
+/**
+ * Walk a subtree and record every binding whose target is owned by another
+ * file. Caches style and variable lookups by id — a single file can hold tens
+ * of thousands of bindings pointing at a handful of styles, and each
+ * getStyleByIdAsync is a round trip.
+ */
+async function scanRemoteBindings(root, state) {
+  const stack = [{ node: root, insideInstance: root.type === "INSTANCE" }];
+
+  while (stack.length) {
+    if (state.nodesScanned >= state.nodeBudget) {
+      state.truncated = true;
+      return;
+    }
+    const { node, insideInstance } = stack.pop();
+    state.nodesScanned++;
+
+    try {
+      await recordNodeRemoteBindings(node, insideInstance, state);
+    } catch (err) {
+      state.failures.push({
+        nodeId: node.id,
+        reason: "could not be read: " + remoteStyleErrText(err),
+      });
+    }
+
+    if ("children" in node && Array.isArray(node.children)) {
+      const childInsideInstance = insideInstance || node.type === "INSTANCE";
+      for (const child of node.children) {
+        stack.push({ node: child, insideInstance: childInsideInstance });
+      }
+    }
+  }
+}
+
+async function recordNodeRemoteBindings(node, insideInstance, state) {
+  // ── Styles ────────────────────────────────────────────────────────────
+  for (const field of REMOTE_STYLE_FIELDS) {
+    if (!(field.property in node)) continue;
+    const styleId = node[field.property];
+    if (styleId === figma.mixed) {
+      // Per-segment text styling — handled below, where the segments are read.
+      continue;
+    }
+    if (typeof styleId !== "string" || !styleId) continue;
+    await noteRemoteStyle(styleId, node, field.property, field, insideInstance, state, null);
+  }
+
+  // Mixed text styling: report each segment, never skip the node (AC 3).
+  if (node.type === "TEXT" && typeof node.getStyledTextSegments === "function") {
+    const mixedFields = [];
+    if (node.textStyleId === figma.mixed) mixedFields.push("textStyleId");
+    if (node.fillStyleId === figma.mixed) mixedFields.push("fillStyleId");
+    if (mixedFields.length) {
+      let segments = [];
+      try {
+        segments = node.getStyledTextSegments(mixedFields);
+      } catch (err) {
+        state.failures.push({
+          nodeId: node.id,
+          reason: 'text segments of "' + node.name + '" could not be read: ' + remoteStyleErrText(err),
+        });
+      }
+      for (const segment of segments) {
+        for (const property of mixedFields) {
+          const styleId = segment[property];
+          if (typeof styleId !== "string" || !styleId) continue;
+          const field = REMOTE_STYLE_FIELDS.filter((f) => f.property === property)[0];
+          await noteRemoteStyle(styleId, node, property, field, insideInstance, state, {
+            start: segment.start,
+            end: segment.end,
+          });
+        }
+      }
+    }
+  }
+
+  // ── Variables ─────────────────────────────────────────────────────────
+  if (!figma.variables) return;
+  const aliases = [];
+  collectVariableAliases(node.boundVariables, "", aliases);
+  collectPaintVariableAliases(node, aliases);
+  for (const alias of aliases) {
+    await noteRemoteVariable(alias.variableId, node, alias.property, insideInstance, state);
+  }
+}
+
+async function noteRemoteStyle(styleId, node, property, field, insideInstance, state, range) {
+  let entry = state.styleCache[styleId];
+  if (entry === undefined) {
+    let style = null;
+    try {
+      style = await figma.getStyleByIdAsync(styleId);
+    } catch (err) {
+      state.failures.push({
+        nodeId: node.id,
+        reason: "style " + styleId + " could not be read: " + remoteStyleErrText(err),
+      });
+    }
+    entry = style && style.remote
+      ? { key: style.key, name: style.name, styleType: style.type, id: style.id }
+      : null;
+    state.styleCache[styleId] = entry;
+  }
+  if (!entry) return;
+
+  const source = tallySource(state.styles, entry.key, {
+    key: entry.key,
+    name: entry.name,
+    styleType: entry.styleType,
+    kind: field ? field.kind : null,
+  });
+  source.usages++;
+  if (insideInstance) source.insideInstance++;
+  if (source.sampleNodeIds.length < 5) source.sampleNodeIds.push(node.id);
+
+  pushBinding(state, {
+    nodeId: node.id,
+    nodeName: node.name,
+    kind: "style",
+    property: property,
+    setter: field ? field.setter : null,
+    targetKey: entry.key,
+    targetName: entry.name,
+    styleType: entry.styleType,
+    range: range,
+    insideInstance: insideInstance,
+  });
+}
+
+async function noteRemoteVariable(variableId, node, property, insideInstance, state) {
+  let entry = state.variableCache[variableId];
+  if (entry === undefined) {
+    let variable = null;
+    try {
+      variable = await figma.variables.getVariableByIdAsync(variableId);
+    } catch (err) {
+      state.failures.push({
+        nodeId: node.id,
+        reason: "variable " + variableId + " could not be read: " + remoteStyleErrText(err),
+      });
+    }
+    entry = variable && variable.remote
+      ? { key: variable.key, name: variable.name, resolvedType: variable.resolvedType, id: variable.id }
+      : null;
+    state.variableCache[variableId] = entry;
+  }
+  if (!entry) return;
+
+  const source = tallySource(state.variables, entry.key, {
+    key: entry.key,
+    name: entry.name,
+    resolvedType: entry.resolvedType,
+  });
+  source.usages++;
+  if (insideInstance) source.insideInstance++;
+  if (source.sampleNodeIds.length < 5) source.sampleNodeIds.push(node.id);
+
+  pushBinding(state, {
+    nodeId: node.id,
+    nodeName: node.name,
+    kind: "variable",
+    property: property,
+    targetKey: entry.key,
+    targetName: entry.name,
+    resolvedType: entry.resolvedType,
+    variableId: entry.id,
+    insideInstance: insideInstance,
+  });
+}
+
+function tallySource(bucket, key, seed) {
+  if (!bucket[key]) {
+    bucket[key] = Object.assign({ usages: 0, insideInstance: 0, sampleNodeIds: [] }, seed);
+  }
+  return bucket[key];
+}
+
+/**
+ * Bindings are capped because a whole-document scan of a real marketing file
+ * runs to tens of thousands. The per-source tallies are never capped, so the
+ * summary the user acts on stays complete even when the detail is trimmed.
+ */
+function pushBinding(state, binding) {
+  state.allBindings.push(binding);
+  if (state.bindings.length < state.bindingLimit) state.bindings.push(binding);
+  else state.bindingsTruncated = true;
+}
+
+async function collectRemoteBindings(params) {
+  const opts = params || {};
+  const { roots, scope } = await resolveRemoteStyleRoots(opts);
+
+  const state = {
+    nodesScanned: 0,
+    nodeBudget: typeof opts.nodeBudget === "number" && opts.nodeBudget > 0 ? opts.nodeBudget : 50000,
+    truncated: false,
+    styles: {},
+    variables: {},
+    bindings: [],
+    allBindings: [],
+    bindingLimit: typeof opts.bindingLimit === "number" && opts.bindingLimit > 0 ? opts.bindingLimit : 300,
+    bindingsTruncated: false,
+    styleCache: {},
+    variableCache: {},
+    failures: [],
+  };
+
+  for (const root of roots) {
+    try {
+      await scanRemoteBindings(root, state);
+    } catch (err) {
+      state.failures.push({
+        nodeId: root.id,
+        reason: "walk failed: " + remoteStyleErrText(err),
+      });
+    }
+  }
+
+  return { state, roots, scope };
+}
+
+/** Local styles and variables, indexed by full name and by leaf name. */
+async function buildLocalTargetIndex() {
+  const [paint, text, effect, grid] = await Promise.all([
+    figma.getLocalPaintStylesAsync(),
+    figma.getLocalTextStylesAsync(),
+    figma.getLocalEffectStylesAsync(),
+    figma.getLocalGridStylesAsync(),
+  ]);
+
+  const styles = { byName: {}, byLeaf: {} };
+  const addStyle = (style, kind) => {
+    const record = { id: style.id, name: style.name, key: style.key, kind: kind };
+    if (!styles.byName[style.name]) styles.byName[style.name] = record;
+    const leaf = style.name.split("/").pop();
+    // A leaf claimed by two different styles is ambiguous: record the clash
+    // rather than picking one, so the match is reported as unmatched.
+    if (styles.byLeaf[leaf] === undefined) styles.byLeaf[leaf] = record;
+    else if (styles.byLeaf[leaf] && styles.byLeaf[leaf].id !== style.id) styles.byLeaf[leaf] = null;
+  };
+  paint.forEach((s) => addStyle(s, "paint"));
+  text.forEach((s) => addStyle(s, "text"));
+  effect.forEach((s) => addStyle(s, "effect"));
+  grid.forEach((s) => addStyle(s, "grid"));
+
+  const variables = { byName: {}, byLeaf: {} };
+  if (figma.variables) {
+    const collections = await figma.variables.getLocalVariableCollectionsAsync();
+    for (const collection of collections) {
+      for (const variableId of collection.variableIds) {
+        const variable = await figma.variables.getVariableByIdAsync(variableId);
+        if (!variable) continue;
+        const record = {
+          id: variable.id,
+          name: variable.name,
+          key: variable.key,
+          resolvedType: variable.resolvedType,
+          collection: collection.name,
+        };
+        if (!variables.byName[variable.name]) variables.byName[variable.name] = record;
+        const leaf = variable.name.split("/").pop();
+        if (variables.byLeaf[leaf] === undefined) variables.byLeaf[leaf] = record;
+        else if (variables.byLeaf[leaf] && variables.byLeaf[leaf].id !== variable.id) variables.byLeaf[leaf] = null;
+      }
+    }
+  }
+
+  return { styles, variables };
+}
+
+/**
+ * Pick the local equivalent for a remote target. Exact name first, then the
+ * leaf name — never a fuzzy match, and never a new style (CLAUDE.md §4: no
+ * silent expansion of the design system).
+ */
+function matchLocalTarget(index, binding, matchBy) {
+  const bucket = binding.kind === "variable" ? index.variables : index.styles;
+  const name = binding.targetName;
+
+  const exact = bucket.byName[name];
+  if (exact) return { target: exact, matchedBy: "name" };
+  if (matchBy === "name") {
+    return { target: null, reason: 'no local ' + binding.kind + ' is named "' + name + '"' };
+  }
+
+  const leaf = name.split("/").pop();
+  const byLeaf = bucket.byLeaf[leaf];
+  if (byLeaf) return { target: byLeaf, matchedBy: "leaf" };
+  if (byLeaf === null) {
+    return { target: null, reason: 'more than one local ' + binding.kind + ' ends in "' + leaf + '" — pass an explicit map entry' };
+  }
+  return { target: null, reason: 'no local ' + binding.kind + ' is named "' + name + '" or ends in "' + leaf + '"' };
+}
+
+async function auditRemoteStylesCommand(params) {
+  const { state, roots, scope } = await collectRemoteBindings(params);
+  const index = await buildLocalTargetIndex();
+
+  const styleSources = Object.keys(state.styles).map((key) => state.styles[key]);
+  const variableSources = Object.keys(state.variables).map((key) => state.variables[key]);
+  styleSources.sort((a, b) => b.usages - a.usages);
+  variableSources.sort((a, b) => b.usages - a.usages);
+
+  return {
+    scope: scope,
+    rootIds: roots.map((node) => node.id),
+    nodesScanned: state.nodesScanned,
+    truncated: state.truncated,
+    remoteStyleCount: styleSources.length,
+    remoteVariableCount: variableSources.length,
+    totalBindings: state.allBindings.length,
+    styles: styleSources,
+    variables: variableSources,
+    bindings: state.bindings,
+    bindingsTruncated: state.bindingsTruncated,
+    localStyleNames: Object.keys(index.styles.byName).sort(),
+    localVariableNames: Object.keys(index.variables.byName).sort(),
+    failures: state.failures,
+  };
+}
+
+/**
+ * Repoint a single binding at a local target. Returns null on success, or the
+ * reason it could not be applied — never throws, so one locked layer does not
+ * abandon the rest of the run.
+ */
+async function applyRemoteRebind(binding, target) {
+  const node = await figma.getNodeByIdAsync(binding.nodeId);
+  if (!node) return "node no longer exists";
+  if (node.removed) return "node has been removed";
+
+  if (binding.kind === "style") {
+    if (binding.range) {
+      return "styled per text range — rebind the range by hand, or clear the mixed styling first";
+    }
+    const setter = binding.setter;
+    try {
+      if (setter && typeof node[setter] === "function") {
+        await node[setter](target.id);
+      } else {
+        node[binding.property] = target.id;
+      }
+    } catch (err) {
+      return remoteStyleErrText(err);
+    }
+    return null;
+  }
+
+  const variable = await figma.variables.getVariableByIdAsync(target.id);
+  if (!variable) return 'local variable "' + target.name + '" could not be loaded';
+
+  // `fills[0].color` and friends live on a paint, not on the node, and take a
+  // different API. Anything else is a plain node field.
+  const paintMatch = /^(fills|strokes)\[(\d+)\]\.(.+)$/.exec(binding.property);
+  try {
+    if (paintMatch) {
+      const field = paintMatch[1];
+      const paintIndex = Number(paintMatch[2]);
+      const paintField = paintMatch[3];
+      const paints = node[field];
+      if (!Array.isArray(paints) || !paints[paintIndex]) return "paint " + binding.property + " no longer exists";
+      const updated = paints.slice();
+      updated[paintIndex] = figma.variables.setBoundVariableForPaint(updated[paintIndex], paintField, variable);
+      node[field] = updated;
+    } else {
+      node.setBoundVariable(binding.property, variable);
+    }
+  } catch (err) {
+    return remoteStyleErrText(err);
+  }
+  return null;
+}
+
+async function rebindRemoteStylesCommand(params) {
+  const opts = params || {};
+  const dryRun = opts.dryRun !== false; // AC 5: dry run is the default
+  const matchBy = opts.matchBy === "name" ? "name" : "leaf";
+  const explicitMap = opts.map && typeof opts.map === "object" ? opts.map : {};
+
+  const { state, roots, scope } = await collectRemoteBindings(opts);
+  const index = await buildLocalTargetIndex();
+
+  const planned = [];
+  const unmatched = [];
+  const byTargetKey = {};
+
+  for (const binding of state.allBindings) {
+    if (binding.insideInstance) {
+      unmatched.push({
+        nodeId: binding.nodeId,
+        nodeName: binding.nodeName,
+        targetName: binding.targetName,
+        reason: "inside a component instance — change it on the main component, or detach first",
+      });
+      continue;
+    }
+
+    let target = null;
+    let matchedBy = "map";
+    const mapped = explicitMap[binding.targetKey];
+    if (mapped) {
+      const bucket = binding.kind === "variable" ? index.variables : index.styles;
+      const names = Object.keys(bucket.byName);
+      for (const name of names) {
+        if (bucket.byName[name].id === mapped || bucket.byName[name].key === mapped || name === mapped) {
+          target = bucket.byName[name];
+          break;
+        }
+      }
+      if (!target) {
+        unmatched.push({
+          nodeId: binding.nodeId,
+          nodeName: binding.nodeName,
+          targetName: binding.targetName,
+          reason: 'map entry "' + mapped + '" does not name a local ' + binding.kind,
+        });
+        continue;
+      }
+    } else {
+      const match = matchLocalTarget(index, binding, matchBy);
+      if (!match.target) {
+        unmatched.push({
+          nodeId: binding.nodeId,
+          nodeName: binding.nodeName,
+          targetName: binding.targetName,
+          reason: match.reason,
+        });
+        continue;
+      }
+      target = match.target;
+      matchedBy = match.matchedBy;
+    }
+
+    planned.push({ binding, target, matchedBy });
+    if (!byTargetKey[binding.targetKey]) {
+      byTargetKey[binding.targetKey] = {
+        from: binding.targetName,
+        to: target.name,
+        kind: binding.kind,
+        matchedBy: matchedBy,
+        count: 0,
+      };
+    }
+    byTargetKey[binding.targetKey].count++;
+  }
+
+  const mapping = Object.keys(byTargetKey).map((key) => byTargetKey[key]);
+
+  if (dryRun) {
+    return {
+      dryRun: true,
+      scope: scope,
+      rootIds: roots.map((node) => node.id),
+      nodesScanned: state.nodesScanned,
+      truncated: state.truncated,
+      wouldRebind: planned.length,
+      mapping: mapping,
+      unmatched: unmatched,
+      failures: state.failures,
+      note:
+        "Nothing was changed. Re-run with dryRun:false to apply. " +
+        "Bindings left in `unmatched` stay pointed at their current source.",
+    };
+  }
+
+  let rebound = 0;
+  const errors = [];
+  for (const plan of planned) {
+    const reason = await applyRemoteRebind(plan.binding, plan.target);
+    if (reason === null) rebound++;
+    else {
+      errors.push({
+        nodeId: plan.binding.nodeId,
+        nodeName: plan.binding.nodeName,
+        targetName: plan.binding.targetName,
+        reason: reason,
+      });
+    }
+  }
+
+  return {
+    dryRun: false,
+    scope: scope,
+    rootIds: roots.map((node) => node.id),
+    nodesScanned: state.nodesScanned,
+    truncated: state.truncated,
+    rebound: rebound,
+    attempted: planned.length,
+    mapping: mapping,
+    unmatched: unmatched,
+    errors: errors,
+    failures: state.failures,
+    note:
+      "A source disappears from the style picker only once nothing in the file " +
+      "references it. Re-run audit_remote_styles with scope:\"document\" to confirm, " +
+      "then reload the file.",
   };
 }

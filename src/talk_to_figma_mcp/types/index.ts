@@ -154,6 +154,8 @@ export type FigmaCommand =
   | "get_reactions"
   | "create_text_style"
   | "create_paint_style"
+  | "audit_remote_styles"
+  | "rebind_remote_styles"
   | "create_effect_style"
   | "get_activity_state"
   | "set_activity_overlay"

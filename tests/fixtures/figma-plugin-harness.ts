@@ -47,7 +47,22 @@ export interface MockFigmaOptions {
    * fixtures that declare their own geometry keep working unchanged.
    */
   layoutEngine?: boolean;
+  /**
+   * Styles the file can see. `remote: true` models a style owned by another
+   * file — the shape `audit_remote_styles` exists to find. Local styles are the
+   * ones getLocal*StylesAsync returns; remote ones are reachable only by id.
+   */
+  styles?: MockStyle[];
 }
+
+export type MockStyle = {
+  id: string;
+  name: string;
+  key: string;
+  /** PAINT | TEXT | EFFECT | GRID — Figma's BaseStyle.type. */
+  type: "PAINT" | "TEXT" | "EFFECT" | "GRID";
+  remote?: boolean;
+};
 
 /** Set by loadPlugin; read when a node is created. */
 const engine = { enabled: false, page: null as any };
@@ -133,6 +148,44 @@ export function makeNode(spec: any = {}): any {
       if (this.layoutMode === "VERTICAL") this.primaryAxisSizingMode = "FIXED";
       else if (this.layoutMode === "HORIZONTAL") this.counterAxisSizingMode = "FIXED";
       this._verticalSizing = "FIXED";
+    },
+    fillStyleId: spec.fillStyleId ?? "",
+    strokeStyleId: spec.strokeStyleId ?? "",
+    effectStyleId: spec.effectStyleId ?? "",
+    gridStyleId: spec.gridStyleId ?? "",
+    // Figma: the async setters are the supported path on the current API and
+    // they reject on a style id that does not resolve. Modelled as rejecting so
+    // a test cannot pass by assigning a bogus id.
+    async setFillStyleIdAsync(id: string) {
+      this.fillStyleId = id;
+    },
+    async setStrokeStyleIdAsync(id: string) {
+      this.strokeStyleId = id;
+    },
+    async setEffectStyleIdAsync(id: string) {
+      this.effectStyleId = id;
+    },
+    async setGridStyleIdAsync(id: string) {
+      this.gridStyleId = id;
+    },
+    async setTextStyleIdAsync(id: string) {
+      this.textStyleId = id;
+    },
+    /**
+     * Figma returns one entry per run of uniform styling. Fixtures declare the
+     * runs directly via `styledTextSegments`; a node without them reports a
+     * single run covering the whole string, which is what a real unmixed text
+     * node does.
+     */
+    getStyledTextSegments(fields: string[]) {
+      const declared = spec.styledTextSegments as any[] | undefined;
+      const runs =
+        declared ?? [{ start: 0, end: (this.characters ?? "").length }];
+      return runs.map((run: any) => {
+        const out: any = { start: run.start, end: run.end };
+        for (const field of fields) out[field] = run[field] ?? "";
+        return out;
+      });
     },
     setBoundVariable(field: string, variable: any) {
       if (variable === null) {
@@ -871,6 +924,9 @@ export function createMockFigma(options: MockFigmaOptions = {}) {
   const byId = new Map(variables.map((v) => [v.id, v]));
 
   const mixed = Symbol("figma.mixed");
+  const styles = options.styles ?? [];
+  const localStylesOfType = (type: string) =>
+    styles.filter((s) => s.type === type && !s.remote);
 
   return {
     mixed,
@@ -900,6 +956,15 @@ export function createMockFigma(options: MockFigmaOptions = {}) {
       setAsync: async (_key?: string, _value?: any): Promise<void> => undefined,
     },
     getNodeByIdAsync: async (id: string) => nodeRegistry.get(id) ?? null,
+    // Figma: getStyleByIdAsync resolves local AND remote styles; the
+    // getLocal*StylesAsync family returns local ones only. That asymmetry is
+    // the whole reason a remote binding is invisible to the rest of this
+    // plugin, so the mock has to keep the two apart.
+    getStyleByIdAsync: async (id: string) => styles.find((s) => s.id === id) ?? null,
+    getLocalPaintStylesAsync: async () => localStylesOfType("PAINT"),
+    getLocalTextStylesAsync: async () => localStylesOfType("TEXT"),
+    getLocalEffectStylesAsync: async () => localStylesOfType("EFFECT"),
+    getLocalGridStylesAsync: async () => localStylesOfType("GRID"),
     variables: {
       getLocalVariableCollectionsAsync: async () => collections,
       getVariableCollectionByIdAsync: async (id: string) =>

@@ -11,7 +11,7 @@ import { registerStructureTools } from "./structure-tools";
 import { registerSvgTools } from "./svg-tools";
 import { registerVariableTools } from "./variable-tools";
 import { registerFigJamTools } from "./figjam-tools";
-import { registerStyleTools } from "./style-tools";
+import { registerStyleTools, registerRemoteStyleTools } from "./style-tools";
 import { registerCommentTools } from "./comment-tools";
 import { registerWebflowTools } from "./webflow-tools";
 import { registerWebflowDesignerTools } from "./webflow-designer-tools";
@@ -125,6 +125,8 @@ export function registerTools(server: McpServer): void {
     registerVariableTools(server);
     registerFigJamTools(server);
     registerStyleTools(server);
+    // Foreign-style detection and rebinding — see the bottom of tools/style-tools.ts
+    registerRemoteStyleTools(server);
     // REST-based (no plugin channel required) — see tools/comment-tools.ts
     registerCommentTools(server);
     // Webflow Data API — the other REST transport, content only, no plugin
@@ -175,6 +177,7 @@ export {
   registerVariableTools,
   registerFigJamTools,
   registerStyleTools,
+  registerRemoteStyleTools,
   registerCommentTools,
   registerConnectionTools,
   registerSectionScopeTools,

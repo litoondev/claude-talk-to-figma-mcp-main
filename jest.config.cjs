@@ -25,6 +25,9 @@ module.exports = {
   ],
   moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/src/$1',
+    // `uuid` is ESM-only and ts-jest cannot parse it, which made any test that
+    // reached utils/websocket.ts fail on an import rather than on its subject.
+    '^uuid$': '<rootDir>/tests/mocks/uuid.ts',
   },
   setupFilesAfterEnv: ['<rootDir>/tests/setup.ts'],
   testTimeout: 10000,

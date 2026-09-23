@@ -490,20 +490,46 @@ Rebuild a Figma frame as a real Webflow page — every section, text, image and 
 
 This is the **opposite** of the HTML import above: that one reads a page and builds Figma, this one reads Figma and builds a page.
 
-### First, connect Webflow to Claude
+### First, turn on the two Webflow halves
 
-This plugin has no Webflow tools. Webflow ships its **own** MCP server, and Claude runs both side by side: this plugin reads Figma, Webflow's server writes the site. You only have to do this once.
+Everything here runs through **this** plugin. You do **not** need Webflow's own
+MCP server, its connector, or its MCP Bridge App — this replaces all three, and
+routes by channel instead of by site id so one agent gets one editor.
 
-1. In Claude Desktop, click the **`+`** in the chat box → **Add connectors**.
-2. Search for **Webflow**. If you don't see it, switch the list from **Featured** to **All**.
-3. Click it → **Connect**, then log in to Webflow and **Authorize App**, choosing which sites and Workspaces Claude may touch.
-4. Open the Webflow connector → **Configure** to decide whether Claude may act on its own or must ask you before every change. Asking is the safer default while you're learning what it does.
+Webflow splits its API in two, and each half is switched on separately in
+Claude Desktop → Settings → Extensions → this extension:
 
-> 💡 **If the Webflow connector isn't in the list**, add it by hand as a custom connector with the URL `https://mcp.webflow.com/mcp`.
+| Half | What it does | Switch it on with | Also needs |
+|---|---|---|---|
+| **Content** | Sites, pages, SEO, page copy, CMS, publishing | **Webflow API token** | Nothing else |
+| **Canvas** | Elements, classes, tag styles, variables, components | **Webflow Designer tools** (checkbox) | The Designer Extension running |
+
+**Quit Claude Desktop completely (`Cmd`+`Q`) and reopen after changing either.**
+A config change does not take effect until it restarts.
+
+**For the token:** Webflow → Site settings → **Apps & integrations → API access →
+Generate API token**, with `sites:read`, `pages:read` and `cms:read` (add
+`pages:write` and `cms:write` to let Claude edit). Check it before wiring it in:
+
+```bash
+WEBFLOW_TOKEN=your_token npm run webflow:check
+```
+
+**For the canvas:** the Designer Extension has to be running and joined to the
+same channel as Figma — see [`webflow_extension/README.md`](webflow_extension/README.md).
+To try the canvas tools with no Webflow account at all:
+
+```bash
+npm run webflow:harness -- <channel-id>
+```
+
+> 🚦 **Not sure what is missing?** Ask Claude to run `webflow_preflight`. One call
+> reports all three legs — Figma channel, token and scopes, extension — with the
+> fix for each.
 >
-> ⚠️ **A bare URL in `claude_desktop_config.json` won't work.** That file only starts local (stdio) servers, and Webflow's is remote. Use **Add connectors** above — or, if you prefer the config file, Webflow's own docs bridge it with the `mcp-remote` shim: `"command": "npx", "args": ["mcp-remote", "https://mcp.webflow.com/sse"]`. Restart Claude Desktop afterwards and an OAuth page opens.
->
-> 🔓 **Open the Designer *and* launch the Bridge App** before Claude builds anything. In the Designer, open the Apps panel (press `E`) and launch **Webflow MCP Bridge App**. The tools that create elements, styles, variables and components reach the canvas through it, so they go quiet if the panel is closed or the tab is shut. The CMS and site tools work without it.
+> ⚠️ **If Claude says it cannot build layout and asks you to install Webflow's
+> connector or MCP Bridge App**, the *Webflow Designer tools* checkbox is off, or
+> Claude Desktop was not restarted after ticking it.
 
 ### How to use it
 
@@ -552,7 +578,7 @@ Webflow's cascade also only flows **downward** — a value set on Desktop reache
 
 ### Built in: Webflow content tools
 
-The section above uses Webflow's **own** MCP server for canvas work. Separately, this plugin now has **16 Webflow tools of its own** that talk straight to Webflow's Data API — no second MCP server, no Designer, no bridge app.
+The canvas tools above build layout. Alongside them, **16 content tools** talk straight to Webflow's Data API — pages, SEO, CMS, publishing — with no Designer and no extension needed, because every call is addressed by an explicit id.
 
 They appear only when you set a **Webflow API token**: Claude Desktop → Settings → Extensions → this extension → **Webflow API token**. Leave it blank and they stay hidden, costing you nothing. (Token: Webflow → Site settings → **Apps & integrations → API access → Generate API token**. Read-only is enough for every `webflow_get_*` and `webflow_list_*` tool.)
 
@@ -1022,20 +1048,46 @@ cd ~/Documents/claude-talk-to-figma-mcp-main && npm run socket
 
 এটা উপরের HTML ইমপোর্টের **উল্টো কাজ**: ওটা পেজ পড়ে Figma বানায়, এটা Figma পড়ে পেজ বানায়।
 
-### আগে Webflow-কে Claude-এর সাথে জুড়ে নিন
+### আগে Webflow-এর দুই ভাগ চালু করুন
 
-এই প্লাগইনে Webflow-এর কোনো টুল নেই। Webflow-এর **নিজস্ব** MCP সার্ভার আছে, আর Claude দুটোকে পাশাপাশি চালায়: এই প্লাগইন Figma পড়ে, Webflow-এর সার্ভার সাইট বানায়। এটা একবারই করতে হবে।
+সবকিছু **এই** প্লাগইনের মধ্য দিয়েই চলে। Webflow-এর নিজস্ব MCP সার্ভার, কানেক্টর বা
+MCP Bridge App — কোনোটাই **লাগবে না**; এই প্লাগইন তিনটারই কাজ করে, আর site id-র
+বদলে চ্যানেল ধরে রুট করে বলে এক এজেন্ট এক এডিটর পায়।
 
-১. Claude Desktop-এ চ্যাট বক্সের **`+`** চিহ্নে ক্লিক করুন → **Add connectors**।
-২. **Webflow** লিখে খুঁজুন। না পেলে তালিকাটা **Featured** থেকে **All**-এ বদলে নিন।
-৩. সেটায় ক্লিক করে **Connect** দিন, Webflow-এ লগইন করুন, তারপর কোন সাইট ও Workspace-এ Claude হাত দিতে পারবে সেগুলো বেছে **Authorize App** চাপুন।
-৪. Webflow কানেক্টরটা খুলে **Configure**-এ গিয়ে ঠিক করুন Claude নিজে থেকে কাজ করবে নাকি প্রতিবার আপনার অনুমতি নেবে। শুরুর দিকে **অনুমতি নেওয়াটাই** নিরাপদ।
+Webflow-এর API দুই ভাগে বিভক্ত, আর দুটো আলাদা করে চালু করতে হয় — Claude Desktop →
+Settings → Extensions → এই এক্সটেনশন:
 
-> 💡 **তালিকায় Webflow কানেক্টর না থাকলে** নিজে হাতে custom connector হিসেবে যোগ করুন, URL: `https://mcp.webflow.com/mcp`।
+| ভাগ | যা করে | যেভাবে চালু করবেন | আরও যা লাগে |
+|---|---|---|---|
+| **কনটেন্ট** | সাইট, পেজ, SEO, পেজের কপি, CMS, পাবলিশ | **Webflow API token** | আর কিছু না |
+| **ক্যানভাস** | এলিমেন্ট, ক্লাস, ট্যাগ স্টাইল, ভেরিয়েবল, কম্পোনেন্ট | **Webflow Designer tools** (চেকবক্স) | Designer Extension চালু থাকতে হবে |
+
+**যেকোনো একটা বদলানোর পর Claude Desktop পুরোপুরি বন্ধ করে (`Cmd`+`Q`) আবার খুলুন।**
+রিস্টার্ট না করলে কনফিগের পরিবর্তন কাজ করে না।
+
+**টোকেনের জন্য:** Webflow → Site settings → **Apps & integrations → API access →
+Generate API token**, স্কোপ: `sites:read`, `pages:read`, `cms:read` (Claude-কে এডিট
+করতে দিতে চাইলে `pages:write` আর `cms:write`-ও)। বসানোর আগে যাচাই করে নিন:
+
+```bash
+WEBFLOW_TOKEN=your_token npm run webflow:check
+```
+
+**ক্যানভাসের জন্য:** Designer Extension চালু থাকতে হবে আর Figma-র মতো একই চ্যানেলে
+জয়েন করতে হবে — দেখুন [`webflow_extension/README.md`](webflow_extension/README.md)।
+Webflow অ্যাকাউন্ট ছাড়াই ক্যানভাসের টুল পরখ করতে:
+
+```bash
+npm run webflow:harness -- <channel-id>
+```
+
+> 🚦 **কী বাকি আছে বুঝতে পারছেন না?** Claude-কে `webflow_preflight` চালাতে বলুন। এক
+> কলেই তিনটা দিক — Figma চ্যানেল, টোকেন ও স্কোপ, এক্সটেনশন — সবের অবস্থা আর সমাধান
+> একসাথে বলে দেবে।
 >
-> ⚠️ **`claude_desktop_config.json`-এ শুধু URL বসালে চলবে না।** ওই ফাইল শুধু লোকাল (stdio) সার্ভার চালু করে, আর Webflow-এরটা রিমোট। উপরের **Add connectors** ব্যবহার করুন — অথবা config ফাইলই যদি পছন্দ হয়, Webflow-এর নিজের ডকে `mcp-remote` শিম দিয়ে সেতু বানানো আছে: `"command": "npx", "args": ["mcp-remote", "https://mcp.webflow.com/sse"]`। এরপর Claude Desktop রিস্টার্ট করলে OAuth পেজ খুলবে।
->
-> 🔓 **Designer খুলুন, সাথে Bridge App-ও চালু করুন।** Designer-এ Apps প্যানেল খুলে (`E` চাপুন) **Webflow MCP Bridge App** চালু করুন। এলিমেন্ট, স্টাইল, ভেরিয়েবল আর কম্পোনেন্ট বানানোর টুলগুলো এটার মাধ্যমেই ক্যানভাসে পৌঁছায়, তাই প্যানেল বন্ধ থাকলে বা ট্যাব বন্ধ হলে ওগুলো চুপ হয়ে যায়। CMS আর সাইটের টুল অবশ্য এটা ছাড়াই চলে।
+> ⚠️ **Claude যদি বলে লেআউট বানাতে পারছে না আর Webflow-এর কানেক্টর বা MCP Bridge App
+> ইনস্টল করতে বলে**, তার মানে *Webflow Designer tools* চেকবক্সটা বন্ধ আছে, অথবা
+> টিক দেওয়ার পর Claude Desktop রিস্টার্ট করা হয়নি।
 
 ### কীভাবে ব্যবহার করবেন
 

@@ -1,7 +1,7 @@
 /**
  * Tool profiles.
  *
- * The full tool set is 162 tools ≈ 40k tokens of JSON schema, and that schema is
+ * The full tool set is 167 tools ≈ 41k tokens of JSON schema, and that schema is
  * re-sent on *every* model request for the whole session. Most sessions use a
  * fraction of it. A profile trims the advertised set to what the work actually
  * needs, which cuts per-request cost and leaves more of the context window for
@@ -11,7 +11,11 @@
  *   core     — ~64 tools (~18k tokens). Layout, text, colour, variables, responsive.
  *   standard — ~105 tools (~25k tokens). Everything except FigJam, REST comments,
  *              Webflow and activity tracking. **Default.**
- *   full     — all 162 tools (~40k tokens). The previous behaviour.
+ *   full     — all 167 tools (~41k tokens). The previous behaviour.
+ *
+ * The counts above are asserted against the live registry in
+ * tests/unit/tool-counts.test.ts, because a number maintained by hand drifts
+ * every time a tool is added and is then quoted in the readme as fact.
  *
  * A profile only changes what is advertised, never what the plugin can do:
  * anything omitted is still reachable through `figma_batch`.

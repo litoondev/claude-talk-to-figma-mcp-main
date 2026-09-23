@@ -531,3 +531,74 @@ export async function downloadAssetBinary(url: string): Promise<Buffer> {
     clearTimeout(timer);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Style metadata — naming the file a remote style belongs to
+// ---------------------------------------------------------------------------
+//
+// The Plugin API tells you a style is `remote` and gives you its key, but never
+// which file owns it. That is exactly the fact a designer needs when the style
+// picker shows sections they did not ask for. REST does expose it: a style key
+// resolves to the `file_key` that published it, and the file key resolves to a
+// name. See tools/style-tools.ts (`audit_remote_styles`).
+
+export interface FigmaStyleMeta {
+  key: string;
+  file_key: string;
+  node_id: string;
+  style_type: string;
+  name: string;
+  description?: string;
+}
+
+/** GET /v1/styles/:key — resolves a published style key to its owning file. */
+export async function getStyleMeta(styleKey: string): Promise<FigmaStyleMeta> {
+  const data = await figmaRest<{ meta: FigmaStyleMeta }>(
+    `/v1/styles/${encodeURIComponent(styleKey)}`
+  );
+  return data.meta;
+}
+
+/**
+ * Resolve many style keys to `{ fileKey, fileName }`, memoising file names so a
+ * library contributing 40 styles costs one file lookup rather than 40.
+ *
+ * Never throws: a key the token cannot see returns a `reason` instead, because
+ * a partial answer ("two of these three sources are named") is far more useful
+ * here than a failed audit.
+ */
+export async function resolveStyleSources(
+  styleKeys: string[]
+): Promise<Record<string, { fileKey?: string; fileName?: string; reason?: string }>> {
+  const out: Record<string, { fileKey?: string; fileName?: string; reason?: string }> = {};
+  const fileNames = new Map<string, string>();
+
+  const metas = await mapWithConcurrency(styleKeys, 5, async (key) => {
+    try {
+      return { key, meta: await getStyleMeta(key) };
+    } catch (error) {
+      return { key, reason: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  for (const entry of metas) {
+    if (!("meta" in entry) || !entry.meta) {
+      out[entry.key] = { reason: (entry as { reason?: string }).reason };
+      continue;
+    }
+    const fileKey = entry.meta.file_key;
+    if (!fileNames.has(fileKey)) {
+      try {
+        fileNames.set(fileKey, (await getFileMetadata(fileKey)).name);
+      } catch {
+        // The style resolved but its file did not — report the key, which is
+        // still enough to tell two sources apart.
+        fileNames.set(fileKey, "");
+      }
+    }
+    const name = fileNames.get(fileKey) || "";
+    out[entry.key] = name ? { fileKey, fileName: name } : { fileKey };
+  }
+
+  return out;
+}
