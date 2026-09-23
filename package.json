@@ -23,6 +23,8 @@
   "scripts": {
     "start": "bun run dist/talk_to_figma_mcp/server.js",
     "socket": "bun run dist/socket.js",
+    "webflow:harness": "node scripts/webflow-extension-harness.mjs",
+    "webflow:check": "node scripts/webflow-check.mjs",
     "setup": "./scripts/setup.sh",
     "build": "npm run build:skills && tsup && chmod +x dist/talk_to_figma_mcp/server.js dist/socket.js",
     "typecheck": "tsc --noEmit -p tsconfig.json",

@@ -1,0 +1,10 @@
+{
+  "name": "talk-to-figma-webflow-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Webflow Designer Extension that joins the Talk to Figma relay and executes Designer API commands.",
+  "scripts": {
+    "dev": "webflow extension serve",
+    "bundle": "webflow extension bundle"
+  }
+}

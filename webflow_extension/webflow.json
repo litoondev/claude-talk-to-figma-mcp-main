@@ -1,0 +1,11 @@
+{
+  "name": "Talk to Figma — Webflow Bridge",
+  "apiVersion": "2",
+  "size": "comfortable",
+  "publicDir": "public",
+  "appIntents": {},
+  "featureFlags": {
+    "customCode": true
+  },
+  "appConnections": []
+}
