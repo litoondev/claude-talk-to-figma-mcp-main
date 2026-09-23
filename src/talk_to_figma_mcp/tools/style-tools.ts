@@ -284,17 +284,31 @@ export function registerRemoteStyleTools(server: McpServer): void {
           byFile[label].usages += style.usages;
         }
 
-        const clean = audit.remoteStyleCount === 0 && audit.remoteVariableCount === 0;
+        // Ledger L10: a check that could not run must never be reported as a
+        // pass. A walk that hit its node budget or failed on a subtree has not
+        // seen the whole file, and "no foreign styles" from a partial scan is
+        // the exact false all-clear that sends someone to reload a file that
+        // was never actually clean.
+        const nothingFound = audit.remoteStyleCount === 0 && audit.remoteVariableCount === 0;
+        const incomplete = audit.truncated || audit.failures.length > 0;
+        const verdict = !nothingFound ? "foreign-sources-found" : incomplete ? "incomplete" : "clean";
+        const clean = verdict === "clean";
 
         return jsonResponse({
           scope: audit.scope,
           nodesScanned: audit.nodesScanned,
           truncated: audit.truncated,
+          verdict,
           clean,
-          summary: clean
-            ? `No foreign styles or variables in ${audit.nodesScanned} nodes — the picker will show local sources only.`
-            : `${audit.totalBindings} binding(s) across ${audit.remoteStyleCount} foreign style(s) ` +
-              `and ${audit.remoteVariableCount} foreign variable(s).`,
+          summary:
+            verdict === "clean"
+              ? `No foreign styles or variables in ${audit.nodesScanned} nodes — the picker will show local sources only.`
+              : verdict === "incomplete"
+                ? `SCAN INCOMPLETE — nothing foreign found in the ${audit.nodesScanned} nodes that were read, but ` +
+                  `${audit.truncated ? "the scan hit its node budget" : `${audit.failures.length} subtree(s) could not be read`}. ` +
+                  `This is not an all-clear.`
+                : `${audit.totalBindings} binding(s) across ${audit.remoteStyleCount} foreign style(s) ` +
+                  `and ${audit.remoteVariableCount} foreign variable(s).`,
           sourceFiles: byFile,
           sourceNote,
           styles: audit.styles.map((style) => ({
@@ -309,9 +323,12 @@ export function registerRemoteStyleTools(server: McpServer): void {
           localStyleNames: audit.localStyleNames,
           localVariableNames: audit.localVariableNames,
           failures: audit.failures,
-          nextStep: clean
-            ? null
-            : "Run rebind_remote_styles (dryRun defaults to true) to see what would be repointed at local equivalents.",
+          nextStep:
+            verdict === "clean"
+              ? null
+              : verdict === "incomplete"
+                ? "Re-run with a narrower nodeId, or raise nodeBudget, until the scan completes before trusting the result."
+                : "Run rebind_remote_styles (dryRun defaults to true) to see what would be repointed at local equivalents.",
         });
       } catch (error) {
         return errorResponse("audit remote styles", error);

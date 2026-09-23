@@ -139,3 +139,23 @@ Read at the start of every change. Sweep at QA.
   produces, not that the line appears. The test
   `says the manifest is missing rather than claiming coverage` asserted the
   string and passed for the whole life of the bug.
+
+
+- **Recurred (`audit_remote_styles`, same class, third appearance):** the new
+  audit computed `clean = remoteStyleCount === 0 && remoteVariableCount === 0`
+  and printed "the picker will show local sources only". The walk has a node
+  budget and a per-subtree `failures[]`, so a scan that read 300 nodes of a
+  4,000-node file and gave up produced exactly that sentence. One binding
+  anywhere in the document keeps a source in the style picker, which makes a
+  partial scan's "nothing found" worse than no answer: the user reloads the file
+  expecting the section to be gone. Caught at QA, before anything shipped.
+  **Stronger guard:** the verdict is now a three-way `verdict` field —
+  `clean` / `incomplete` / `foreign-sources-found` — and *any* truncation or
+  read failure forces `incomplete`, matching `audit_structure_match` and
+  `audit_generated_code`. The rule this ledger keeps relearning, stated once
+  more: **a boolean pass computed only from "how much did I find" is wrong
+  whenever "how much did I look at" can vary.** Every scan-shaped feature needs
+  the coverage term in the verdict, not just in the payload.
+  **QA test:** `tests/integration/remote-styles-tool.test.ts` asserts the
+  verdict for a truncated scan and for a scan with unreadable subtrees, not the
+  presence of a status line.
