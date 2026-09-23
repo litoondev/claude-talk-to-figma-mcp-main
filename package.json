@@ -26,9 +26,9 @@
     "webflow:harness": "node scripts/webflow-extension-harness.mjs",
     "webflow:check": "node scripts/webflow-check.mjs",
     "setup": "./scripts/setup.sh",
-    "build": "npm run build:skills && tsup && chmod +x dist/talk_to_figma_mcp/server.js dist/socket.js",
+    "build": "npm run build:skills && npm run build:prompts && tsup && chmod +x dist/talk_to_figma_mcp/server.js dist/socket.js",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "build:win": "npm run build:skills && tsup",
+    "build:win": "npm run build:skills && npm run build:prompts && tsup",
     "build:watch": "tsup --watch",
     "dev": "bun run build:watch",
     "pack": "dxt pack && cp claude-talk-to-figma-mcp-main.dxt claude-talk-to-figma-mcp.mcpb && cp claude-talk-to-figma-mcp-main.dxt claude-talk-to-figma-mcp.dxt",
@@ -41,7 +41,8 @@
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
     "test:integration": "node scripts/test-integration.js",
-    "build:skills": "node scripts/build-skills.js"
+    "build:skills": "node scripts/build-skills.js",
+    "build:prompts": "node scripts/build-operation-prompts.js"
   },
   "devDependencies": {
     "@anthropic-ai/dxt": "^0.2.0",

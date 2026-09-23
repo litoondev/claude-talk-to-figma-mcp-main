@@ -29,7 +29,7 @@ function main() {
 
   const entries = files.map((name) => ({
     id: name.replace(/\.md$/i, ""),
-    text: fs.readFileSync(path.join(SKILLS_DIR, name), "utf8"),
+    text: fs.readFileSync(path.join(SKILLS_DIR, name), "utf8").replace(/\r\n/g, "\n"),
   }));
 
   const body = entries
