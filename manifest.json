@@ -46,6 +46,22 @@
       "max": 10,
       "required": false
     },
+    "webflow_token": {
+      "type": "string",
+      "title": "Webflow API token",
+      "description": "Optional. Enables the Webflow tools, which read and write site content through Webflow's Data API: pages, SEO fields, page copy, CMS collections and items, and publishing. Create one at Webflow -> Site settings -> Apps & integrations -> API access, with only the scopes you need (read-only is enough for every webflow_get_*/webflow_list_* tool). Leave blank and the Webflow tools stay hidden. Note: the Data API cannot build layouts - elements, styles and variables live in Webflow's Designer API, which only runs inside a Designer Extension.",
+      "sensitive": true,
+      "required": false
+    },
+    "webflow_api_concurrency": {
+      "type": "number",
+      "title": "Webflow request concurrency",
+      "description": "How many Webflow requests to run in parallel when sweeping pages or collections. Lower this if you hit rate limits.",
+      "default": 4,
+      "min": 1,
+      "max": 10,
+      "required": false
+    },
     "figma_max_response_chars": {
       "type": "number",
       "title": "Maximum tool response size (characters)",
@@ -84,7 +100,9 @@
         "FIGMA_MCP_PROFILE": "${user_config.figma_tool_profile}",
         "FIGMA_MCP_MAX_RESPONSE_CHARS": "${user_config.figma_max_response_chars}",
         "FIGMA_MCP_SKILLS_DIR": "${user_config.figma_skills_dir}",
-        "FIGMA_MCP_SKILL_AUTOREPAIR": "${user_config.figma_skill_autorepair}"
+        "FIGMA_MCP_SKILL_AUTOREPAIR": "${user_config.figma_skill_autorepair}",
+        "WEBFLOW_TOKEN": "${user_config.webflow_token}",
+        "WEBFLOW_API_CONCURRENCY": "${user_config.webflow_api_concurrency}"
       }
     }
   },

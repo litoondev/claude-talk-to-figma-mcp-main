@@ -1,7 +1,7 @@
 /**
  * Tool profiles.
  *
- * The full tool set is 133 tools ≈ 33k tokens of JSON schema, and that schema is
+ * The full tool set is 161 tools ≈ 40k tokens of JSON schema, and that schema is
  * re-sent on *every* model request for the whole session. Most sessions use a
  * fraction of it. A profile trims the advertised set to what the work actually
  * needs, which cuts per-request cost and leaves more of the context window for
@@ -9,15 +9,16 @@
  *
  * Select with the FIGMA_MCP_PROFILE environment variable:
  *   core     — ~64 tools (~18k tokens). Layout, text, colour, variables, responsive.
- *   standard — ~105 tools (~25k tokens). Everything except FigJam, REST comments
- *              and activity tracking. **Default.**
- *   full     — all 133 tools (~33k tokens). The previous behaviour.
+ *   standard — ~105 tools (~25k tokens). Everything except FigJam, REST comments,
+ *              Webflow and activity tracking. **Default.**
+ *   full     — all 161 tools (~40k tokens). The previous behaviour.
  *
  * A profile only changes what is advertised, never what the plugin can do:
  * anything omitted is still reachable through `figma_batch`.
  */
 
 import { hasFigmaToken } from "../utils/figma-rest";
+import { hasWebflowToken } from "../utils/webflow-rest";
 
 export type ProfileName = "core" | "standard" | "full";
 
@@ -40,6 +41,68 @@ export const REST_COMMENT_TOOLS: readonly string[] = [
   "reply_to_comments",
   "delete_comment",
 ];
+
+/**
+ * The Webflow Data API tools.
+ *
+ * Withheld from `standard` on the same reasoning as the REST comment tools, and
+ * with the same exception: the cost of advertising them only buys something
+ * while the user has no way to call them. A configured WEBFLOW_TOKEN is the
+ * signal that this session intends to touch Webflow, so the exclusion is
+ * conditional on the token rather than absolute.
+ *
+ * These never appear in `core`. Core is the Figma design loop, and a Webflow
+ * content call has no place in it.
+ */
+export const WEBFLOW_TOOLS: readonly string[] = [
+  "webflow_list_sites",
+  "webflow_get_site",
+  "webflow_create_site",
+  "webflow_list_pages",
+  "webflow_get_page",
+  "webflow_update_page_settings",
+  "webflow_get_page_content",
+  "webflow_update_page_content",
+  "webflow_list_collections",
+  "webflow_get_collection",
+  "webflow_list_items",
+  "webflow_create_items",
+  "webflow_update_items",
+  "webflow_publish_items",
+  "webflow_delete_items",
+  "webflow_publish_site",
+];
+
+/**
+ * The Webflow Designer tools — the canvas half, over the relay.
+ *
+ * Gated separately from the Data API tools: those need a token, these need a
+ * Designer extension on the channel, and the two are configured independently.
+ * A token says nothing about whether an extension is running, so these cannot
+ * ride on `hasWebflowToken()`; they are withheld from `standard` and `core`
+ * unless FIGMA_MCP_WEBFLOW_DESIGNER is set, and always available in `full`.
+ * Anything withheld is still callable through `figma_batch`.
+ */
+export const WEBFLOW_DESIGNER_TOOLS: readonly string[] = [
+  "webflow_designer_status",
+  "webflow_designer_get_structure",
+  "webflow_designer_get_styles",
+  "webflow_designer_get_variables",
+  "webflow_designer_create_variables",
+  "webflow_designer_set_tag_style",
+  "webflow_designer_set_style",
+  "webflow_designer_create_element",
+  "webflow_designer_set_text",
+  "webflow_designer_delete_element",
+  "webflow_designer_create_component",
+  "webflow_designer_insert_component",
+];
+
+/** True when the user has opted into the Webflow Designer tools. */
+export function webflowDesignerEnabled(): boolean {
+  const raw = (process.env.FIGMA_MCP_WEBFLOW_DESIGNER || "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "on" || raw === "yes";
+}
 
 /**
  * The minimum set that covers the common loop: inspect the design system,
@@ -142,6 +205,12 @@ export const STANDARD_EXCLUDED: readonly string[] = [
   // REST comments / account — only when no FIGMA_ACCESS_TOKEN is configured;
   // see REST_COMMENT_TOOLS and makeToolFilter.
   ...REST_COMMENT_TOOLS,
+  // Webflow Data API — only when no WEBFLOW_TOKEN is configured;
+  // see WEBFLOW_TOOLS and makeToolFilter.
+  ...WEBFLOW_TOOLS,
+  // Webflow Designer — only when FIGMA_MCP_WEBFLOW_DESIGNER is off;
+  // see WEBFLOW_DESIGNER_TOOLS and makeToolFilter.
+  ...WEBFLOW_DESIGNER_TOOLS,
   // activity tracking
   "get_activity_log",
   "set_activity_overlay",
@@ -182,6 +251,16 @@ export function makeToolFilter(profile: ProfileName = getProfile()): (name: stri
   // A configured token is the signal that this session intends to use comments.
   if (hasFigmaToken()) {
     for (const name of REST_COMMENT_TOOLS) denied.delete(name);
+  }
+  // Likewise for Webflow: a token means the user set the integration up, and
+  // hiding the tools would have the model report it cannot reach Webflow.
+  if (hasWebflowToken()) {
+    for (const name of WEBFLOW_TOOLS) denied.delete(name);
+  }
+  // The Designer tools need a running extension, which no environment variable
+  // can prove — so this is an explicit opt-in rather than an inference.
+  if (webflowDesignerEnabled()) {
+    for (const name of WEBFLOW_DESIGNER_TOOLS) denied.delete(name);
   }
   return (name) => !denied.has(name);
 }

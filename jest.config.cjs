@@ -8,7 +8,12 @@ module.exports = {
     '**/tests/**/*.spec.ts'
   ],
   testPathIgnorePatterns: [
-    '/tests/unit/socket-queue.test.ts'
+    // Relay tests run under bun (`bun test`), not jest: they import bun:test and
+    // drive a real Bun.serve instance.
+    '/tests/unit/socket-queue.test.ts',
+    '/tests/unit/socket-webflow-routing.test.ts',
+    // Loads the extension's plain-JS command table with a fake `webflow` global.
+    '/tests/unit/webflow-extension.test.ts'
   ],
   transform: {
     '^.+\\.tsx?$': ['ts-jest', { useESM: true }],

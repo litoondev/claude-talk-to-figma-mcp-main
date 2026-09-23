@@ -240,7 +240,8 @@ export function getCurrentChannel(): string | null {
 function sendCommandRaw(
   command: FigmaCommand,
   params: unknown = {},
-  timeoutMs: number = 300000
+  timeoutMs: number = 300000,
+  target: "figma" | "webflow" = "figma"
 ): Promise<unknown> {
   return new Promise((resolve, reject) => {
     // If not connected, try to connect first
@@ -285,6 +286,9 @@ function sendCommandRaw(
       message: {
         id,
         command,
+        // Which editor the relay should deliver this to. Omitted for Figma so
+        // older relays, which know nothing about targets, are unaffected.
+        ...(target === "webflow" ? { target } : {}),
         params: {
           ...effectiveParams,
           commandId: id, // Include the command ID in params
@@ -340,4 +344,20 @@ export function sendCommandToFigma(
   }
 
   return sendCommandRaw(command, params, timeoutMs);
+}
+
+/**
+ * Send a command to the Webflow Designer extension over the same relay.
+ *
+ * Shares the channel, the queue and the reconnection logic with the Figma path
+ * — only the delivery target differs. The Figma read cache is deliberately not
+ * consulted: the two editors have separate documents, and a cache keyed by
+ * command name alone would collide across them.
+ */
+export function sendCommandToWebflow(
+  command: string,
+  params: unknown = {},
+  timeoutMs: number = 300000
+): Promise<unknown> {
+  return sendCommandRaw(command as FigmaCommand, params, timeoutMs, "webflow");
 }

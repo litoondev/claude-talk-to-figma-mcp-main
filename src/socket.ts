@@ -104,6 +104,35 @@ const requestToClient = new Map<string, { ws: ServerWebSocket<any>; timestamp: n
 const pluginClients = new Set<ServerWebSocket<any>>();
 const agentClients = new Set<ServerWebSocket<any>>();
 
+/**
+ * Webflow Designer Extension clients.
+ *
+ * A second editor on the same relay. It cannot be told apart from the Figma
+ * plugin by behaviour — both answer commands and never send them — so it
+ * announces itself with `role: "webflow"` on join. The implicit classification
+ * below still handles the Figma plugin, which predates roles and must keep
+ * working unchanged.
+ *
+ * Routing is per command, not per channel: a message carrying
+ * `target: "webflow"` goes here, anything else goes to the Figma plugin. One
+ * channel can therefore hold both editors and drive them independently, while
+ * `channelQueues` still serialises writes across both.
+ */
+const webflowClients = new Set<ServerWebSocket<any>>();
+
+/** Which editor a queued command is addressed to. */
+type CommandTarget = "figma" | "webflow";
+
+/** Read the target off a relay message, defaulting to Figma for older clients. */
+function commandTarget(data: any): CommandTarget {
+  return data?.message?.target === "webflow" ? "webflow" : "figma";
+}
+
+const TARGET_LABEL: Record<CommandTarget, string> = {
+  figma: "Figma plugin",
+  webflow: "Webflow Designer extension",
+};
+
 // Session deduplication: MCP agents send a stable sessionId in join messages.
 // When the same session reconnects (e.g., after context compaction), the old
 // connection is closed to prevent stale connections polluting routing.
@@ -154,6 +183,26 @@ function getPluginClient(channelName: string): ServerWebSocket<any> | null {
   return null;
 }
 
+/** The Webflow Designer extension in a channel, if one has joined. */
+function getWebflowClient(channelName: string): ServerWebSocket<any> | null {
+  const clients = channels.get(channelName);
+  if (!clients) return null;
+  for (const client of clients) {
+    if (webflowClients.has(client)) return client;
+  }
+  return null;
+}
+
+/** The client a command should be delivered to, by target. */
+function getTargetClient(
+  channelName: string,
+  target: CommandTarget
+): ServerWebSocket<any> | null {
+  return target === "webflow"
+    ? getWebflowClient(channelName)
+    : getPluginClient(channelName);
+}
+
 function validateCommand(data: any, channelName: string): string | null {
   // Stateful commands are ALWAYS blocked regardless of agent count.
   // This prevents page-context conflicts between concurrent callers (sub-agents
@@ -176,9 +225,31 @@ function validateCommand(data: any, channelName: string): string | null {
   return null; // Valid
 }
 
+/**
+ * Classify a client from the `role` it declares on join.
+ *
+ * Explicit beats inferred: the Webflow extension and the Figma plugin are
+ * indistinguishable by traffic shape, so guessing would route commands to
+ * whichever happened to connect first.
+ */
+function classifyClientByRole(ws: ServerWebSocket<any>, role: unknown): void {
+  if (role === "webflow") {
+    webflowClients.add(ws);
+    pluginClients.delete(ws);
+    logger.info(`Client ${ws.data?.clientId} declared role: Webflow Designer extension`);
+  } else if (role === "figma" || role === "plugin") {
+    pluginClients.add(ws);
+    webflowClients.delete(ws);
+    logger.info(`Client ${ws.data?.clientId} declared role: Figma plugin`);
+  } else if (role === "agent") {
+    agentClients.add(ws);
+    logger.info(`Client ${ws.data?.clientId} declared role: MCP agent`);
+  }
+}
+
 function classifyClient(ws: ServerWebSocket<any>, data: any): void {
   // Already classified
-  if (pluginClients.has(ws) || agentClients.has(ws)) return;
+  if (pluginClients.has(ws) || agentClients.has(ws) || webflowClients.has(ws)) return;
 
   // Plugin sends responses (result/error fields) — it never sends commands
   if (data.message?.result !== undefined || data.message?.error !== undefined) {
@@ -278,7 +349,8 @@ function processQueue(channelName: string): void {
   // non-agent clients (bootstrap case: plugin hasn't been classified yet because
   // classification requires seeing a response, which requires receiving a command first).
   // Non-plugin clients (e.g., MCP) will simply ignore the message (no matching pending request).
-  const pluginClient = getPluginClient(channelName);
+  const target = commandTarget(item.data);
+  const pluginClient = getTargetClient(channelName, target);
   const payload = JSON.stringify({
     type: "broadcast",
     message: item.data.message,
@@ -297,12 +369,16 @@ function processQueue(channelName: string): void {
       logger.error(`Failed to forward command to plugin:`, error);
       stats.errors++;
     }
-  } else {
-    // No classified plugin — forward to all non-agent clients (bootstrap fallback)
+  } else if (target === "figma") {
+    // No classified plugin — forward to all non-agent clients (bootstrap fallback).
+    // Only ever for Figma: the plugin is classified by its first response, so it
+    // needs a command before it can be recognised. The Webflow extension declares
+    // its role on join and needs no bootstrap, and broadcasting to it blindly is
+    // exactly the misrouting Webflow's own bridge suffers from.
     const clients = channels.get(channelName);
     if (clients) {
       for (const client of clients) {
-        if (!agentClients.has(client) && client.readyState === WebSocket.OPEN) {
+        if (!agentClients.has(client) && !webflowClients.has(client) && client.readyState === WebSocket.OPEN) {
           try {
             client.send(payload);
             stats.messagesSent++;
@@ -317,11 +393,12 @@ function processQueue(channelName: string): void {
 
   if (!forwarded) {
     // No plugin connected — reject the command
-    logger.warn(`No plugin client in channel ${channelName}, rejecting queued command`);
+    const missing = `No ${TARGET_LABEL[target]} connected to this channel`;
+    logger.warn(`${missing} (${channelName}), rejecting queued command`);
     if (item.senderWs.readyState === WebSocket.OPEN) {
       item.senderWs.send(JSON.stringify({
         type: "broadcast",
-        message: { id: item.requestId, error: "No Figma plugin connected to this channel" },
+        message: { id: item.requestId, error: missing },
         sender: "You",
         channel: channelName,
       }));
@@ -334,7 +411,7 @@ function processQueue(channelName: string): void {
       kind: "error",
       command: item.data.message?.command,
       requestId: item.requestId,
-      message: "No Figma plugin connected to this channel",
+      message: missing,
     });
     setQueueDepth(channelName, queueState.queue.length);
     // Use setTimeout to avoid stack overflow when draining large queues without a plugin
@@ -518,10 +595,11 @@ function handleResponseFromPlugin(data: any, channelName: string): void {
 // ─── Cleanup ───────────────────────────────────────────────────────────────
 
 function cleanupClient(ws: ServerWebSocket<any>, clientChannels: string[] = []): void {
-  const isPlugin = pluginClients.has(ws);
+  // Either editor leaving strands whatever it was working on, so both flush.
+  const isPlugin = pluginClients.has(ws) || webflowClients.has(ws);
 
-  // If the disconnecting client is the plugin, flush the in-flight command
-  // Scoped to channels this plugin was actually in (prevents aborting other channels)
+  // If the disconnecting client is an editor, flush the in-flight command
+  // Scoped to channels it was actually in (prevents aborting other channels)
   if (isPlugin) {
     const channelsToCheck = clientChannels.length > 0
       ? clientChannels
@@ -596,6 +674,7 @@ function cleanupClient(ws: ServerWebSocket<any>, clientChannels: string[] = []):
   // Remove from role tracking
   agentClients.delete(ws);
   pluginClients.delete(ws);
+  webflowClients.delete(ws);
 }
 
 // Periodic stale request cleanup (every 5 minutes)
@@ -691,6 +770,7 @@ const server = Bun.serve({
           pendingRequests: requestToClient.size,
           agentCount: agentClients.size,
           pluginCount: pluginClients.size,
+          webflowCount: webflowClients.size,
         },
       }), {
         headers: {
@@ -868,6 +948,12 @@ const server = Bun.serve({
           const channelClients = channels.get(channelName)!;
           channelClients.add(ws);
           logger.info(`Client ${clientId} joined channel: ${channelName}`);
+
+          // An editor may declare what it is. The Figma plugin does not send a
+          // role and is still classified from its first response, so this is
+          // additive; the Webflow extension must send one, because nothing in
+          // its traffic distinguishes it from the plugin.
+          classifyClientByRole(ws, data.role);
 
           // Notify client they joined successfully
           try {
@@ -1094,6 +1180,7 @@ const server = Bun.serve({
 
       // Remove client from their channel
       const closingClientWasPlugin = pluginClients.has(ws);
+      const closingClientWasWebflow = webflowClients.has(ws);
 
       channels.forEach((clients, channelName) => {
         if (clients.delete(ws)) {
@@ -1104,7 +1191,9 @@ const server = Bun.serve({
             kind: "connection",
             message: closingClientWasPlugin
               ? "The Figma plugin disconnected — changes cannot be applied until it reconnects"
-              : `A client left the channel (${clients.size} still connected)`,
+              : closingClientWasWebflow
+                ? "The Webflow Designer extension disconnected — changes cannot be applied until it reconnects"
+                : `A client left the channel (${clients.size} still connected)`,
           });
 
           // Notify other clients in same channel

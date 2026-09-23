@@ -55,3 +55,26 @@ export const FIGMA_REST_CONFIG = {
   baseBackoffMs: 500,
   maxBackoffMs: 15000,
 };
+
+/**
+ * Configuración del cliente de la Data API de Webflow (api.webflow.com/v2).
+ *
+ * Es la mitad "servidor" de Webflow, equivalente a FIGMA_REST_CONFIG: contenido,
+ * páginas, SEO, CMS y publicación. Los elementos, estilos y variables del lienzo
+ * pertenecen a la Designer API, que sólo es accesible desde una Designer
+ * Extension dentro de Webflow — no desde aquí.
+ *
+ * El token NO se lee aquí a propósito: `getWebflowToken()` lo consulta en cada
+ * llamada, igual que el de Figma.
+ */
+export const WEBFLOW_API_CONFIG = {
+  baseUrl: process.env.WEBFLOW_API_BASE_URL?.trim() || "https://api.webflow.com",
+  /** Reintentos adicionales tras el primer intento (429/408/5xx y errores de red). */
+  maxRetries: envInt(process.env.WEBFLOW_API_MAX_RETRIES, 3),
+  /** Peticiones simultáneas máximas al barrer varias páginas o colecciones. */
+  concurrency: envInt(process.env.WEBFLOW_API_CONCURRENCY, 4),
+  /** Timeout por petición en ms. */
+  timeoutMs: envInt(process.env.WEBFLOW_API_TIMEOUT_MS, 30000),
+  baseBackoffMs: 500,
+  maxBackoffMs: 15000,
+};

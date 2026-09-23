@@ -13,6 +13,8 @@ import { registerVariableTools } from "./variable-tools";
 import { registerFigJamTools } from "./figjam-tools";
 import { registerStyleTools } from "./style-tools";
 import { registerCommentTools } from "./comment-tools";
+import { registerWebflowTools } from "./webflow-tools";
+import { registerWebflowDesignerTools } from "./webflow-designer-tools";
 import { registerConnectionTools } from "./connection-tools";
 import { registerSectionScopeTools } from "./section-scope-tools";
 import { registerActivityTools } from "./activity-tools";
@@ -124,6 +126,12 @@ export function registerTools(server: McpServer): void {
     registerStyleTools(server);
     // REST-based (no plugin channel required) — see tools/comment-tools.ts
     registerCommentTools(server);
+    // Webflow Data API — the other REST transport, content only, no plugin
+    // channel and no Figma involvement. See tools/webflow-tools.ts.
+    registerWebflowTools(server);
+    // Webflow Designer API — the canvas half, over the same relay as Figma but
+    // addressed to the Webflow extension. See tools/webflow-designer-tools.ts.
+    registerWebflowDesignerTools(server);
     // Connection diagnostics + REST cross-verification — see tools/connection-tools.ts
     registerConnectionTools(server);
     // Section scope enforcement — see tools/section-scope-tools.ts
