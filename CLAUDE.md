@@ -203,3 +203,92 @@ introduced where an appropriate token exists.
 > **Most important responsive sizing rule:** never solve responsive content with a fixed
 > numeric height. Content-driven layers must use Hug Contents so the design grows naturally
 > with its content.
+
+---
+
+## 17. Figma → Webflow conversion standard
+
+Applies to **any** work converting a Figma design into a Webflow site.
+
+The conversion runs in **two stages**, and skipping stage 1 is the expensive way:
+
+| Stage | Skill | Job |
+| --- | --- | --- |
+| 1 | `Webflow_Prepare_v1` | Duplicate the page in Figma and restructure it into Client-First shape. The design does not change. The designer reviews it here. |
+| 2 | `Webflow_Export_v1` | Walk the prepared page and build the site in Webflow. |
+
+Doing the structural thinking in Figma first is cheaper on every axis: the Figma
+tooling is mature, the result is reviewable before Webflow is touched, stage 2
+becomes a walk over a decided structure rather than a judgment call per section,
+and the prepared page is a deliverable a developer can hand-build from.
+
+**Naming is Client-First** (Finsweet). Layer names on the prepared page become
+Webflow class names verbatim — custom classes `hero-header_content`, utility
+classes `padding-global` / `heading-style-h1`, combo classes `button is-primary`.
+
+These are the rules both stages are judged against. If a rule here cannot be met, stop and say which one and why. A page
+failing one of these is not "nearly done", it is not done.
+
+### 17.1 Pixel-perfect replication
+
+The Webflow page matches the Figma file exactly. Not one section, text, shadow,
+border, icon or spacing value is missing or approximated, however small.
+Responsive behaviour follows Figma's breakpoints exactly.
+
+⚠️ Figma's breakpoints and Webflow's do not line up. Webflow's tablet holds from
+768 to **991**, and no Figma mode covers **480–767** at all. That gap is handled
+explicitly — tablet verified at both ends, the 480–767 band decided with the
+designer — never left to inherit by accident.
+
+### 17.2 Global variables and tokens — no hard-coded values
+
+- **Colour.** Every colour is a Webflow **global variable**. A hard-coded colour
+  is a defect, including in hover states, borders, shadows and gradients.
+- **Spacing.** Margin, padding, gap and layout spacing come from spacing
+  variables or a shared global class, matching Figma exactly.
+- **Typography.** Font size, line height, weight and family are set on the
+  **global tag** — H1–H6, paragraph, body — before any class exists. A class
+  carries only what genuinely differs from its tag, and never restates the tag's
+  values; a duplicated line height is what silently breaks when the base changes.
+
+A value the Figma file never tokenised is **escalated, not hard-coded**. Section
+4's rule still holds — never silently expand the design system — so ask:
+
+> This colour (#xxxxxx, used on <element>) has no variable in the Figma file.
+> Should I add it as a Webflow variable, or is it intentionally a one-off?
+
+### 17.3 Component-based development
+
+Anything appearing more than once — button, card, nav bar, footer, list row — is
+a reusable Webflow **component**, not a copied block. Figma component
+**properties and variants** carry across as Webflow component properties and
+variants, keeping the designer's exact names, so the same switch the designer
+had is the switch the developer gets. A property Webflow cannot express is
+reported, never flattened into a hard-coded value.
+
+### 17.4 Zero repetition and self-audit
+
+- **Fix once, everywhere.** A reported defect is searched for across the whole
+  page, fixed in every instance, and the count reported. Being told the same
+  thing twice is a process failure, not a user preference.
+- **Audit before handing over.** Never give anyone a preview link before walking
+  the built page against the Figma screens yourself, screen by screen and
+  breakpoint by breakpoint, against the checklist in `Webflow_Export_v1`. That
+  is the developer's job, not the designer's. Say that the audit was run, and
+  name any line that could not be verified.
+
+### 17.5 What this repo's own tools can and cannot do
+
+Webflow splits its API the way Figma does, and the split decides which tool does
+which job:
+
+| | Runs inside the app | Runs from this MCP server |
+| --- | --- | --- |
+| Figma | Plugin API, via the bridge | REST API (`figma-rest.ts`) |
+| Webflow | **Designer API** — a Designer Extension | **Data API** (`webflow-rest.ts`) |
+
+The `webflow_*` tools in this server are **content only**: sites, pages, SEO,
+page copy, CMS collections and items, publishing. They cannot create or restyle
+elements, classes, variables or components. Everything in 17.1–17.3 is canvas
+work and runs through Webflow's own MCP server until the Designer Extension
+exists.

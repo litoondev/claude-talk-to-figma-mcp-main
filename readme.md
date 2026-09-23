@@ -484,6 +484,116 @@ Turn a web page into a Figma design that **looks exactly like the page**: every 
 
 ---
 
+## 🌊 Send a Figma design to Webflow
+
+Rebuild a Figma frame as a real Webflow page — every section, text, image and icon — with Auto Layout translated to flex and grid, your Figma variables recreated as Webflow variables, and repeated elements turned into Webflow components.
+
+This is the **opposite** of the HTML import above: that one reads a page and builds Figma, this one reads Figma and builds a page.
+
+### First, connect Webflow to Claude
+
+This plugin has no Webflow tools. Webflow ships its **own** MCP server, and Claude runs both side by side: this plugin reads Figma, Webflow's server writes the site. You only have to do this once.
+
+1. In Claude Desktop, click the **`+`** in the chat box → **Add connectors**.
+2. Search for **Webflow**. If you don't see it, switch the list from **Featured** to **All**.
+3. Click it → **Connect**, then log in to Webflow and **Authorize App**, choosing which sites and Workspaces Claude may touch.
+4. Open the Webflow connector → **Configure** to decide whether Claude may act on its own or must ask you before every change. Asking is the safer default while you're learning what it does.
+
+> 💡 **If the Webflow connector isn't in the list**, add it by hand as a custom connector with the URL `https://mcp.webflow.com/mcp`.
+>
+> ⚠️ **A bare URL in `claude_desktop_config.json` won't work.** That file only starts local (stdio) servers, and Webflow's is remote. Use **Add connectors** above — or, if you prefer the config file, Webflow's own docs bridge it with the `mcp-remote` shim: `"command": "npx", "args": ["mcp-remote", "https://mcp.webflow.com/sse"]`. Restart Claude Desktop afterwards and an OAuth page opens.
+>
+> 🔓 **Open the Designer *and* launch the Bridge App** before Claude builds anything. In the Designer, open the Apps panel (press `E`) and launch **Webflow MCP Bridge App**. The tools that create elements, styles, variables and components reach the canvas through it, so they go quiet if the panel is closed or the tab is shut. The CMS and site tools work without it.
+
+### How to use it
+
+1. Start the bridge server and connect the Figma plugin as usual ([Step 6](#step-6-run-it--the-daily-routine)).
+2. In Figma, **select the frame** you want to export.
+3. Tell Claude:
+   ```
+   Export this frame to Webflow
+   ```
+   Claude will ask which site and which page before it creates anything.
+4. It works through these steps, one section at a time:
+
+   | Step | What happens |
+   |---|---|
+   | **1. Check** | Confirms Figma is connected, the Webflow Designer bridge is live, and which site and page to build on. Takes a screenshot of your frame to compare against at the end |
+   | **2. Read** | Reads the frame's layout, sizing, spacing, colours, text and **variable bindings** — the difference between "this is 40px" and "this is `spacing/40`" |
+   | **3. Variables** | Recreates your Figma variable collections as Webflow variables, keeping the same names. Text styles become Webflow classes |
+   | **4. Build** | Section by section: Auto Layout becomes flex, Grid becomes CSS grid, Fill/Hug become `100%`/`auto`. Every repeated element gets the **same class**; anything appearing twice or more becomes a **Webflow component** |
+   | **5. Breakpoints** | Desktop first and complete, then tablet, then mobile — re-reading each Figma mode and overriding only what actually differs |
+   | **6. Export Notes** | A record of every variable, class and component created, every value that had no token behind it, and anything that couldn't be made identical |
+   | **7. Compare** | Publishes to staging and compares with your screenshot at each breakpoint, fixing differences until nothing differs |
+
+### The breakpoint trap — read this one
+
+**Figma's breakpoints and Webflow's are not the same numbers**, and this is where most Figma-to-Webflow work quietly breaks:
+
+| Webflow breakpoint | Applies at | Closest Figma mode |
+|---|---|---|
+| Desktop (base) | 992px and up | `Desk` 1440 |
+| Tablet | up to 991px | `Tab` 768 |
+| Mobile landscape | up to 767px | **nothing** |
+| Mobile portrait | up to 479px | `Mobi` 320 |
+
+So a layout you designed at 768 has to hold all the way to **991** in Webflow, and **no Figma mode covers 480–767 at all**. Claude won't guess: it checks the tablet layout at both ends, and asks you what should happen in the 480–767 band rather than leaving it to chance.
+
+Webflow's cascade also only flows **downward** — a value set on Desktop reaches Tablet and Mobile, but not the other way round. That's why Desktop is finished completely before anything else is touched.
+
+### Good to know
+
+- **It never invents a token.** A value with no Figma variable behind it is written as a plain number and listed in the Export Notes. If Claude thinks it deserves a variable, it asks.
+- **Fixed heights are dropped.** A card or text block with a fixed height in Figma is built `auto` in Webflow, so text can wrap to more lines without clipping. Icons, avatars and deliberate image crops keep their size.
+- **Repeating real content** (blog posts, team members, products) is better as a CMS Collection than eight hand-built divs. Claude proposes it and waits for your answer — it's a decision about your site, not your design.
+- **Fonts** used in Figma must also be uploaded to the Webflow site, or the page falls back to something else and the fallback is not your design.
+- **Hover, focus and pressed states** aren't in a Figma frame at all. Claude lists them under "needs a human" instead of making them up.
+- **The full procedure** lives in [`skills/Webflow_Export_v1.md`](skills/Webflow_Export_v1.md). Edit it if your team does things differently — see [Skills](#-skills).
+
+### Built in: Webflow content tools
+
+The section above uses Webflow's **own** MCP server for canvas work. Separately, this plugin now has **16 Webflow tools of its own** that talk straight to Webflow's Data API — no second MCP server, no Designer, no bridge app.
+
+They appear only when you set a **Webflow API token**: Claude Desktop → Settings → Extensions → this extension → **Webflow API token**. Leave it blank and they stay hidden, costing you nothing. (Token: Webflow → Site settings → **Apps & integrations → API access → Generate API token**. Read-only is enough for every `webflow_get_*` and `webflow_list_*` tool.)
+
+| Group | Tools |
+|---|---|
+| **Sites** | `webflow_list_sites`, `webflow_get_site`, `webflow_create_site` (Enterprise workspaces only) |
+| **Pages** | `webflow_list_pages`, `webflow_get_page`, `webflow_update_page_settings` |
+| **Page copy** | `webflow_get_page_content`, `webflow_update_page_content` |
+| **CMS** | `webflow_list_collections`, `webflow_get_collection`, `webflow_list_items`, `webflow_create_items`, `webflow_update_items`, `webflow_publish_items`, `webflow_delete_items` |
+| **Publishing** | `webflow_publish_site` |
+
+Try: *"List my Webflow sites"*, *"Show me the fields on the Blog collection"*, *"Rewrite the hero heading on the About page"*, *"Add these 12 team members to the Team collection as drafts"*.
+
+#### What they can and cannot do
+
+Webflow splits its API exactly the way Figma does, and this repo already lives with that split — [`figma-rest.ts`](src/talk_to_figma_mcp/utils/figma-rest.ts) exists because Figma's Plugin API can't see comments.
+
+| | Runs **inside** the app | Runs **from this server** |
+|---|---|---|
+| Figma | Plugin API → the plugin + bridge | REST API → `figma-rest.ts` |
+| Webflow | **Designer API** → needs a Designer Extension | **Data API** → `webflow-rest.ts` |
+
+So these tools own **content**: sites, pages, SEO, the copy inside existing text nodes, CMS collections and items, and publishing. They **cannot create or restyle elements, classes, variables or components** — that is the Designer API, reachable only from code running inside Webflow.
+
+That limit is stated on the tools it actually governs, not on all of them. It used to be on every one, and Claude learned to reach for it as a general excuse: asked to create a site, it replied that site creation "requires the Designer API". It doesn't — creating a site is a plain Data API call, just gated on an **Enterprise** workspace. `webflow_list_sites` now also carries the map of what this server does and doesn't implement, so a missing endpoint is reported as a gap here rather than as a limit of Webflow.
+
+> 💡 **"Create a new site" not working?** On any plan below Enterprise, Webflow refuses site creation over the API however your token is scoped. Create it in the Webflow dashboard (**+ New site**), then every other tool here works on it normally. This is a Webflow plan limit, not a token or setup problem.
+
+#### Why these are the safe ones for a team
+
+Every call is addressed by an explicit id and holds no session state. There is no "current active page" to fight over, so **several people on several machines can run these at the same time**. That is the opposite of the Designer half, which must be serialised to one agent per site.
+
+#### Safety
+
+- **Nothing is published by accident.** `webflow_publish_site`, `webflow_publish_items` and `webflow_delete_items` all refuse to run without `confirm: true`, and the refusal tells Claude to ask you first.
+- **Publishing a site pushes *everyone's* staged changes**, not just Claude's. The tool says this in its refusal, so you find out before it happens rather than after.
+- **Writes are staged, not live.** Page edits and CMS changes sit in Webflow until something publishes them.
+- **Token scope is yours to set.** A read-only token makes the whole inspect-and-report half of the work impossible to get wrong.
+
+---
+
 ## 🔄 Update to the newest version
 
 When this repository gets new features, update like this (about 3 minutes):
@@ -677,6 +787,8 @@ npx dxt pack . claude-talk-to-figma-mcp.mcpb
 
 ---
 
+<a id="bangla-step6"></a>
+
 ## ধাপ ৬: চালু করুন (প্রতিদিনের কাজ)
 
 ### ৬ক. ব্রিজ সার্ভার চালু করুন
@@ -859,6 +971,76 @@ cd ~/Documents/claude-talk-to-figma-mcp-main && npm run socket
 - **এটা পেজের HTML ও CSS পড়ে, ব্রাউজারে চালিয়ে দেখে না।** যে পেজ লোড হওয়ার পর JavaScript দিয়ে কনটেন্ট বানায়, সেটা অসম্পূর্ণ আসতে পারে। তখন Chrome-এ পেজ খুলে **File → Save Page As… → Webpage, Complete** দিয়ে সেভ করুন, তারপর সেই `.html` ফাইল দিন।
 - **লগইন লাগে এমন পেজ** পড়া যায় না। উপরের মতো সেভ করে দিন।
 - **ফন্ট** আপনার কম্পিউটারে ইনস্টল থাকতে হবে, তবেই Figma ব্যবহার করতে পারবে।
+
+---
+
+<a id="bangla-webflow"></a>
+
+## 🌊 Figma ডিজাইন থেকে Webflow পেজ
+
+একটা Figma ফ্রেমকে সত্যিকারের Webflow পেজ বানিয়ে দেয় — প্রতিটি সেকশন, টেক্সট, ছবি আর আইকনসহ। Auto Layout হয়ে যায় flex ও grid, আপনার Figma ভেরিয়েবলগুলো Webflow ভেরিয়েবল হিসেবে তৈরি হয়, আর যেসব এলিমেন্ট বারবার আসে সেগুলো Webflow কম্পোনেন্ট হয়ে যায়।
+
+এটা উপরের HTML ইমপোর্টের **উল্টো কাজ**: ওটা পেজ পড়ে Figma বানায়, এটা Figma পড়ে পেজ বানায়।
+
+### আগে Webflow-কে Claude-এর সাথে জুড়ে নিন
+
+এই প্লাগইনে Webflow-এর কোনো টুল নেই। Webflow-এর **নিজস্ব** MCP সার্ভার আছে, আর Claude দুটোকে পাশাপাশি চালায়: এই প্লাগইন Figma পড়ে, Webflow-এর সার্ভার সাইট বানায়। এটা একবারই করতে হবে।
+
+১. Claude Desktop-এ চ্যাট বক্সের **`+`** চিহ্নে ক্লিক করুন → **Add connectors**।
+২. **Webflow** লিখে খুঁজুন। না পেলে তালিকাটা **Featured** থেকে **All**-এ বদলে নিন।
+৩. সেটায় ক্লিক করে **Connect** দিন, Webflow-এ লগইন করুন, তারপর কোন সাইট ও Workspace-এ Claude হাত দিতে পারবে সেগুলো বেছে **Authorize App** চাপুন।
+৪. Webflow কানেক্টরটা খুলে **Configure**-এ গিয়ে ঠিক করুন Claude নিজে থেকে কাজ করবে নাকি প্রতিবার আপনার অনুমতি নেবে। শুরুর দিকে **অনুমতি নেওয়াটাই** নিরাপদ।
+
+> 💡 **তালিকায় Webflow কানেক্টর না থাকলে** নিজে হাতে custom connector হিসেবে যোগ করুন, URL: `https://mcp.webflow.com/mcp`।
+>
+> ⚠️ **`claude_desktop_config.json`-এ শুধু URL বসালে চলবে না।** ওই ফাইল শুধু লোকাল (stdio) সার্ভার চালু করে, আর Webflow-এরটা রিমোট। উপরের **Add connectors** ব্যবহার করুন — অথবা config ফাইলই যদি পছন্দ হয়, Webflow-এর নিজের ডকে `mcp-remote` শিম দিয়ে সেতু বানানো আছে: `"command": "npx", "args": ["mcp-remote", "https://mcp.webflow.com/sse"]`। এরপর Claude Desktop রিস্টার্ট করলে OAuth পেজ খুলবে।
+>
+> 🔓 **Designer খুলুন, সাথে Bridge App-ও চালু করুন।** Designer-এ Apps প্যানেল খুলে (`E` চাপুন) **Webflow MCP Bridge App** চালু করুন। এলিমেন্ট, স্টাইল, ভেরিয়েবল আর কম্পোনেন্ট বানানোর টুলগুলো এটার মাধ্যমেই ক্যানভাসে পৌঁছায়, তাই প্যানেল বন্ধ থাকলে বা ট্যাব বন্ধ হলে ওগুলো চুপ হয়ে যায়। CMS আর সাইটের টুল অবশ্য এটা ছাড়াই চলে।
+
+### কীভাবে ব্যবহার করবেন
+
+১. আগের মতোই ব্রিজ সার্ভার চালু করে Figma প্লাগইন কানেক্ট করুন ([ধাপ ৬](#bangla-step6))।
+২. Figma-তে যে ফ্রেমটা পাঠাতে চান সেটা **সিলেক্ট করুন**।
+৩. Claude-কে বলুন:
+   ```
+   এই ফ্রেমটা Webflow-এ এক্সপোর্ট করো
+   ```
+   কিছু বানানোর আগে Claude জিজ্ঞেস করবে কোন সাইট আর কোন পেজে কাজ হবে।
+৪. এরপর এক সেকশন করে এই ধাপগুলো পার হয়:
+
+   | ধাপ | যা হয় |
+   |---|---|
+   | **১. যাচাই** | Figma কানেক্টেড কিনা, Webflow Designer ব্রিজ চালু আছে কিনা, আর কোন সাইট-পেজে কাজ হবে — সব নিশ্চিত করে। শেষে মেলানোর জন্য আপনার ফ্রেমের স্ক্রিনশট নিয়ে রাখে |
+   | **২. পড়া** | ফ্রেমের লেআউট, সাইজিং, স্পেসিং, রং, টেক্সট আর **ভেরিয়েবল বাইন্ডিং** পড়ে — "এটা ৪০px" আর "এটা `spacing/40`"-এর পার্থক্যটাই এখানে আসল |
+   | **৩. ভেরিয়েবল** | আপনার Figma ভেরিয়েবল কালেকশনগুলো একই নামে Webflow ভেরিয়েবল হিসেবে বানায়। টেক্সট স্টাইলগুলো হয় Webflow ক্লাস |
+   | **৪. বানানো** | সেকশন ধরে ধরে: Auto Layout → flex, Grid → CSS grid, Fill/Hug → `100%`/`auto`। একই রকম এলিমেন্ট পায় **একই ক্লাস**; যেটা দুইবার বা তার বেশি আসে সেটা হয় **Webflow কম্পোনেন্ট** |
+   | **৫. ব্রেকপয়েন্ট** | আগে ডেস্কটপ পুরোপুরি শেষ, তারপর ট্যাবলেট, তারপর মোবাইল — প্রতিটা Figma মোড আলাদা করে পড়ে, আর যা সত্যিই আলাদা শুধু সেটুকুই ওভাররাইড করে |
+   | **৬. Export Notes** | কী কী ভেরিয়েবল, ক্লাস ও কম্পোনেন্ট বানানো হলো, কোন মানগুলোর পেছনে কোনো টোকেন ছিল না, আর কোনটা হুবহু করা গেল না — সবের হিসাব |
+   | **৭. মেলানো** | স্টেজিং-এ পাবলিশ করে প্রতিটা ব্রেকপয়েন্টে আপনার স্ক্রিনশটের সাথে মেলায়, আর পার্থক্য না মেটা পর্যন্ত ঠিক করতে থাকে |
+
+### ব্রেকপয়েন্টের ফাঁদ — এটুকু অবশ্যই পড়ুন
+
+**Figma আর Webflow-এর ব্রেকপয়েন্টের সংখ্যা এক নয়**, আর বেশিরভাগ Figma-থেকে-Webflow কাজ এখানেই চুপচাপ ভেঙে যায়:
+
+| Webflow ব্রেকপয়েন্ট | কোথায় খাটে | কাছাকাছি Figma মোড |
+|---|---|---|
+| Desktop (base) | ৯৯২px ও তার উপরে | `Desk` 1440 |
+| Tablet | ৯৯১px পর্যন্ত | `Tab` 768 |
+| Mobile landscape | ৭৬৭px পর্যন্ত | **কিছুই নেই** |
+| Mobile portrait | ৪৭৯px পর্যন্ত | `Mobi` 320 |
+
+অর্থাৎ ৭৬৮-এ আঁকা লেআউটকে Webflow-এ **৯৯১ পর্যন্ত** টিকে থাকতে হবে, আর **৪৮০–৭৬৭ ব্যান্ডের জন্য Figma-তে কোনো মোডই নেই**। Claude এখানে অনুমান করে না: ট্যাবলেট লেআউটটা দুই প্রান্তেই পরখ করে, আর ৪৮০–৭৬৭ ব্যান্ডে কী হবে সেটা ভাগ্যের হাতে না ছেড়ে আপনাকে জিজ্ঞেস করে।
+
+Webflow-এর cascade আবার শুধু **নিচের দিকে** নামে — ডেস্কটপে বসানো মান ট্যাবলেট ও মোবাইলে পৌঁছায়, কিন্তু উল্টোটা হয় না। এজন্যই আগে ডেস্কটপ পুরোপুরি শেষ করা হয়, তারপর অন্য কিছুতে হাত দেওয়া হয়।
+
+### জেনে রাখুন
+
+- **নিজে থেকে কোনো টোকেন বানায় না।** যে মানের পেছনে Figma ভেরিয়েবল নেই, সেটা সাধারণ সংখ্যা হিসেবেই বসে আর Export Notes-এ লেখা থাকে। Claude-এর মনে হলে যে এটার ভেরিয়েবল থাকা উচিত, সে জিজ্ঞেস করে।
+- **ফিক্সড হাইট বাদ দেয়।** Figma-তে কার্ড বা টেক্সট ব্লকে ফিক্সড হাইট থাকলেও Webflow-এ সেটা `auto` হয়, যাতে টেক্সট বেশি লাইনে গেলে কেটে না যায়। আইকন, অ্যাভাটার আর ইচ্ছাকৃত ইমেজ ক্রপ নিজের মাপেই থাকে।
+- **বারবার আসা আসল কনটেন্ট** (ব্লগ পোস্ট, টিম মেম্বার, প্রোডাক্ট) আটটা হাতে বানানো div-এর চেয়ে **CMS Collection** হিসেবে ভালো। Claude প্রস্তাব দিয়ে আপনার উত্তরের অপেক্ষা করে — এটা আপনার সাইটের সিদ্ধান্ত, ডিজাইনের নয়।
+- **ফন্ট** Figma-তে যেটা ব্যবহার করেছেন সেটা Webflow সাইটেও আপলোড করা থাকতে হবে, নইলে পেজ অন্য ফন্টে নেমে যাবে — আর সেই ফন্ট আপনার ডিজাইন নয়।
+- **Hover, focus আর pressed স্টেট** Figma ফ্রেমে থাকেই না। Claude এগুলো বানিয়ে না নিয়ে "মানুষের সিদ্ধান্ত দরকার" তালিকায় রাখে।
+- **পুরো প্রসিডিওরটা** আছে [`skills/Webflow_Export_v1.md`](skills/Webflow_Export_v1.md) ফাইলে। আপনার টিমের নিয়ম আলাদা হলে ওটা এডিট করে নিন — দেখুন [Skills](#-skills)।
 
 ---
 
