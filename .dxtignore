@@ -1,15 +1,19 @@
 # Development files
 .git/
 .gitignore
-node_modules/@types/
-node_modules/@jest/
-node_modules/jest/
-node_modules/ts-jest/
-node_modules/typescript/
-node_modules/@anthropic-ai/dxt
 *.test.ts
 *.test.js
 tests/
+
+# Dependencies — none are needed at runtime.
+# tsup bundles @modelcontextprotocol/sdk, ws, uuid and zod straight into
+# dist/talk_to_figma_mcp/server.cjs (see `noExternal` in tsup.config.ts), so the
+# extension resolves nothing from disk. Shipping node_modules anyway meant
+# packing ~5,965 files and 115MB to deliver ~1.5MB of code — 99.7% of the
+# archive, nearly all of it dev-only tooling the server never loads.
+# Verified by running the bundle in a directory with no node_modules at all:
+# initialize, tools/list, argument validation and a tool call all succeed.
+node_modules/
 
 # Documentation
 # NOTE: skills/*.md are NOT needed here — scripts/build-skills.js compiles them
@@ -56,8 +60,22 @@ logs/
 *.d.ts
 *.d.cts
 
-# Large images (keep only icon)
+# Large images (keep only the icon the manifest points at)
 images/mcp-figma-plugin-configuration.png
+images/cursor-config-1.png
+images/cursor-config-2.png
+
+# CI definitions — of no use inside an installed extension
+.github/
+
+# The Webflow Designer Extension installs into a Webflow workspace, not into
+# Claude Desktop. Shipping it inside the .mcpb would only add weight.
+webflow_extension/
+
+# Bundled sources. socket.ts imports these and tsup inlines them into
+# dist/socket.js, so the .ts files themselves are never read at runtime.
+src/activity.ts
+src/activity-dashboard.ts
 
 # Settings and cache
 .claude/
