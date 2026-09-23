@@ -92,7 +92,7 @@ const OPERATION_PROMPTS = [
       [
         "Load figma_skill \"Responsive_Apply_v1\".",
         "Ask which breakpoint - Tablet 768 or Mobile 320 - and stop until I answer. One per run. clone_node the frame and work on the duplicate; leave the original alone.",
-        "Every value comes from the file: get_variables -> find_variable -> switch_variable_mode for this breakpoint -> apply_variable_to_node. No token for it? Ask; never create one.",
+        "Every value comes from the file: get_design_system and get_variables -> find_variable -> switch_variable_mode for this breakpoint -> apply_variable_to_node. No token for it? Ask; never create one.",
         "Sizing: containers, cards, text blocks and columns Fill width + Hug height (set_layout_sizing); buttons hug both. No fixed height on content, ever. Text wraps and grows - never shrink a font, change a style or clip text to fit.",
         "analyze_responsive before, validate_responsive after. Finish this breakpoint, report, stop - do not start the other one.",
       ].join("\n")
