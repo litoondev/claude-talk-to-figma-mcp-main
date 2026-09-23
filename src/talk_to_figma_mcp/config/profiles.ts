@@ -1,7 +1,7 @@
 /**
  * Tool profiles.
  *
- * The full tool set is 161 tools ≈ 40k tokens of JSON schema, and that schema is
+ * The full tool set is 162 tools ≈ 40k tokens of JSON schema, and that schema is
  * re-sent on *every* model request for the whole session. Most sessions use a
  * fraction of it. A profile trims the advertised set to what the work actually
  * needs, which cuts per-request cost and leaves more of the context window for
@@ -11,7 +11,7 @@
  *   core     — ~64 tools (~18k tokens). Layout, text, colour, variables, responsive.
  *   standard — ~105 tools (~25k tokens). Everything except FigJam, REST comments,
  *              Webflow and activity tracking. **Default.**
- *   full     — all 161 tools (~40k tokens). The previous behaviour.
+ *   full     — all 162 tools (~40k tokens). The previous behaviour.
  *
  * A profile only changes what is advertised, never what the plugin can do:
  * anything omitted is still reachable through `figma_batch`.
@@ -97,6 +97,15 @@ export const WEBFLOW_DESIGNER_TOOLS: readonly string[] = [
   "webflow_designer_create_component",
   "webflow_designer_insert_component",
 ];
+
+/**
+ * The setup checker.
+ *
+ * Advertised as soon as *either* Webflow feature is configured, because its job
+ * is to diagnose a half-configured setup — hiding it until everything works
+ * would make it useless exactly when it is needed.
+ */
+export const WEBFLOW_PREFLIGHT_TOOL = "webflow_preflight";
 
 /** True when the user has opted into the Webflow Designer tools. */
 export function webflowDesignerEnabled(): boolean {
@@ -211,6 +220,8 @@ export const STANDARD_EXCLUDED: readonly string[] = [
   // Webflow Designer — only when FIGMA_MCP_WEBFLOW_DESIGNER is off;
   // see WEBFLOW_DESIGNER_TOOLS and makeToolFilter.
   ...WEBFLOW_DESIGNER_TOOLS,
+  // The setup checker — withheld only when neither Webflow feature is on.
+  WEBFLOW_PREFLIGHT_TOOL,
   // activity tracking
   "get_activity_log",
   "set_activity_overlay",
@@ -261,6 +272,9 @@ export function makeToolFilter(profile: ProfileName = getProfile()): (name: stri
   // can prove — so this is an explicit opt-in rather than an inference.
   if (webflowDesignerEnabled()) {
     for (const name of WEBFLOW_DESIGNER_TOOLS) denied.delete(name);
+  }
+  if (hasWebflowToken() || webflowDesignerEnabled()) {
+    denied.delete(WEBFLOW_PREFLIGHT_TOOL);
   }
   return (name) => !denied.has(name);
 }

@@ -15,6 +15,7 @@ import { registerStyleTools } from "./style-tools";
 import { registerCommentTools } from "./comment-tools";
 import { registerWebflowTools } from "./webflow-tools";
 import { registerWebflowDesignerTools } from "./webflow-designer-tools";
+import { registerWebflowPreflightTools } from "./webflow-preflight";
 import { registerConnectionTools } from "./connection-tools";
 import { registerSectionScopeTools } from "./section-scope-tools";
 import { registerActivityTools } from "./activity-tools";
@@ -132,6 +133,9 @@ export function registerTools(server: McpServer): void {
     // Webflow Designer API — the canvas half, over the same relay as Figma but
     // addressed to the Webflow extension. See tools/webflow-designer-tools.ts.
     registerWebflowDesignerTools(server);
+    // One call that checks all three legs of a Webflow setup at once, so
+    // blockers are reported together. See tools/webflow-preflight.ts.
+    registerWebflowPreflightTools(server);
     // Connection diagnostics + REST cross-verification — see tools/connection-tools.ts
     registerConnectionTools(server);
     // Section scope enforcement — see tools/section-scope-tools.ts

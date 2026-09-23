@@ -581,6 +581,27 @@ That limit is stated on the tools it actually governs, not on all of them. It us
 
 > 💡 **"Create a new site" not working?** On any plan below Enterprise, Webflow refuses site creation over the API however your token is scoped. Create it in the Webflow dashboard (**+ New site**), then every other tool here works on it normally. This is a Webflow plan limit, not a token or setup problem.
 
+#### Stuck? Ask once, not three times
+
+```
+webflow_preflight
+```
+
+One call checks all three legs — the Figma channel, the Webflow token and its
+scopes, and whether the Designer extension is joined — and reports every blocker
+together with the exact fix:
+
+```
+❌ Figma channel: not joined
+❌ Webflow token: valid, but missing the sites:read scope
+❌ Webflow Designer extension: not on channel 6zas1rep
+```
+
+It exists because the alternative is discovering these one at a time: fix the
+token, come back, find the extension is not connected, come back again. It
+appears as soon as **either** Webflow feature is configured, since a
+half-configured setup is exactly what it is for.
+
 #### Turning on the canvas tools
 
 The 16 tools above are the **content** half. There are 12 more that build on the

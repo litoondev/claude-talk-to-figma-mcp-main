@@ -29,6 +29,7 @@ triggers:
 uses:
   - join_channel
   - check_figma_connection
+  - webflow_preflight
   - get_design_system
   - get_document_info
   - get_pages
@@ -220,17 +221,25 @@ other plan it returns 403 and the site is created in the Webflow dashboard.
 
 ## Step 0 — Preconditions
 
-Check all four before touching anything. Each failure has a different fix, so
-report which one failed.
+**Call `webflow_preflight` first.** One call checks the Figma channel, the
+Webflow token and its scopes, and whether the Designer extension is joined, and
+returns every blocker together with the exact fix for each.
 
-1. **Figma side.** `check_figma_connection`, then `join_channel`. Confirm the
-   frame to export with `get_selection`, or ask the user which frame.
-2. **Webflow canvas.** Call `webflow_designer_status`. It answers only when this
-   plugin's Webflow Designer Extension is open in the Designer's Apps panel
-   (press `E`) and joined to **this same channel**. If the tool does not exist,
-   it is switched off — see above. If it exists but errors, the extension is not
-   running or is on another channel. The content tools need none of this; they
-   are addressed by id over HTTP.
+Do not start building and discover the blockers one at a time. Finding a token
+scope problem, reporting it, then finding the extension is not connected, then
+finding site creation needs Enterprise, is three round trips for a state that
+reads in one — and it makes the user give the same kind of instruction three
+times, which §17.4 forbids.
+
+**If preflight reports blockers, relay all of them at once**, then stop. Do not
+build a partial page against a half-configured setup.
+
+Then, before touching anything:
+
+1. **Figma side.** `join_channel` if preflight says it is not joined. Confirm
+   the frame to export with `get_selection`, or ask the user which frame.
+2. **Webflow canvas.** Preflight already reported this. `webflow_designer_status`
+   re-checks it on its own if you need to confirm after the user fixes something.
 3. **Target.** Ask which site and which page. Never create a page on a site the
    user has not named. Use `data_sites_tool` to list sites if the user is
    unsure.
