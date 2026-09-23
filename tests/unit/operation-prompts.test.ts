@@ -122,14 +122,17 @@ describe("operation prompts", () => {
 
   describe.each(operations.map((op) => [op.id, op] as const))("%s", (_id, op) => {
     it("stands on its own without the user adding instructions", () => {
-      // A stub prompt is the defect this file guards against.
-      expect(op.prompt.length).toBeGreaterThan(1200);
+      // A stub prompt is the defect this file guards against — and so is a
+      // bloated one, since every prompt is paid for in tokens on each use.
+      expect(op.prompt.length).toBeGreaterThan(900);
+      expect(op.prompt.length).toBeLessThan(2000);
 
       // Connect, read, constrain, verify, report — the shape every prompt needs.
       expect(op.prompt).toContain("join_channel");
       expect(op.prompt).toContain("get_selection");
-      expect(op.prompt).toContain("VALIDATE");
-      expect(op.prompt).toContain("REPORT");
+      expect(op.prompt).toContain("Never:");
+      expect(op.prompt).toContain("Verify:");
+      expect(op.prompt).toContain("Report:");
       expect(op.prompt).toContain("export_node_as_image");
     });
 

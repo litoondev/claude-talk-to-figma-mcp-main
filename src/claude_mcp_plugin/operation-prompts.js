@@ -4,67 +4,42 @@
  * Every "Copy prompt" button in the plugin panel pastes one of these strings
  * into a Claude conversation. The user is not expected to add anything: the
  * prompt has to carry the goal, the tools to read the design with, the rules
- * that keep the result from breaking, the validation pass and the stop
- * conditions on its own.
+ * that keep the result from breaking, the check and the stop conditions.
+ *
+ * Written to be dense, not long. Every prompt is paid for in tokens on each
+ * use, and a paragraph of prose buys nothing that a sharp imperative line does
+ * not — so the style here is telegraphic: tool chains with arrows, rules as
+ * clauses, and nothing restated that a skill or a tool already enforces.
  *
  * Rules for editing:
  *   - Only name tools this server actually registers. A prompt that calls a
  *     tool that does not exist produces exactly the broken run these prompts
  *     are meant to prevent.
  *   - Where a skill already encodes the procedure (Grid_Convert_v1,
- *     Layer_Rename_v1, Responsive_Apply_v1), tell the model to load it through
- *     `figma_skill` rather than restating it here and letting the two drift.
- *   - Keep the shared blocks shared. Consistency across the eight prompts is
- *     what makes them predictable to the user.
+ *     Layer_Rename_v1, Responsive_Apply_v1), point at it with `figma_skill`
+ *     instead of restating it and letting the two drift.
+ *   - Keep the shared lines shared, and keep them short.
  *
- * `scripts/build-operation-prompts.js` injects the expanded list into
- * `ui.html` and `ui-v2.html`; never hand-edit the generated block in those
- * files.
+ * `scripts/build-operation-prompts.js` injects the expanded list into the UI
+ * files; never hand-edit the generated block there.
  */
 
-/** Opening line: what the model is attached to and how it must treat the file. */
-const CONTEXT = [
-  "You are connected to a live Figma file through the Claude Talk to Figma MCP server.",
-  "The document, its layers, variables, styles and components are all readable through the MCP tools.",
-  "Read the file before you change it — never infer a value you could have looked up, and never invent a token, style or component name.",
-].join(" ");
+/** How every run starts. */
+const SETUP =
+  "Setup: join_channel -> check_figma_connection -> get_selection. Nothing selected: ask which frame, then stop. Work only inside that selection; report problems elsewhere instead of fixing them.";
 
-/** Every prompt starts the session the same way. */
-const CONNECT = [
-  "1. CONNECT AND SCOPE",
-  "   - Call join_channel first. If it reports no channel, tell me to open the plugin and copy the channel code, then stop.",
-  "   - Call check_figma_connection, then get_selection.",
-  "   - If nothing is selected, ask me which frame or section to work on and stop. Do not pick one yourself.",
-  "   - Work only on the selection and its descendants. Do not touch, restructure or 'improve' anything else in the file, even if you notice problems there — report those instead.",
-].join("\n");
+/** The failure modes that produce a broken file. */
+const NEVER =
+  "Never: move or resize an absolute-positioned layer - change size or layout without checking clipsContent - detach instances - break masks, variants, component properties or prototype links - alter copy, colour, type or imagery unasked - invent a token, style or component name.";
 
-/** Shared safety rules. These are the failure modes that produce broken files. */
-const SAFETY = [
-  "   - Never modify a layer whose position is absolute (layoutPositioning 'ABSOLUTE'); leave it and its coordinates exactly as they are.",
-  "   - Check clipsContent before changing any size or layout; a clipped parent hides overflow, so a change that looks fine can silently cut content.",
-  "   - Do not detach instances, break component links, delete masks, or remove layers used by prototype links or component properties.",
-  "   - Do not change copy, colours, fonts, effects or imagery unless this task explicitly asks for it.",
-].join("\n");
+/** How every run ends. */
+const CLOSE =
+  "Verify: export_node_as_image before and after - it must look identical unless this task asked otherwise; re-read changed nodes with get_nodes_info and undo anything that moved, clipped or overlapped by accident.\n" +
+  "Report: per change, node ID and before -> after; what you skipped and why; what you need from me. Never report a step no tool result confirmed.";
 
-/** Shared close: prove it still looks right, then say what happened. */
-const VERIFY = [
-  "VALIDATE",
-  "   - Call export_node_as_image on the top-level frame before you start and again when you finish, and compare them. The design must look the same unless this task explicitly asked for a visual change.",
-  "   - Re-read the changed nodes with get_nodes_info and confirm the result is what you intended.",
-  "   - If anything moved, resized, clipped, overlapped or wrapped differently by accident, put it back before reporting.",
-].join("\n");
-
-const REPORT = [
-  "REPORT",
-  "   - List what you changed, layer by layer, with the node ID and the before/after value.",
-  "   - List what you deliberately left alone and why.",
-  "   - List anything you could not do, and what you need from me to finish it.",
-  "   - Do not claim a step succeeded unless a tool result confirmed it.",
-].join("\n");
-
-/** Compose a prompt from its body, with the standard opening and closing. */
+/** Compose a prompt: one-line brief, setup, the work, the limits, the close. */
 function prompt(title, goal, body) {
-  return [`${title.toUpperCase()} — ${goal}`, "", CONTEXT, "", CONNECT, "", body, "", VERIFY, "", REPORT].join("\n");
+  return [`${title} - ${goal}.`, "", SETUP, "", body, "", NEVER, "", CLOSE].join("\n");
 }
 
 const OPERATION_PROMPTS = [
@@ -79,19 +54,10 @@ const OPERATION_PROMPTS = [
       "Convert to Grid",
       "rebuild the selection as a Figma Grid that renders identically with the fewest layers",
       [
-        "2. LOAD THE PROCEDURE",
-        "   - Call figma_skill with name \"Grid_Convert_v1\" and follow it. It is the authoritative procedure for this job; this prompt only sets the scope and the limits.",
-        "",
-        "3. PLAN BEFORE YOU APPLY",
-        "   - Read the structure with get_nodes_info so you know the real geometry of every layer.",
-        "   - Use convert_layout with mode \"grid\" to plan the conversion. Show me the plan — track count, spans, which wrappers disappear, which layers stay as they are — and wait for my approval before applying it.",
-        "   - Where a Grid cannot reproduce the current render exactly, keep Auto Layout or leave the layer alone and say so. Never approximate the layout and never nudge a layer to make a Grid fit.",
-        "",
-        "4. RULES",
-        "   - Identical render first, fewest layers second. A layer survives only if it does something a Grid cell cannot.",
-        "   - Keep gap and padding bound to their existing variables. Do not replace a bound token with a raw number.",
-        "   - Remove only empty or purely structural wrappers, through clean_layers.",
-        SAFETY,
+        "Load figma_skill \"Grid_Convert_v1\" and follow it; this prompt only sets scope and limits.",
+        "Read geometry with get_nodes_info, plan via convert_layout mode \"grid\", show me the plan (tracks, spans, which wrappers go) and wait for approval before applying.",
+        "Identical render beats fewer layers: where a Grid cannot reproduce the render exactly, keep Auto Layout or leave it and say so. Never nudge a layer to make a Grid fit.",
+        "Keep gap and padding bound to their variables. Remove wrappers only through clean_layers, and only ones a Grid cell makes redundant.",
       ].join("\n")
     ),
   },
@@ -104,21 +70,12 @@ const OPERATION_PROMPTS = [
     icon: "📝",
     prompt: prompt(
       "Rename Layers",
-      "give every layer in the selection the name a senior frontend developer would use",
+      "give every layer the name a senior frontend developer would write",
       [
-        "2. LOAD THE PROCEDURE",
-        "   - Call figma_skill with name \"Layer_Rename_v1\" and follow its naming conventions exactly. It defines the semantic-HTML + BEM-like system to use; do not invent your own scheme.",
-        "",
-        "3. UNDERSTAND BEFORE YOU NAME",
-        "   - Read the structure with get_nodes_info and look at the frame with export_node_as_image, so each name describes what the layer actually is on screen, not what its type is.",
-        "   - Name from role and content: header, nav, hero, card, card__title, card__media, button--primary, footer__column. Never leave 'Frame 24', 'Group 5', 'Rectangle 1' or a duplicate suffix like 'Copy 3'.",
-        "   - Apply the renames with rename_node, batched through figma_batch. Rename every layer in one pass; do not stop halfway and ask which convention I prefer.",
-        "",
-        "4. RULES — THIS IS A RENAME, NOTHING ELSE",
-        "   - Change names only. No spacing, typography, colour, sizing, Auto Layout, structure or responsive work, and no new components or variables, even if you can see something worth fixing. Report those separately instead.",
-        "   - Do not rename component properties, variant names or variable names; renaming those breaks bindings.",
-        "   - Leave locked layers and the internals of instances alone; rename the instance itself, not what is inside it.",
-        SAFETY,
+        "Load figma_skill \"Layer_Rename_v1\" and use its convention; do not invent one.",
+        "Read get_nodes_info and export_node_as_image first, so each name says what the layer is on screen: header, hero, card, card__title, button--primary. Nothing stays \"Frame 24\", \"Group 5\" or \"Copy 3\".",
+        "Apply with rename_node batched through figma_batch - the whole selection in one pass, no mid-way questions about which convention I prefer.",
+        "Names only: no spacing, typography, colour, sizing, structure or responsive work. Do not rename component properties, variants or variables (it breaks bindings); skip locked layers and instance internals.",
       ].join("\n")
     ),
   },
@@ -133,30 +90,11 @@ const OPERATION_PROMPTS = [
       "Make Responsive",
       "adapt the selection to one breakpoint, on a duplicate, without redesigning it",
       [
-        "2. LOAD THE PROCEDURE",
-        "   - Call figma_skill with name \"Responsive_Apply_v1\" and follow it.",
-        "",
-        "3. ONE BREAKPOINT, ON A COPY",
-        "   - Ask me which breakpoint you are building — Tablet 768px or Mobile 320px — and stop until I answer. Never do both in one run.",
-        "   - Duplicate the source frame with clone_node and do all the work on the duplicate, named for its breakpoint. Leave the original untouched unless I tell you otherwise.",
-        "   - Finish that breakpoint completely, validate it, report it, then stop and ask before starting another one.",
-        "",
-        "4. USE THE FILE'S OWN VARIABLES",
-        "   - Call get_variables and get_design_system before typing any width, padding, gap or radius.",
-        "   - Find the variable that governs the property with find_variable, select the mode for this breakpoint (switch_variable_mode), and bind it with apply_variable_to_node. A manual number is a last resort.",
-        "   - If no suitable variable exists, ask me whether to use the current value or add a token. Never create a token on your own.",
-        "",
-        "5. SIZING RULES — THE PART THAT BREAKS DESIGNS",
-        "   - Containers, cards, text blocks and content columns: width Fill Container, height Hug Contents (set_layout_sizing). Buttons hug both, unless the design calls for a full-width CTA.",
-        "   - Never give responsive content a fixed numeric height. Height comes from content.",
-        "   - Let text wrap and grow. Never shrink a font, change a text style or clip a text layer to make something fit.",
-        "   - Keep the existing typography, colours and content. This is adaptation, not redesign.",
-        "   - Add Auto Layout only where it genuinely carries the responsive behaviour; do not wrap every layer.",
-        "",
-        "6. CHECK THE RESULT",
-        "   - Run analyze_responsive before you start and validate_responsive when you finish, and act on what they report.",
-        "   - Confirm no content layer is left on a fixed height, nothing is clipped, and nothing overlaps.",
-        SAFETY,
+        "Load figma_skill \"Responsive_Apply_v1\".",
+        "Ask which breakpoint - Tablet 768 or Mobile 320 - and stop until I answer. One per run. clone_node the frame and work on the duplicate; leave the original alone.",
+        "Every value comes from the file: get_variables -> find_variable -> switch_variable_mode for this breakpoint -> apply_variable_to_node. No token for it? Ask; never create one.",
+        "Sizing: containers, cards, text blocks and columns Fill width + Hug height (set_layout_sizing); buttons hug both. No fixed height on content, ever. Text wraps and grows - never shrink a font, change a style or clip text to fit.",
+        "analyze_responsive before, validate_responsive after. Finish this breakpoint, report, stop - do not start the other one.",
       ].join("\n")
     ),
   },
@@ -171,22 +109,11 @@ const OPERATION_PROMPTS = [
       "Optimize Layers",
       "flatten the structure to the smallest tree that renders identically",
       [
-        "2. SCAN BEFORE YOU REMOVE ANYTHING",
-        "   - Read the whole selection with get_nodes_info first and give me a short list of what you intend to remove or merge, and why. Wait for my approval before deleting anything.",
-        "",
-        "3. WHAT TO SIMPLIFY",
-        "   - Empty frames and groups, wrappers with a single child that add nothing, duplicated and accidental copies, redundant nested frames, Auto Layout frames with no layout function, and layers with no visual or layout effect.",
-        "   - Collapse to one layer of Auto Layout wherever a single frame does the job. Use clean_layers to apply the removals.",
-        "   - Where a repeating row or column of items would be clearer as a Grid, propose convert_layout with mode \"grid\" — but only if spacing, alignment and wrapping stay identical. If it would shift anything, keep the current structure and tell me.",
-        "   - Keep padding and gap bound to their existing variables; check with get_node_variable_bindings before and after.",
-        "",
-        "4. NEVER REMOVE",
-        "   - Component layers, component properties, variant structure, masks, design-system elements, or layers used for interaction or prototyping.",
-        "",
-        "5. THIS IS STRUCTURAL CLEANUP ONLY",
-        "   - No redesign, no typography or colour changes, no content changes, no resizing, no spacing changes beyond what removing a redundant wrapper implies.",
-        "   - The design must look pixel-identical afterwards.",
-        SAFETY,
+        "Scan the whole selection with get_nodes_info, list what you would remove or merge and why, and wait for approval before deleting anything.",
+        "Remove through clean_layers: empty frames and groups, single-child wrappers that do nothing, accidental duplicates, Auto Layout frames with no layout job. Collapse to one level of Auto Layout where one frame does the work.",
+        "For repeating rows or cards, propose convert_layout mode \"grid\" - but only if spacing, alignment and wrapping stay identical; otherwise keep the structure and say why.",
+        "Keep: components, properties, variants, masks, prototype layers, and every bound padding/gap token (check get_node_variable_bindings before and after).",
+        "Structure only - no redesign, typography, colour, content or spacing changes. The result must be pixel-identical.",
       ].join("\n")
     ),
   },
@@ -199,22 +126,12 @@ const OPERATION_PROMPTS = [
     icon: "🎨",
     prompt: prompt(
       "Design System First",
-      "inventory what the file already has, and reuse it instead of creating anything new",
+      "inventory what the file already has and reuse it instead of creating anything",
       [
-        "2. INVENTORY THE SYSTEM — READ ONLY",
-        "   - Call get_design_system, get_variables, get_styles, get_local_components and get_remote_components.",
-        "   - Report what exists: variable collections and their modes, colour/text/effect styles, local components and library components.",
-        "",
-        "3. MAP THE SELECTION AGAINST IT",
-        "   - For the selected layers, call get_node_variable_bindings and match_design_tokens.",
-        "   - Produce a table: property, current raw value, the existing variable or style that matches it, and the node ID. Mark anything with no match as 'no token found'.",
-        "",
-        "4. THEN ASK, THEN APPLY",
-        "   - Show me the table and wait. Apply bindings only for the rows I approve, using apply_variable_to_node, apply_variable_bindings, set_text_style_id or set_instance_variant.",
-        "   - Where a raw value is close to a token but not equal, say so and let me decide — do not snap it silently.",
-        "   - Never create a new variable, style or component to close a gap. If something is genuinely missing, describe it and ask.",
-        "   - Never replace a bound token with a raw value.",
-        SAFETY,
+        "Inventory: get_design_system, get_variables, get_styles, get_local_components, get_remote_components. Report the collections, modes, styles and components that exist.",
+        "Map the selection with get_node_variable_bindings and match_design_tokens. Table: node ID, property, current raw value, the existing variable or style that matches, or \"no match\".",
+        "Show the table and wait. Bind only the rows I approve - apply_variable_to_node, apply_variable_bindings, set_text_style_id, set_instance_variant.",
+        "Exact matches only: a near value gets reported, never snapped. Never create a variable, style or component to close a gap, and never replace a bound token with a raw value.",
       ].join("\n")
     ),
   },
@@ -229,21 +146,11 @@ const OPERATION_PROMPTS = [
       "Fix Typography",
       "bind text to the file's existing text styles and make the hierarchy consistent",
       [
-        "2. READ THE TEXT AND THE STYLES",
-        "   - Call get_styles for the text styles that exist, and scan_text_nodes over the selection for the text that exists.",
-        "   - For mixed-format text, call get_styled_text_segments before touching it, so per-segment formatting is not flattened.",
-        "",
-        "3. MATCH, THEN ASK, THEN BIND",
-        "   - Build a table: text layer, node ID, current font/size/weight/line-height, and the existing text style whose values match exactly.",
-        "   - Show it to me and wait for approval. Then bind the approved rows with set_text_style_id.",
-        "   - A near match is not a match. If no style has the same values, list it as unmatched and ask — do not resize text to make a style fit and do not create a new style.",
-        "",
-        "4. HIERARCHY AND SIZING",
-        "   - Check that heading levels descend sensibly and that repeated elements (all card titles, all body copy) use the same style; report anything inconsistent before changing it.",
-        "   - Text layers must be Auto Height and grow with their content — use fix_text_sizing or set_layout_sizing, never a fixed height.",
-        "   - Never shrink a font size, tighten line height or truncate copy to solve a height or overflow problem. Fix the container instead, or report it.",
-        "   - Do not change the wording.",
-        SAFETY,
+        "Read get_styles for the styles and scan_text_nodes for the text; call get_styled_text_segments before touching anything with mixed formatting, so per-segment styling is not flattened.",
+        "Table: text layer, node ID, current font/size/weight/line-height, and the text style whose values match exactly. Show it, wait, then bind approved rows with set_text_style_id.",
+        "A near match is not a match - list it as unmatched and ask. Never resize text to make a style fit, and never create a style.",
+        "Text is Auto Height (fix_text_sizing / set_layout_sizing), never a fixed box. Never shrink type, tighten line height or cut copy to solve overflow - fix the container or report it. Do not change wording.",
+        "Flag inconsistent hierarchy - heading levels, repeated card titles, body copy - before changing it.",
       ].join("\n")
     ),
   },
@@ -256,21 +163,13 @@ const OPERATION_PROMPTS = [
     icon: "📐",
     prompt: prompt(
       "Audit Spacing",
-      "report every padding and gap in the selection, then bind the approved ones to existing tokens",
+      "report every padding and gap, then bind the approved ones to existing tokens",
       [
-        "2. AUDIT FIRST — CHANGE NOTHING YET",
-        "   - Read the spacing variables with get_variables and get_design_system, and the current values with get_nodes_info and get_node_variable_bindings.",
-        "   - Run match_design_tokens over the selection.",
-        "   - Report a table: layer, node ID, property (padding-top/right/bottom/left, item spacing, counter-axis spacing), current value, bound token or 'raw', and the existing token that matches.",
-        "   - Group the findings: already bound correctly / raw value with an exact token match / raw value with no match / inconsistent with a sibling.",
-        "",
-        "3. THEN APPLY WHAT I APPROVE",
-        "   - Wait for my approval, then bind with apply_variable_to_node or apply_variable_bindings, and set values through set_auto_layout where a property is not bindable.",
-        "   - Change only spacing. Do not resize layers, restructure the tree, or adjust typography as a side effect.",
-        "   - Only an exact match may be bound automatically. A value that is 'close' to a token gets reported, not rounded.",
-        "   - If a needed token does not exist, say which value needs one and ask. Never create one yourself.",
-        "   - Remember that changing a gap or padding changes the height of every ancestor — re-check the frame afterwards.",
-        SAFETY,
+        "Audit first, change nothing: get_variables and get_design_system for the tokens, get_nodes_info and get_node_variable_bindings for current values, then match_design_tokens.",
+        "Report per layer: node ID, property (padding sides, item spacing, counter-axis spacing), value, bound or raw, matching token. Group as: already bound / exact token available / no token / inconsistent with a sibling.",
+        "After approval, bind with apply_variable_to_node or apply_variable_bindings and set unbindable values through set_auto_layout.",
+        "Exact matches only - never round to a \"close\" token and never create one; say which value needs a token and ask.",
+        "Spacing only: no resizing, restructuring or typography. A changed gap changes every ancestor's height, so re-check the frame afterwards.",
       ].join("\n")
     ),
   },
@@ -283,25 +182,12 @@ const OPERATION_PROMPTS = [
     icon: "📏",
     prompt: prompt(
       "Apply Hug Heights",
-      "replace fixed numeric heights on content layers with Hug Contents, so the design grows with its content",
+      "replace fixed heights on content layers with Hug Contents so the design grows with its content",
       [
-        "2. FIND THE FIXED HEIGHTS",
-        "   - Read the selection with get_nodes_info and list every layer carrying a fixed height, with its node ID, current height and what it contains.",
-        "   - Mark each one as 'should hug' or 'legitimately fixed' and show me the list before changing anything.",
-        "",
-        "3. WHAT MUST HUG",
-        "   - Sections, content wrappers, text and heading containers, cards, feature blocks, hero content, CTA blocks, form wrappers, navigation content, footer columns, and any Auto Layout frame whose height depends on its children.",
-        "   - Apply with set_layout_sizing (vertical: HUG). A frame can only hug if it has Auto Layout — if it does not, tell me before adding one, and add it only where it genuinely carries the layout.",
-        "   - Text layers go to Auto Height (fix_text_sizing), not a fixed box.",
-        "",
-        "4. WHAT KEEPS ITS FIXED HEIGHT",
-        "   - Icons, avatars, small controls, deliberate image crops, brand assets, and components with an intentionally fixed spec. If you are unsure whether a height is deliberate, ask instead of converting it.",
-        "",
-        "5. AFTER THE CHANGE",
-        "   - Heights will shift as parents start hugging. Walk up the tree and confirm no text is clipped, nothing overlaps, and no layer collapsed to zero height.",
-        "   - Never solve an overflow by shrinking text, changing a text style or re-fixing the height.",
-        "   - Run validate_responsive and report what it says.",
-        SAFETY,
+        "List every fixed height (get_nodes_info) with node ID, value and content, each marked \"should hug\" or \"deliberately fixed\". Show the list before changing anything.",
+        "Hug: sections, wrappers, text and heading containers, cards, hero, CTA, form, nav and footer blocks - any frame whose height follows its children. Apply set_layout_sizing vertical HUG; it needs Auto Layout, so ask before adding one. Text goes to Auto Height via fix_text_sizing.",
+        "Keep fixed: icons, avatars, small controls, deliberate image crops, brand assets, components with an intentional spec. Unsure whether a height is deliberate? Ask.",
+        "Heights shift as parents start hugging: walk up the tree and confirm nothing is clipped, overlapping or collapsed to zero. Never re-fix a height or shrink text to solve overflow. Finish with validate_responsive.",
       ].join("\n")
     ),
   },
