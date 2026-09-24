@@ -36,6 +36,8 @@
     "build:dxt": "npm run sync-version && npm run build && npm run pack",
     "pub:release": "bun run build && npm publish",
     "configure-claude": "node scripts/configure-claude.js",
+    "configure:openai": "node scripts/configure-openai.js",
+    "check:setup": "node scripts/check-multi-ai-setup.js",
     "tokens": "node scripts/chat-token-report.mjs",
     "test": "jest",
     "test:watch": "jest --watch",

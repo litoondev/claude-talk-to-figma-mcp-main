@@ -6,6 +6,8 @@ Enable your AI agents to read, analyze, and modify Figma designs.
 
 > 🌐 **Language / ভাষা:** [English guide](#english) · [বাংলা নির্দেশিকা](#bangla)
 
+> **ChatGPT + Codex + Claude:** একই local Figma MCP তিনটি client-এ চালানোর বাংলা setup: [MULTI_AI_INSTALL_BN.md](MULTI_AI_INSTALL_BN.md)
+
 Works with your favorite agentic tools:
 
 - [Claude Desktop](https://claude.ai/)
