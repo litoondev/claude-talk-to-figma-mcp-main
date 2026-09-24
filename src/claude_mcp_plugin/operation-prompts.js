@@ -173,18 +173,13 @@ const OPERATION_PROMPTS = [
       "hip master",
       "local only",
     ],
-    icon: "🎯",
-    prompt: prompt(
-      "Design System Scope - Local Only",
-      "use only the styles and variables created in this file, and treat every remote or team library as off-limits",
-      [
-        "1. Apply only nodes, styles and variables where .remote === false. Never read from, apply or reference HIP Master V3, Kidder Dental or any other remote source - even when the picker offers it.",
-        "2. Verify .remote directly before using anything: get_nodes_info per node, audit_remote_styles scope \"document\" for what the file still binds to. Do not trust the Libraries panel - it misses unpublished and detached remote sources.",
-        "3. A colour, type, effect or spacing value with no local equivalent gets created locally - create_paint_style, create_text_style, create_effect_style, set_variable - never borrowed from a library. Tell me the name you will use before creating it.",
-        "4. Resolve every token - colour, typography, effect, spacing - against the local collection only: get_styles, get_variables, find_variable.",
-        "Foreign bindings already in the file: rebind_remote_styles matchBy \"leaf\" as a dry run, wait for my approval, then dryRun false.",
-      ].join("\n")
-    ),
+    icon: "\u{1F3AF}",
+    // Supplied verbatim by the designer and kept word for word at their explicit
+    // request, so it is deliberately NOT built by prompt(): no setup, limits or
+    // verification block, and it names get_libraries, which this server does not
+    // register. `VERBATIM_PROMPTS` in the test file exempts it for that reason.
+    prompt:
+      "Use only styles and variables created in this file (\"Created in this file\" / local mode). Treat every remote/team library as off-limits. Rules: 1. Only apply nodes, styles, and variables where .remote === false. Never read from, apply, or reference HIP Master V3, Kidder Dental, or any other remote source \u2014 even if it appears in the picker. 2. Verify .remote directly via the API before using anything; do not trust get_libraries, which misses unpublished/detached remote sources. 3. If a color, type, effect, or spacing value you need doesn't exist locally, create it as a LOCAL variable/style \u2014 do not borrow it from a library. 4. Resolve every token (color, typography, effect, spacing) against the local collection only.",
   },
   {
     id: "fix_typography",

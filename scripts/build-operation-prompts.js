@@ -28,6 +28,13 @@ const TARGETS = [
   { file: "src/claude_mcp_plugin/operations-menu.js", indent: "    " },
 ];
 
+/**
+ * Prompts the designer supplied word for word and asked to keep unchanged.
+ * They are exempt from the shape guards below — not because the guards are
+ * wrong, but because the text is the designer's, not ours, to pad out.
+ */
+const VERBATIM = new Set(["local_mode_only"]);
+
 function validate(operations) {
   const seen = new Set();
   for (const op of operations) {
@@ -38,6 +45,8 @@ function validate(operations) {
     }
     if (seen.has(op.id)) throw new Error(`duplicate operation id: ${op.id}`);
     seen.add(op.id);
+
+    if (VERBATIM.has(op.id)) continue;
 
     // A stub prompt is the bug this file exists to prevent, so fail the build
     // rather than ship one.

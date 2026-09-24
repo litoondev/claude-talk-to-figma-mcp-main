@@ -84,6 +84,18 @@ function builtinSkillIds(): Set<string> {
 
 const operations = injectedOperations("ui.html");
 
+/**
+ * Prompts the designer wrote and asked to ship word for word.
+ *
+ * The shape checks below encode what *we* think a prompt needs — setup, limits,
+ * verification, and only tool names this server registers. A prompt handed to us
+ * verbatim is the designer's text, so it is checked for being present and
+ * identical across the UI copies, and nothing more. Adding an id here is a
+ * deliberate, visible decision; it must never be a way to sneak a stub past the
+ * guards this file exists to enforce.
+ */
+const VERBATIM_PROMPTS = new Set(["local_mode_only"]);
+
 describe("operation prompts", () => {
   it("ships the ten panel operations", () => {
     expect(operations.map((op) => op.id)).toEqual([
@@ -124,6 +136,12 @@ describe("operation prompts", () => {
 
   describe.each(operations.map((op) => [op.id, op] as const))("%s", (_id, op) => {
     it("stands on its own without the user adding instructions", () => {
+      if (VERBATIM_PROMPTS.has(op.id)) {
+        // Designer-supplied text: only that it is really there.
+        expect(op.prompt.trim().length).toBeGreaterThan(200);
+        return;
+      }
+
       // A stub prompt is the defect this file guards against — and so is a
       // bloated one, since every prompt is paid for in tokens on each use.
       expect(op.prompt.length).toBeGreaterThan(900);
@@ -139,6 +157,7 @@ describe("operation prompts", () => {
     });
 
     it("only names tools the server registers", () => {
+      if (VERBATIM_PROMPTS.has(op.id)) return;
       const tools = registeredTools();
       // Tool-shaped words in the prompt: lowercase with an underscore.
       const mentioned = new Set(op.prompt.match(/\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g) || []);
