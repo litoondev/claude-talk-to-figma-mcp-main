@@ -67,9 +67,11 @@ numbers as approved. Do not re-derive them by eye.
 ## How to use this skill
 
 1. **Confirm the connection.** `check_figma_connection`; `join_channel` if needed.
-2. **Define the scope.** One breakpoint, one frame. Tablet request = tablet only.
-   Mobile request = mobile only. Both requested = finish Tablet, stop, ask before
-   starting Mobile.
+2. **Define the scope.** Understand what the user is asking:
+   - **"Make tablet responsive"** → Tablet 768 only. Do NOT touch Mobile 320. Finish Tablet, report, stop.
+   - **"Make mobile responsive"** → Mobile 320 only. Do NOT touch Tablet 768. Finish Mobile, report, stop.
+   - **"Make it responsive" (both)** → Two phases. Phase 1: Tablet 768 complete. Report when done. Ask: "Tablet is complete. Should I proceed with Mobile 320?" Wait for approval before starting Mobile. Then: Phase 2: Mobile 320 complete. Report, stop.
+   - **Scope rule:** One breakpoint per run. Always ask before moving to the next breakpoint. Never work on Tablet and Mobile simultaneously.
 3. **Inspect before changing.** `get_selection` / `get_nodes_info` for structure,
    `export_node_as_image` to see the design, `get_variables` for the live tokens.
 4. **Bind tokens, don't type numbers.** Every value below exists as a variable in
