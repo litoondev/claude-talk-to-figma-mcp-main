@@ -659,6 +659,52 @@
       color: var(--on-acc);
     }
 
+    .mcp-plugin__operation-actions {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      margin-top: 6px;
+    }
+
+    .mcp-plugin__operation-action {
+      margin-top: 0;
+    }
+
+    /* The prompt itself, on the card. A one-line description is not something
+       you can read, check or hand-select when the clipboard fails. */
+    .mcp-plugin__operation-prompt {
+      display: none;
+      width: 100%;
+      box-sizing: border-box;
+      margin-top: 8px;
+      padding: 8px 10px;
+      min-height: 180px;
+      resize: vertical;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--soft);
+      color: var(--ink);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+    }
+
+    .mcp-plugin__operation-item.is-open .mcp-plugin__operation-prompt {
+      display: block;
+    }
+
+    .mcp-plugin__operation-hint {
+      margin-top: 6px;
+      font-size: 11.5px;
+      line-height: 1.45;
+      color: var(--mute);
+    }
+
+    .mcp-plugin__operation-hint.is-error {
+      color: #d93025;
+    }
+
     .mcp-plugin__operations-empty {
       grid-column: 1 / -1;
       padding: 44px 0;
@@ -1227,7 +1273,7 @@
               "mobile"
             ],
             "icon": "📱",
-            "prompt": "Make Responsive - adapt the selection to one breakpoint using existing components and tokens.\n\nSetup: join_channel -> check_figma_connection -> get_selection. Nothing selected: ask which frame, then stop. Work only inside that selection.\n\nBefore editing: get_local_components -> get_design_system -> get_variables.\n\nAsk which breakpoint - Tablet 768 or Mobile 320 - and stop until I answer. One per run. clone_node the frame and work on the duplicate; leave the original alone.\n\nCOMPONENT-FIRST APPROACH:\n1. Identify all components used in the desktop version\n2. When adapting for tablet/mobile, replace raw elements with existing components from your system\n3. Change component variant properties (size, state) via the component - never detach and rebuild manually\n4. Only use raw frames/groups where no matching component exists\n\nEvery value from file: get_design_system and get_variables -> find_variable -> switch_variable_mode for this breakpoint -> apply_variable_to_node. No token? Ask; never create one.\n\nSizing: containers, cards, text blocks and columns Fill width + Hug height (set_layout_sizing); buttons hug both. No fixed height on content, ever. Text wraps and grows - never shrink a font, change a style or clip text to fit.\n\nanalyze_responsive before, validate_responsive after. Finish this breakpoint, report, stop - do not start the other one.\n\nVerify: export_node_as_image before and after - it must look identical unless this task asked otherwise; re-read changed nodes with get_nodes_info and undo anything that moved, clipped or overlapped by accident.\n\nReport: per change, node ID and before -> after; what you skipped and why; what you need from me. Never report a step no tool result confirmed."
+            "prompt": "Make Responsive - adapt the selection to one breakpoint, on a duplicate, using the components and tokens the file already has.\n\nSetup: join_channel -> check_figma_connection -> get_selection. Nothing selected: ask which frame, then stop. Work only inside that selection; report problems elsewhere instead of fixing them.\n\nLoad figma_skill \"Responsive_Apply_v1\".\nAsk which breakpoint - Tablet 768 or Mobile 320 - and stop until I answer. One per run. clone_node the frame and work on the duplicate; leave the original alone.\nComponent-first: adapt by swapping a raw element for the component that already exists and by changing variant properties on the instance - never detach and rebuild by hand. Raw frames only where no component matches.\nEvery value comes from the file: get_local_components, get_design_system and get_variables -> find_variable -> switch_variable_mode for this breakpoint -> apply_variable_to_node. No token for it? Ask; never create one.\nSizing: containers, cards, text blocks and columns Fill width + Hug height (set_layout_sizing); buttons hug both. No fixed height on content, ever. Text wraps and grows - never shrink a font, change a style or clip text to fit.\nanalyze_responsive before, validate_responsive after. Finish this breakpoint, report, stop - do not start the other one.\n\nNever: move or resize an absolute-positioned layer - change size or layout without checking clipsContent - detach instances - break masks, variants, component properties or prototype links - alter copy, colour, type or imagery unasked - invent a token, style or component name.\n\nVerify: export_node_as_image before and after - it must look identical unless this task asked otherwise; re-read changed nodes with get_nodes_info and undo anything that moved, clipped or overlapped by accident.\nReport: per change, node ID and before -> after; what you skipped and why; what you need from me. Never report a step no tool result confirmed."
           },
           {
             "id": "optimize_layers",
@@ -1256,6 +1302,36 @@
             ],
             "icon": "🎨",
             "prompt": "Design System First - inventory what the file already has and reuse it instead of creating anything.\n\nSetup: join_channel -> check_figma_connection -> get_selection. Nothing selected: ask which frame, then stop. Work only inside that selection; report problems elsewhere instead of fixing them.\n\nInventory: get_design_system, get_variables, get_styles, get_local_components, get_remote_components. Report the collections, modes, styles and components that exist.\nMap the selection with get_node_variable_bindings and match_design_tokens. Table: node ID, property, current raw value, the existing variable or style that matches, or \"no match\".\nShow the table and wait. Bind only the rows I approve - apply_variable_to_node, apply_variable_bindings, set_text_style_id, set_instance_variant.\nExact matches only: a near value gets reported, never snapped. Never create a variable, style or component to close a gap, and never replace a bound token with a raw value.\n\nNever: move or resize an absolute-positioned layer - change size or layout without checking clipsContent - detach instances - break masks, variants, component properties or prototype links - alter copy, colour, type or imagery unasked - invent a token, style or component name.\n\nVerify: export_node_as_image before and after - it must look identical unless this task asked otherwise; re-read changed nodes with get_nodes_info and undo anything that moved, clipped or overlapped by accident.\nReport: per change, node ID and before -> after; what you skipped and why; what you need from me. Never report a step no tool result confirmed."
+          },
+          {
+            "id": "local_styles_only",
+            "category": "Design System",
+            "title": "Local Styles Only",
+            "description": "Drop foreign library sections from the style picker",
+            "triggers": [
+              "remote styles",
+              "library styles",
+              "created in this file",
+              "one style source",
+              "foreign variables"
+            ],
+            "icon": "🧹",
+            "prompt": "Local Styles Only - leave one source in every style and variable picker - \"Created in this file\".\n\nSetup: join_channel -> check_figma_connection -> get_selection. Nothing selected: ask which frame, then stop. Work only inside that selection; report problems elsewhere instead of fixing them.\n\nDiagnose first: audit_remote_styles scope \"document\" - one binding anywhere keeps a section in the picker, so a selection scan cannot clear the file. Report sourceFiles, names and usage counts; verdict \"incomplete\" means stop - a partial scan is no all-clear.\nTwo causes, two fixes. Bindings found: styles carried in by pasted layers or dragged-in instances - this prompt repairs those. Audit clean but the section still shows: the file subscribes to that library, which no plugin can change - tell me to switch it off in Assets -> Libraries, then stop.\nName each foreign style's local target from get_styles and get_variables first. No local equivalent - report and ask; never create one, never detach a binding to make the section disappear.\nrebind_remote_styles scope \"document\", matchBy \"leaf\", dry run. Show every row - node ID, property, remote -> local - then wait. dryRun false on approved rows only; pass map for any row leaf matching got wrong.\nRe-run audit_remote_styles scope \"document\", paste the verdict, and list anything still foreign with its reason.\n\nNever: move or resize an absolute-positioned layer - change size or layout without checking clipsContent - detach instances - break masks, variants, component properties or prototype links - alter copy, colour, type or imagery unasked - invent a token, style or component name.\n\nVerify: export_node_as_image before and after - it must look identical unless this task asked otherwise; re-read changed nodes with get_nodes_info and undo anything that moved, clipped or overlapped by accident.\nReport: per change, node ID and before -> after; what you skipped and why; what you need from me. Never report a step no tool result confirmed."
+          },
+          {
+            "id": "local_mode_only",
+            "category": "Design System",
+            "title": "Local Mode Only",
+            "description": "Design system scope: local only, never a remote library",
+            "triggers": [
+              "only local mode",
+              "one variable mode",
+              "remove library",
+              "hip master",
+              "local only"
+            ],
+            "icon": "🎯",
+            "prompt": "Design System Scope - Local Only - use only the styles and variables created in this file, and treat every remote or team library as off-limits.\n\nSetup: join_channel -> check_figma_connection -> get_selection. Nothing selected: ask which frame, then stop. Work only inside that selection; report problems elsewhere instead of fixing them.\n\n1. Apply only nodes, styles and variables where .remote === false. Never read from, apply or reference HIP Master V3, Kidder Dental or any other remote source - even when the picker offers it.\n2. Verify .remote directly before using anything: get_nodes_info per node, audit_remote_styles scope \"document\" for what the file still binds to. Do not trust the Libraries panel - it misses unpublished and detached remote sources.\n3. A colour, type, effect or spacing value with no local equivalent gets created locally - create_paint_style, create_text_style, create_effect_style, set_variable - never borrowed from a library. Tell me the name you will use before creating it.\n4. Resolve every token - colour, typography, effect, spacing - against the local collection only: get_styles, get_variables, find_variable.\nForeign bindings already in the file: rebind_remote_styles matchBy \"leaf\" as a dry run, wait for my approval, then dryRun false.\n\nNever: move or resize an absolute-positioned layer - change size or layout without checking clipsContent - detach instances - break masks, variants, component properties or prototype links - alter copy, colour, type or imagery unasked - invent a token, style or component name.\n\nVerify: export_node_as_image before and after - it must look identical unless this task asked otherwise; re-read changed nodes with get_nodes_info and undo anything that moved, clipped or overlapped by accident.\nReport: per change, node ID and before -> after; what you skipped and why; what you need from me. Never report a step no tool result confirmed."
           },
           {
             "id": "fix_typography",
@@ -1297,7 +1373,7 @@
               "auto height"
             ],
             "icon": "📏",
-            "prompt": "Apply Hug Heights - replace fixed heights on content layers with Hug Contents so the design grows with its content.\n\nSetup: join_channel -> check_figma_connection -> get_selection. Nothing selected: ask which frame, then stop. Work only inside that selection.\n\nBefore editing: get_local_components -> identify which layers are components vs raw frames.\n\nList every fixed height (get_nodes_info) with node ID, value and content, each marked \"should hug\" or \"deliberately fixed\". Show the list before changing anything.\n\nHug: sections, wrappers, text and heading containers, cards, hero, CTA, form, nav and footer blocks - any frame whose height follows its children.\n\nWhen adding Auto Layout:\n1. Check if a matching component exists for this layout pattern\n2. If yes: replace the raw frame with an instance of that component\n3. If no: add Auto Layout to the existing frame and bind gap/padding to design tokens\n\nApply set_layout_sizing vertical HUG. Text goes to Auto Height via fix_text_sizing. When wrapping in Auto Layout, use get_variables -> find_variable for gap and padding.\n\nKeep fixed: icons, avatars, small controls, deliberate image crops, brand assets, components with an intentional spec. Unsure? Ask.\n\nHeights shift as parents start hugging: walk up the tree and confirm nothing is clipped, overlapping or collapsed to zero. Never re-fix a height or shrink text to solve overflow. Finish with validate_responsive.\n\nVerify: export_node_as_image before and after - it must look identical unless this task asked otherwise; re-read changed nodes with get_nodes_info and undo anything that moved, clipped or overlapped by accident.\n\nReport: per change, node ID and before -> after; what you skipped and why; what you need from me. Never report a step no tool result confirmed."
+            "prompt": "Apply Hug Heights - replace fixed heights on content layers with Hug Contents so the design grows with its content.\n\nSetup: join_channel -> check_figma_connection -> get_selection. Nothing selected: ask which frame, then stop. Work only inside that selection; report problems elsewhere instead of fixing them.\n\nList every fixed height (get_nodes_info) with node ID, value and content, each marked \"should hug\" or \"deliberately fixed\". Show the list before changing anything.\nHug: sections, wrappers, text and heading containers, cards, hero, CTA, form, nav and footer blocks - any frame whose height follows its children. Apply set_layout_sizing vertical HUG; it needs Auto Layout, so ask before adding one. Text goes to Auto Height via fix_text_sizing.\nAdding Auto Layout: get_local_components first - if a component already matches the pattern, instance it instead of building a frame; otherwise add Auto Layout to the frame and bind gap and padding with find_variable.\nKeep fixed: icons, avatars, small controls, deliberate image crops, brand assets, components with an intentional spec. Unsure whether a height is deliberate? Ask.\nHeights shift as parents start hugging: walk up the tree and confirm nothing is clipped, overlapping or collapsed to zero. Never re-fix a height or shrink text to solve overflow. Finish with validate_responsive.\n\nNever: move or resize an absolute-positioned layer - change size or layout without checking clipsContent - detach instances - break masks, variants, component properties or prototype links - alter copy, colour, type or imagery unasked - invent a token, style or component name.\n\nVerify: export_node_as_image before and after - it must look identical unless this task asked otherwise; re-read changed nodes with get_nodes_info and undo anything that moved, clipped or overlapped by accident.\nReport: per change, node ID and before -> after; what you skipped and why; what you need from me. Never report a step no tool result confirmed."
           }
         ];
         /* OPERATION_PROMPTS:END */
@@ -2143,12 +2219,12 @@
       /**
        * Copy text to clipboard and notify
        */
-      async copyToClipboard(text) {
+      async copyToClipboard(text, { silent = false } = {}) {
         try {
           // Try modern API first
           if (navigator.clipboard && navigator.clipboard.writeText) {
             await navigator.clipboard.writeText(text);
-            this.notifyCopied(text);
+            if (!silent) this.notifyCopied(text);
           } else {
             throw new Error("Clipboard API not available");
           }
@@ -2166,14 +2242,16 @@
             const successful = document.execCommand('copy');
             document.body.removeChild(textArea);
             if (successful) {
-              this.notifyCopied(text);
+              if (!silent) this.notifyCopied(text);
             } else {
               throw new Error("execCommand('copy') failed");
             }
           } catch (fallbackErr) {
             console.error("All copy methods failed:", fallbackErr);
+            return false;
           }
         }
+        return true;
       }
 
       /**
@@ -2258,12 +2336,17 @@
               <div class="mcp-plugin__operation-category">${this.escapeHtml(op.category)}</div>
               <div class="mcp-plugin__operation-name">${this.escapeHtml(op.title)}</div>
               <div class="mcp-plugin__operation-description">${this.escapeHtml(op.description)}</div>
-              <button class="mcp-plugin__operation-action" data-operation-id="${op.id}" type="button">Copy prompt</button>
+              <div class="mcp-plugin__operation-actions">
+                <button class="mcp-plugin__operation-action" data-operation-id="${op.id}" type="button">Copy prompt</button>
+                <button class="mcp-plugin__operation-action mcp-plugin__operation-view" data-operation-id="${op.id}" type="button">View prompt</button>
+              </div>
+              <textarea class="mcp-plugin__operation-prompt" data-operation-id="${op.id}" readonly spellcheck="false">${this.escapeHtml(op.prompt)}</textarea>
+              <div class="mcp-plugin__operation-hint" data-operation-id="${op.id}"></div>
             </div>
           `).join("");
 
         // Add click handlers
-        grid.querySelectorAll(".mcp-plugin__operation-action").forEach(btn => {
+        grid.querySelectorAll(".mcp-plugin__operation-action:not(.mcp-plugin__operation-view)").forEach(btn => {
           btn.addEventListener("click", (e) => {
             e.preventDefault();
             const operationId = btn.getAttribute("data-operation-id");
@@ -2273,25 +2356,60 @@
             }
           });
         });
+
+        grid.querySelectorAll(".mcp-plugin__operation-view").forEach(btn => {
+          btn.addEventListener("click", (e) => {
+            e.preventDefault();
+            const card = btn.closest(".mcp-plugin__operation-item");
+            const open = card.classList.toggle("is-open");
+            btn.textContent = open ? "Hide prompt" : "View prompt";
+            if (open) card.querySelector(".mcp-plugin__operation-prompt").scrollIntoView({ block: "nearest" });
+          });
+        });
       }
 
       /**
        * Copy operation prompt to clipboard
        */
-      copyOperationPrompt(operation, button) {
+      async copyOperationPrompt(operation, button) {
         // The prompt is already self-contained and titled — copy it verbatim so
         // what the user pastes is exactly what was reviewed.
-        this.copyToClipboard(operation.prompt);
+        //
+        // Report what actually happened. This used to say "Prompt copied" and
+        // notify success before the async copy had resolved, and copyToClipboard
+        // swallowed its own failures — so a clipboard the plugin iframe was not
+        // allowed to write still looked like a success, and the paste was empty.
+        const copied = await this.copyToClipboard(operation.prompt, { silent: true });
+        const card = button && button.closest(".mcp-plugin__operation-item");
+        const hint = card && card.querySelector(".mcp-plugin__operation-hint");
 
         if (button) {
-          button.textContent = "Prompt copied";
+          button.textContent = copied ? "Prompt copied" : "Copy failed";
           setTimeout(() => { button.textContent = "Copy prompt"; }, 1400);
+        }
+
+        if (hint) {
+          hint.classList.toggle("is-error", !copied);
+          hint.textContent = copied
+            ? ""
+            : "Figma blocked the clipboard. The prompt is open below — select it and press Cmd/Ctrl+C.";
+        }
+
+        // A failed copy must leave the text somewhere the user can reach it.
+        if (!copied && card) {
+          card.classList.add("is-open");
+          const view = card.querySelector(".mcp-plugin__operation-view");
+          if (view) view.textContent = "Hide prompt";
+          const box = card.querySelector(".mcp-plugin__operation-prompt");
+          if (box) { box.focus(); box.select(); }
         }
 
         parent.postMessage({
           pluginMessage: {
             type: "notify",
-            message: `✓ ${operation.title} prompt copied to clipboard!`,
+            message: copied
+              ? `✓ ${operation.title} prompt copied to clipboard!`
+              : `${operation.title}: clipboard blocked — the prompt is shown on the card, copy it by hand.`,
           },
         }, "*");
       }
@@ -2323,7 +2441,7 @@
         parent.postMessage({
           pluginMessage: {
             type: "notify",
-            message: `Copied: ${text}`,
+            message: `Copied: ${text.length > 80 ? text.slice(0, 77) + "..." : text}`,
           },
         }, "*");
       }

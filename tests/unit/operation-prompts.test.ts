@@ -85,13 +85,15 @@ function builtinSkillIds(): Set<string> {
 const operations = injectedOperations("ui.html");
 
 describe("operation prompts", () => {
-  it("ships the eight panel operations", () => {
+  it("ships the ten panel operations", () => {
     expect(operations.map((op) => op.id)).toEqual([
       "convert_to_grid",
       "rename_layers",
       "make_responsive",
       "optimize_layers",
       "design_system",
+      "local_styles_only",
+      "local_mode_only",
       "fix_typography",
       "audit_spacing",
       "hug_heights",

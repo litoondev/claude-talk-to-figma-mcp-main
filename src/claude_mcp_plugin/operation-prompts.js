@@ -88,11 +88,12 @@ const OPERATION_PROMPTS = [
     icon: "📱",
     prompt: prompt(
       "Make Responsive",
-      "adapt the selection to one breakpoint, on a duplicate, without redesigning it",
+      "adapt the selection to one breakpoint, on a duplicate, using the components and tokens the file already has",
       [
         "Load figma_skill \"Responsive_Apply_v1\".",
         "Ask which breakpoint - Tablet 768 or Mobile 320 - and stop until I answer. One per run. clone_node the frame and work on the duplicate; leave the original alone.",
-        "Every value comes from the file: get_design_system and get_variables -> find_variable -> switch_variable_mode for this breakpoint -> apply_variable_to_node. No token for it? Ask; never create one.",
+        "Component-first: adapt by swapping a raw element for the component that already exists and by changing variant properties on the instance - never detach and rebuild by hand. Raw frames only where no component matches.",
+        "Every value comes from the file: get_local_components, get_design_system and get_variables -> find_variable -> switch_variable_mode for this breakpoint -> apply_variable_to_node. No token for it? Ask; never create one.",
         "Sizing: containers, cards, text blocks and columns Fill width + Hug height (set_layout_sizing); buttons hug both. No fixed height on content, ever. Text wraps and grows - never shrink a font, change a style or clip text to fit.",
         "analyze_responsive before, validate_responsive after. Finish this breakpoint, report, stop - do not start the other one.",
       ].join("\n")
@@ -132,6 +133,56 @@ const OPERATION_PROMPTS = [
         "Map the selection with get_node_variable_bindings and match_design_tokens. Table: node ID, property, current raw value, the existing variable or style that matches, or \"no match\".",
         "Show the table and wait. Bind only the rows I approve - apply_variable_to_node, apply_variable_bindings, set_text_style_id, set_instance_variant.",
         "Exact matches only: a near value gets reported, never snapped. Never create a variable, style or component to close a gap, and never replace a bound token with a raw value.",
+      ].join("\n")
+    ),
+  },
+  {
+    id: "local_styles_only",
+    category: "Design System",
+    title: "Local Styles Only",
+    description: "Drop foreign library sections from the style picker",
+    triggers: [
+      "remote styles",
+      "library styles",
+      "created in this file",
+      "one style source",
+      "foreign variables",
+    ],
+    icon: "🧹",
+    prompt: prompt(
+      "Local Styles Only",
+      "leave one source in every style and variable picker - \"Created in this file\"",
+      [
+        "Diagnose first: audit_remote_styles scope \"document\" - one binding anywhere keeps a section in the picker, so a selection scan cannot clear the file. Report sourceFiles, names and usage counts; verdict \"incomplete\" means stop - a partial scan is no all-clear.",
+        "Two causes, two fixes. Bindings found: styles carried in by pasted layers or dragged-in instances - this prompt repairs those. Audit clean but the section still shows: the file subscribes to that library, which no plugin can change - tell me to switch it off in Assets -> Libraries, then stop.",
+        "Name each foreign style's local target from get_styles and get_variables first. No local equivalent - report and ask; never create one, never detach a binding to make the section disappear.",
+        "rebind_remote_styles scope \"document\", matchBy \"leaf\", dry run. Show every row - node ID, property, remote -> local - then wait. dryRun false on approved rows only; pass map for any row leaf matching got wrong.",
+        "Re-run audit_remote_styles scope \"document\", paste the verdict, and list anything still foreign with its reason.",
+      ].join("\n")
+    ),
+  },
+  {
+    id: "local_mode_only",
+    category: "Design System",
+    title: "Local Mode Only",
+    description: "Design system scope: local only, never a remote library",
+    triggers: [
+      "only local mode",
+      "one variable mode",
+      "remove library",
+      "hip master",
+      "local only",
+    ],
+    icon: "🎯",
+    prompt: prompt(
+      "Design System Scope - Local Only",
+      "use only the styles and variables created in this file, and treat every remote or team library as off-limits",
+      [
+        "1. Apply only nodes, styles and variables where .remote === false. Never read from, apply or reference HIP Master V3, Kidder Dental or any other remote source - even when the picker offers it.",
+        "2. Verify .remote directly before using anything: get_nodes_info per node, audit_remote_styles scope \"document\" for what the file still binds to. Do not trust the Libraries panel - it misses unpublished and detached remote sources.",
+        "3. A colour, type, effect or spacing value with no local equivalent gets created locally - create_paint_style, create_text_style, create_effect_style, set_variable - never borrowed from a library. Tell me the name you will use before creating it.",
+        "4. Resolve every token - colour, typography, effect, spacing - against the local collection only: get_styles, get_variables, find_variable.",
+        "Foreign bindings already in the file: rebind_remote_styles matchBy \"leaf\" as a dry run, wait for my approval, then dryRun false.",
       ].join("\n")
     ),
   },
@@ -186,6 +237,7 @@ const OPERATION_PROMPTS = [
       [
         "List every fixed height (get_nodes_info) with node ID, value and content, each marked \"should hug\" or \"deliberately fixed\". Show the list before changing anything.",
         "Hug: sections, wrappers, text and heading containers, cards, hero, CTA, form, nav and footer blocks - any frame whose height follows its children. Apply set_layout_sizing vertical HUG; it needs Auto Layout, so ask before adding one. Text goes to Auto Height via fix_text_sizing.",
+        "Adding Auto Layout: get_local_components first - if a component already matches the pattern, instance it instead of building a frame; otherwise add Auto Layout to the frame and bind gap and padding with find_variable.",
         "Keep fixed: icons, avatars, small controls, deliberate image crops, brand assets, components with an intentional spec. Unsure whether a height is deliberate? Ask.",
         "Heights shift as parents start hugging: walk up the tree and confirm nothing is clipped, overlapping or collapsed to zero. Never re-fix a height or shrink text to solve overflow. Finish with validate_responsive.",
       ].join("\n")
