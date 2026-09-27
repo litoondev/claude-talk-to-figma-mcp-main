@@ -1342,7 +1342,7 @@ async function handleCommand(command, params) {
     case "get_styles":
       return await getStyles();
     case "get_local_components":
-      return await getLocalComponents();
+      return await getLocalComponents(params);
     // case "get_team_components":
     //   return await getTeamComponents();
     case "create_component_instance":
@@ -8041,20 +8041,46 @@ async function validateResponsiveCommand(params) {
   };
 }
 
-async function getLocalComponents() {
+async function getLocalComponents(params = {}) {
   await figma.loadAllPagesAsync();
 
   const components = figma.root.findAllWithCriteria({
     types: ["COMPONENT"],
   });
 
+  const exactName = typeof params.name === "string" ? params.name.trim().toLowerCase() : "";
+  const nameContains =
+    typeof params.nameContains === "string" ? params.nameContains.trim().toLowerCase() : "";
+  const requestedWidth = Number.isFinite(params.width) ? Number(params.width) : null;
+  const limit = Number.isInteger(params.limit) ? Math.max(0, params.limit) : 100;
+  const includeDimensions = params.includeDimensions === true;
+
+  const matches = components.filter((component) => {
+    const componentName = component.name.toLowerCase();
+    if (exactName && componentName !== exactName) return false;
+    if (nameContains && !componentName.includes(nameContains)) return false;
+    if (requestedWidth !== null && Math.abs(component.width - requestedWidth) > 0.5) return false;
+    return true;
+  });
+  const returned = limit === 0 ? matches : matches.slice(0, limit);
+
   return {
     count: components.length,
-    components: components.map((component) => ({
-      id: component.id,
-      name: component.name,
-      key: "key" in component ? component.key : null,
-    })),
+    matchedCount: matches.length,
+    returned: returned.length,
+    truncated: returned.length < matches.length,
+    components: returned.map((component) => {
+      const item = {
+        id: component.id,
+        name: component.name,
+        key: "key" in component ? component.key : null,
+      };
+      if (includeDimensions) {
+        item.width = component.width;
+        item.height = component.height;
+      }
+      return item;
+    }),
   };
 }
 

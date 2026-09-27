@@ -194,11 +194,17 @@ export function registerDocumentTools(server: McpServer): void {
   // Get Local Components Tool
   server.tool(
     "get_local_components",
-    "Get all local components from the Figma document",
-    {},
-    async () => {
+    "Find local components in the Figma document. Filter by exact name, name substring, and/or width to avoid returning the entire component library. Use includeDimensions for breakpoint-master discovery.",
+    {
+      name: z.string().optional().describe("Exact component name, case-insensitive."),
+      nameContains: z.string().optional().describe("Component-name substring, case-insensitive."),
+      width: z.number().positive().optional().describe("Component width in pixels (±0.5px)."),
+      limit: z.number().int().min(0).max(1000).optional().describe("Maximum matches to return. Default 100; 0 returns all matches."),
+      includeDimensions: z.boolean().optional().describe("Include width and height in each match. Default false."),
+    },
+    async (args) => {
       try {
-        const result = await sendCommandToFigma("get_local_components");
+        const result = await sendCommandToFigma("get_local_components", args);
         return {
           content: [
             {

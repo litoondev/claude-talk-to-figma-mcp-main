@@ -410,8 +410,12 @@ export function registerResponsiveTools(server: McpServer): void {
         .max(100000)
         .optional()
         .describe("Exact responsive width to analyze instead of the 768/320 defaults."),
+      responseMode: z
+        .enum(["compact", "full"])
+        .optional()
+        .describe("compact returns only actionable structure, plans, and issue counts. Default full."),
     },
-    async ({ nodeId, preservation, breakpoint, targetWidth }) => {
+    async ({ nodeId, preservation, breakpoint, targetWidth, responseMode }) => {
       try {
         const r = (await sendCommandToFigma("analyze_responsive", {
           nodeId,
@@ -434,6 +438,41 @@ export function registerResponsiveTools(server: McpServer): void {
             totalInstances: number;
           };
         };
+
+        if (responseMode === "compact") {
+          const issues = r.sourceIssues.issues ?? [];
+          const plan = Object.fromEntries(
+            Object.entries(r.plans).map(([key, entries]) => [
+              key,
+              entries.map((entry) => ({
+                section: entry.name,
+                kind: entry.kind,
+                behaviors: entry.behaviors,
+              })),
+            ])
+          );
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  source: r.source,
+                  sectionCount: r.sectionCount,
+                  readiness: r.readiness,
+                  existingResponsiveFrames: r.existingResponsiveFrames,
+                  plan,
+                  validation: {
+                    passed: r.sourceIssues.passed,
+                    errorCount: r.sourceIssues.errorCount,
+                    warningCount: r.sourceIssues.warningCount,
+                    errors: issues.filter((issue) => issue.severity === "error").slice(0, 10),
+                    warnings: issues.filter((issue) => issue.severity === "warning").slice(0, 5),
+                  },
+                }),
+              },
+            ],
+          };
+        }
 
         const lines: string[] = [];
         const src = r.source as Record<string, any>;
@@ -1285,8 +1324,19 @@ export function registerResponsiveTools(server: McpServer): void {
         .array(z.number().int().positive().max(4000))
         .optional()
         .describe("Viewport widths to check. Default [390, 320]."),
+      responseMode: z
+        .enum(["compact", "full"])
+        .optional()
+        .describe("compact returns structured counts and only the most actionable issues. Default full."),
+      maxIssues: z
+        .number()
+        .int()
+        .min(0)
+        .max(50)
+        .optional()
+        .describe("Maximum issues per viewport in compact mode. Default 8."),
     },
-    async ({ nodeId, widths }) => {
+    async ({ nodeId, widths, responseMode, maxIssues }) => {
       try {
         const r = (await sendCommandToFigma("validate_responsive", {
           nodeId,
@@ -1295,6 +1345,33 @@ export function registerResponsiveTools(server: McpServer): void {
           frame: { name: string; width: number };
           results: ValidationResult[];
         };
+
+        if (responseMode === "compact") {
+          const cap = maxIssues ?? 8;
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  frame: r.frame,
+                  passed: r.results.every((result) => result.passed),
+                  results: r.results.map((result) => ({
+                    viewport: result.viewport,
+                    passed: result.passed,
+                    inspected: result.inspected,
+                    errorCount: result.errorCount,
+                    warningCount: result.warningCount,
+                    issues: result.issues
+                      .filter((issue) => issue.severity === "error" || issue.severity === "info")
+                      .concat(result.issues.filter((issue) => issue.severity === "warning"))
+                      .slice(0, cap),
+                    omittedIssues: Math.max(0, result.issues.length - cap) + result.truncated,
+                  })),
+                }),
+              },
+            ],
+          };
+        }
 
         const lines: string[] = [];
         lines.push(`Responsive QA — "${r.frame.name}" (frame width ${r.frame.width}px)`);
