@@ -70,6 +70,17 @@ uses:
 
 # PREPARE A FIGMA PAGE FOR WEBFLOW
 
+## Efficiency contract
+
+- Inventory pages and the selected root first; read descendants section by
+  section at the smallest useful depth.
+- Query components and variables narrowly, cache IDs/modes, and reuse mappings.
+- Batch independent renames, moves, bindings, and sizing updates. Keep
+  ID-producing operations sequential only when the next call needs that ID.
+- Prefer compact responsive analysis and validation; re-read only changed roots
+  and failed nodes.
+- Export one baseline and one final image, plus a post-fix image only if needed.
+
 Turn a Figma page into a **Webflow-shaped** Figma page: same design, different
 structure. Nothing here touches Webflow.
 

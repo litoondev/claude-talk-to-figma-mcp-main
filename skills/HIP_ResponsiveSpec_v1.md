@@ -1,6 +1,6 @@
 ---
-id: Responsive_Apply_v1
-title: HIP Orthodontics Responsive Spec
+id: HIP_ResponsiveSpec_v1
+title: HIP Orthodontics Responsive Reference
 description: >
   The verified responsive specification for the HIP Orthodontics home page
   template (Desk 1440 / Tab 768 / Mobi 320). Load this skill whenever the
@@ -11,12 +11,9 @@ description: >
   use it instead of measuring by eye or inventing a value. Work one breakpoint
   at a time and never fix the height of content-driven layers.
 triggers:
-  - make the tablet responsive
-  - make the mobile responsive
-  - tablet responsive
-  - mobile responsive
-  - responsive design
   - responsive spec
+  - hip orthodontics responsive spec
+  - hip breakpoint values
   - 768px breakpoint
   - 320px breakpoint
   - breakpoint values
@@ -63,6 +60,10 @@ uses:
 numbers as approved. Do not re-derive them by eye.
 
 ---
+
+> **Reference, not orchestration.** Use `Responsive_Apply_v2` to perform edits.
+> Read only the tables for the selected section; do not load or restate this
+> entire specification during a responsive run.
 
 ## How to use this skill
 

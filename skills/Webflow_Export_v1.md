@@ -55,6 +55,17 @@ uses:
 
 # FIGMA → WEBFLOW
 
+## Efficiency contract
+
+- Read the prepared page shallowly, then expand one section at a time.
+- Query Figma components and variables narrowly. Cache every Figma-to-Webflow
+  ID mapping in Export Notes and resolve each token/class/component/asset once.
+- Batch independent Designer writes by section. Re-read only failed writes or
+  nodes named by the audit.
+- Validate all requested widths together with compact responsive reports.
+- Capture one Figma baseline and one Webflow result per page; add another image
+  only after a correction.
+
 Turn a Figma frame into a Webflow page that is **the same as the design**. Four
 rules hold for the whole export and override any shortcut below:
 

@@ -56,6 +56,16 @@ Two outcomes, in this order:
   0.5px it puts the original back from a hidden copy.
 - **Tokens:** it keeps gap and padding variables bound.
 
+## Efficiency contract
+
+- Read the selected root at depth 2-3 first; deepen only a proposal the user
+  needs explained. `convert_layout` performs its own geometry scan.
+- Run one dry-run per scope, cache proposal IDs, and apply only approved IDs.
+- Use scan/apply results as evidence. Re-read only replaced or refused nodes,
+  then export one final comparison image.
+- Batch independent approvals. Never simulate a refused conversion with
+  lower-level movement or layout tools.
+
 Your job is to scope the request, run the scan, explain it, get approval and
 report. Do not rebuild what the tool refused by other means.
 

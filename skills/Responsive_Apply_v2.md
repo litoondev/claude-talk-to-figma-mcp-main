@@ -39,6 +39,13 @@ Create responsive duplicates from one untouched source. Support `Tablet 768`,
 `Mobile 320`, or `Both`. When the user requests both, complete them in one run
 with one shared discovery pass; do not repeat the workflow per breakpoint.
 
+## Routing
+
+Use this skill for every responsive creation or adaptation task. For HIP
+Orthodontics, consult `HIP_ResponsiveSpec_v1` only for the selected section's
+approved values and exceptions. Do not load the full reference unless the user
+asks for a complete audit.
+
 ## Required sequence
 
 1. Run `join_channel -> check_figma_connection -> get_selection` once. If the

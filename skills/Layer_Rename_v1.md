@@ -48,6 +48,16 @@ knowledge to decide. Execute immediately and completely.
 
 ---
 
+## Efficiency contract
+
+- Start at depth 2 and deepen only ambiguous containers. Skip already-semantic
+  branches and component-instance internals.
+- Cache node IDs, types, text snippets, and assigned names; inspect each node
+  at most once per run.
+- Batch conflict-free renames with `figma_batch`; use sequential calls only
+  when a prior result determines the next name.
+- Use one screenshot per selected root. Renaming alone does not require another.
+
 ## Prerequisites
 
 The plugin must be connected: `join_channel` has to have run for this session.

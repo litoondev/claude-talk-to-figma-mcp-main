@@ -51,6 +51,18 @@ uses:
 
 # HTML / URL to Figma Import
 
+## Efficiency contract
+
+- Analyze the source once. Request extra text or SVG markup only for truncated
+  or selected assets; do not repeat the full HTML analysis.
+- Discover components and variables with exact or narrow filters. Use a
+  page-wide design-system scan only when matching fails.
+- Cache source values and resolved component/style/variable IDs in the plan.
+- Build complete sections in retry-safe batches and re-read only failures or
+  nodes changed by cleanup.
+- Keep one source screenshot and one final Figma screenshot; add a post-fix
+  screenshot only when a visual correction was required.
+
 Turn a web page into a Figma design that is **the same as the page**. Four
 rules hold for the whole import and override any shortcut below:
 
