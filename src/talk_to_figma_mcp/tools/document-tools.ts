@@ -381,11 +381,25 @@ export function registerDocumentTools(server: McpServer): void {
           ],
         };
       } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        // Surface a clear stop signal when the Figma plugin bridge is offline so
+        // the model does not fall back to alternative long-running work.
+        const isBridgeOffline =
+          msg.includes("PLUGIN BRIDGE OFFLINE") ||
+          msg.includes("did not respond") ||
+          msg.includes("verify connection") ||
+          msg.includes("Not connected to Figma");
         return {
           content: [
             {
               type: "text",
-              text: `Error joining channel: ${error instanceof Error ? error.message : String(error)}`,
+              text: isBridgeOffline
+                ? `🔴 PLUGIN BRIDGE OFFLINE — ${msg}\n\n` +
+                  `ACTION REQUIRED: Ask the user to open the "Claude Talk to Figma" plugin ` +
+                  `in their Figma file and join channel "${channel}". ` +
+                  `Do NOT generate artifacts, make API calls, or attempt any workaround. ` +
+                  `Wait for the user to confirm the plugin is connected before proceeding.`
+                : `Error joining channel: ${msg}`,
             },
           ],
         };

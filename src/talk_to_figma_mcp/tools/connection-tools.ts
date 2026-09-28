@@ -31,6 +31,53 @@ import {
   FigmaRestError,
 } from "../utils/figma-rest";
 import { sendCommandToFigma, joinChannel } from "../utils/websocket";
+import { serverUrl, defaultPort } from "../config/config";
+
+// ---------------------------------------------------------------------------
+// Helper: ask the relay itself what it can see
+// ---------------------------------------------------------------------------
+
+/**
+ * Probe the relay's HTTP status endpoint.
+ *
+ * WHY THIS EXISTS
+ * ---------------
+ * A failed ping says only "no answer" — it cannot tell apart a relay that is
+ * down, a relay that is up with no plugin attached, and a relay with a plugin
+ * sitting on a *different* channel. Guessing between those produced confidently
+ * wrong advice ("start the relay") while the relay was running and the plugin
+ * was showing a green Connected badge; following it would have tried to bind a
+ * second server to the same port.
+ *
+ * The relay already reports pluginCount and its live channel list, so ask it
+ * rather than infer. Returns null only when the relay is genuinely unreachable.
+ */
+async function probeRelay(): Promise<{
+  running: boolean;
+  pluginCount: number;
+  agentCount: number;
+  channels: string[];
+} | null> {
+  const host = serverUrl === "localhost" ? `localhost:${defaultPort}` : serverUrl;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2500);
+    const res = await fetch(`http://${host}/status`, { signal: controller.signal });
+    clearTimeout(timer);
+    if (!res.ok) return null;
+    const body: any = await res.json();
+    return {
+      running: body?.status === "running",
+      pluginCount: body?.queue?.pluginCount ?? 0,
+      agentCount: body?.queue?.agentCount ?? 0,
+      channels: Array.isArray(body?.queue?.channels)
+        ? body.queue.channels.map((c: any) => c.channel).filter(Boolean)
+        : [],
+    };
+  } catch {
+    return null;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Helper: extract file key from a Figma URL or bare key
@@ -92,10 +139,53 @@ export function registerConnectionTools(server: McpServer): void {
             fileName: (result as any)?.name ?? null,
           };
         } catch (err) {
+          // Ask the relay which leg is actually broken instead of guessing.
+          const relay = await probeRelay();
+
+          let diagnosis: string;
+          let action_required: string;
+
+          if (!relay) {
+            diagnosis = "relay_unreachable";
+            action_required =
+              `The socket relay is not answering on port ${defaultPort}. ` +
+              `Ask the user to start it with \`bun run socket\` (or \`npm run socket\`) ` +
+              `from the claude-talk-to-figma-mcp directory, then retry.`;
+          } else if (relay.pluginCount === 0) {
+            diagnosis = "relay_up_no_plugin";
+            action_required =
+              `The relay IS running — do NOT tell the user to start it, and do NOT run ` +
+              `\`npx claude-talk-to-figma-mcp\`, which would fight for port ${defaultPort}. ` +
+              `No Figma plugin is attached. Ask the user to open the 'Claude Talk to Figma' ` +
+              `plugin in Figma and click Connect.`;
+          } else if (channel && !relay.channels.includes(channel)) {
+            diagnosis = "channel_mismatch";
+            action_required =
+              `The relay IS running and a Figma plugin IS connected — the setup is fine. ` +
+              `The plugin is simply not on channel '${channel}'. ` +
+              `Channels the relay currently knows: ${relay.channels.join(", ") || "(none)"}. ` +
+              `Ask the user to read the channel ID shown in the plugin and use that exact value.`;
+          } else {
+            diagnosis = "plugin_not_responding";
+            action_required =
+              `The relay IS running and a plugin IS connected on this channel, but it did not ` +
+              `answer a ping. Do NOT restart the relay. Ask the user to close and reopen the ` +
+              `Claude Talk to Figma plugin in Figma, then retry.`;
+          }
+
           report.pluginBridge = {
-            status: "error",
+            status: "offline",
+            diagnosis,
             message: err instanceof Error ? err.message : String(err),
-            hint: "Make sure the Figma plugin is open and joined to this channel.",
+            relay: relay
+              ? {
+                  reachable: true,
+                  pluginsConnected: relay.pluginCount,
+                  agentsConnected: relay.agentCount,
+                  knownChannels: relay.channels,
+                }
+              : { reachable: false, port: defaultPort },
+            action_required,
           };
         }
       } else {
@@ -164,7 +254,7 @@ export function registerConnectionTools(server: McpServer): void {
       const fileOk = (report.restApi as any)?.fileAccess?.accessible ?? null;
 
       report.summary = {
-        pluginBridge: pluginOk ? "✅ connected" : "⚠️  " + (report.pluginBridge as any)?.status,
+        pluginBridge: pluginOk ? "✅ connected" : "🔴 offline — see action_required above",
         restApi: restOk ? "✅ connected" : "⚠️  " + (report.restApi as any)?.status,
         ...(fileOk !== null
           ? { fileAccess: fileOk ? "✅ accessible" : "❌ not accessible" }
@@ -173,6 +263,18 @@ export function registerConnectionTools(server: McpServer): void {
           restOk && (fileOk === null || fileOk)
             ? "✅ yes — use get_node_via_rest to verify edits"
             : "❌ no — REST token missing or lacks file access; trust plugin bridge confirmation only",
+        ...(!pluginOk && channel
+          ? {
+              // Deliberately not re-worded here: pluginBridge.action_required is
+              // derived from what the relay actually reports. Restating it as a
+              // generic "join the channel" line is how wrong advice got handed to
+              // users whose relay and plugin were both already running.
+              next_step: (report.pluginBridge as any)?.action_required,
+              do_not:
+                "Do not generate artifacts, do not start a second relay, and do not " +
+                "attempt workarounds. Fix the one leg named above, then retry.",
+            }
+          : {}),
       };
 
       return {

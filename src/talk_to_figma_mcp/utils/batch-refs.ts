@@ -4,7 +4,7 @@
  * without pulling in the WebSocket transport.
  */
 
-import { applyColorDefaults } from "./defaults";
+import { coerceColor } from "./defaults";
 
 /** Fields whose value is an RGBA colour object needing the same defaults the single-op tools apply. */
 const COLOR_FIELDS = ["fillColor", "strokeColor", "color"];
@@ -27,10 +27,23 @@ export function normalizeParams(command: string, params: Record<string, unknown>
   const out: Record<string, unknown> = { ...params };
 
   for (const field of COLOR_FIELDS) {
-    const value = out[field];
-    if (value && typeof value === "object" && "r" in (value as any)) {
-      out[field] = applyColorDefaults(value as any);
+    if (out[field] !== undefined) {
+      out[field] = coerceColor(out[field]);
     }
+  }
+
+  // set_variable carries its colour in `value`, which is typed loosely because
+  // the same field holds floats, strings and booleans for other variable types.
+  // Coerce only when the op is unambiguously writing a colour: either it says
+  // so via resolvedType, or the string is written as '#rrggbb'. Without that
+  // guard a genuine STRING token whose value happened to read "fff" or "abc123"
+  // would be silently rewritten into an RGBA object.
+  if (
+    command === "set_variable" &&
+    typeof out.value === "string" &&
+    (out.resolvedType === "COLOR" || out.value.trim().startsWith("#"))
+  ) {
+    out.value = coerceColor(out.value);
   }
 
   const fallbackName = DEFAULT_NAMES[command];

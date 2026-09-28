@@ -192,21 +192,63 @@ export function connectToFigma(port: number = defaultPort) {
 }
 
 /**
+ * Wait until the relay socket is OPEN, starting a connection if there isn't one.
+ *
+ * WHY THIS EXISTS
+ * ---------------
+ * The MCP process and the socket relay start independently: the host launches
+ * the MCP server at app start, while the relay and the Figma plugin come up
+ * whenever the user gets to them. `connectToFigma()` is fire-and-forget, so for
+ * the first seconds of a session — and again during any reconnect backoff —
+ * `ws` is CONNECTING or null.
+ *
+ * Throwing the instant `ws` is not OPEN reported "bridge offline" while the
+ * plugin sat there showing a green "Connected" badge, because the broken leg
+ * was MCP→relay, not plugin→relay. Waiting a bounded amount of time removes
+ * that false negative without reintroducing a long stall.
+ */
+async function waitForConnection(timeoutMs: number = 8000): Promise<void> {
+  if (ws && ws.readyState === WebSocket.OPEN) return;
+
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (ws && ws.readyState === WebSocket.OPEN) return;
+    // Kick a fresh attempt rather than waiting out the exponential backoff,
+    // which can be up to 30s — far longer than a caller should ever block.
+    if (!ws) connectToFigma();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  const target = serverUrl === "localhost" ? `${WS_URL}:${defaultPort}` : WS_URL;
+  throw new Error(
+    `RELAY UNREACHABLE — could not reach the socket relay at ${target} within ` +
+    `${timeoutMs / 1000}s. The Figma plugin talks to the relay, and so does this ` +
+    `server; if the relay is not running neither side can see the other. ` +
+    `Start it with \`bun run socket\` (or \`npm run socket\`), then retry.`
+  );
+}
+
+/**
  * Join a specific channel in Figma.
  * @param channelName - Name of the channel to join
  * @returns Promise that resolves when successfully joined the channel
  */
 export async function joinChannel(channelName: string): Promise<void> {
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
-    throw new Error("Not connected to Figma");
-  }
+  // Wait for the relay leg instead of failing the moment it is not yet open.
+  await waitForConnection();
 
   try {
-    await sendCommandToFigma("join", { channel: channelName });
+    // The relay acknowledges "join" instantly; use a short timeout so we
+    // don't hang for minutes if the relay itself is unreachable.
+    await sendCommandToFigma("join", { channel: channelName }, 5000);
     currentChannel = channelName;
 
     try {
-      await sendCommandToFigma("ping", {}, 12000);
+      // Ping goes all the way to the Figma plugin and back. Now that the relay
+      // leg is guaranteed open, this only measures plugin liveness, so a short
+      // bound is safe: 5s covers a healthy local roundtrip with room to spare
+      // while still failing fast when the plugin genuinely is not there.
+      await sendCommandToFigma("ping", {}, 5000);
       logger.info(`Joined channel: ${channelName}`);
     } catch (verificationError) {
       currentChannel = null;
@@ -214,7 +256,12 @@ export async function joinChannel(channelName: string): Promise<void> {
         ? verificationError.message
         : String(verificationError);
       logger.error(`Failed to verify channel ${channelName}: ${errorMsg}`);
-      throw new Error(`Failed to verify connection to channel "${channelName}". The Figma plugin may not be connected to this channel.`);
+      throw new Error(
+        `PLUGIN BRIDGE OFFLINE — channel "${channelName}" joined the relay but the Figma plugin did not respond. ` +
+        `Open the Claude Talk to Figma plugin in your Figma file, enter channel "${channelName}", and click Join. ` +
+        `Do NOT attempt any design operations until the bridge is confirmed online. ` +
+        `Stop and ask the user to connect the plugin.`
+      );
     }
   } catch (error) {
     logger.error(`Failed to join channel: ${error instanceof Error ? error.message : String(error)}`);
@@ -237,20 +284,17 @@ export function getCurrentChannel(): string | null {
  * @param timeoutMs - Timeout in milliseconds before failing
  * @returns A promise that resolves with the Figma response
  */
-function sendCommandRaw(
+async function sendCommandRaw(
   command: FigmaCommand,
   params: unknown = {},
   timeoutMs: number = 300000,
   target: "figma" | "webflow" = "figma"
 ): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    // If not connected, try to connect first
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      connectToFigma();
-      reject(new Error("Not connected to Figma. Attempting to connect..."));
-      return;
-    }
+  // Wait for the relay leg to come up rather than rejecting the first command
+  // of a session outright — see waitForConnection for why that mattered.
+  await waitForConnection();
 
+  return new Promise((resolve, reject) => {
     // Check if we need a channel for this command
     const requiresChannel = command !== "join";
     if (requiresChannel && !currentChannel) {
@@ -313,10 +357,20 @@ function sendCommandRaw(
       lastActivity: Date.now()
     });
 
-    // Send the request
+    // Send the request. waitForConnection guarantees an OPEN socket, but the
+    // socket can still drop between that check and here, so fail the request
+    // explicitly instead of throwing past the promise.
+    const socket = ws;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      clearTimeout(timeout);
+      pendingRequests.delete(id);
+      reject(new Error("Connection to the socket relay dropped before the command could be sent."));
+      return;
+    }
+
     logger.info(`Sending command to Figma: ${command}`);
     logger.debug(`Request details: ${JSON.stringify(request)}`);
-    ws.send(JSON.stringify(request));
+    socket.send(JSON.stringify(request));
   });
 }
 

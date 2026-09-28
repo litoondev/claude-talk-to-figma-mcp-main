@@ -2,6 +2,7 @@ import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { sendCommandToFigma } from "../utils/websocket";
 import { coerceJson, coerceBoolean } from "../utils/schema-helpers";
+import { coerceColor } from "../utils/defaults";
 
 const RESOLVED_TYPE = z.enum(["COLOR", "FLOAT", "STRING", "BOOLEAN"]);
 
@@ -91,23 +92,35 @@ export function registerVariableTools(server: McpServer): void {
   // Set Variable Tool
   server.tool(
     "set_variable",
-    "Update the value or name of an existing variable, or create one when createIfMissing is set. " +
+    "Update the value or name of ONE existing variable, or create one when createIfMissing is set. " +
       "Supports renaming when newName is provided. Creating a token or a collection expands the " +
       "design system, so it is refused by default: reuse an existing token where one fits, and ask " +
-      "the designer before adding a new one.",
+      "the designer before adding a new one. " +
+      "UPDATING SEVERAL VARIABLES? Use figma_batch with one set_variable op each — a whole palette " +
+      "goes in a single call instead of one call per stop, which is far cheaper and faster. " +
+      "COLOR values accept a hex string ('#D2629E', '#RGB' and '#RRGGBBAA' also work) as well as " +
+      "{r,g,b,a} floats; pass the hex straight from the palette rather than converting by hand.",
     {
       collectionId: z.string().optional().describe("ID of an existing variable collection"),
       collectionName: z.string().optional().describe("Name of the collection (used if collectionId not provided)"),
       name: z.string().describe("Variable name"),
       newName: z.string().optional().describe("New variable name if renaming"),
       resolvedType: RESOLVED_TYPE.optional().describe("Variable type (required when creating or setting value)"),
-      value: z.any().optional().describe("Variable value. COLOR: {r,g,b,a} (0-1). FLOAT: number. STRING: string. BOOLEAN: boolean. Optional if only renaming with newName."),
+      value: z.any().optional().describe("Variable value. COLOR: a hex string such as '#D2629E' (preferred — no manual conversion) or {r,g,b,a} 0-1 floats. FLOAT: number. STRING: string. BOOLEAN: boolean. Optional if only renaming with newName."),
       modeId: z.string().optional().describe("Mode ID to set the value for (uses default mode if omitted)"),
       createIfMissing: coerceBoolean.optional().describe("Allow creating the variable or collection when it does not exist. Off by default — confirm with the designer first."),
     },
     async (args) => {
       try {
-        const result = await sendCommandToFigma("set_variable", args);
+        // Same coercion the batch path applies, so a hex value behaves
+        // identically whether this tool is called directly or inside figma_batch.
+        const params =
+          typeof args.value === "string" &&
+          (args.resolvedType === "COLOR" || args.value.trim().startsWith("#"))
+            ? { ...args, value: coerceColor(args.value) }
+            : args;
+
+        const result = await sendCommandToFigma("set_variable", params);
         const typedResult = result as {
           variableId: string;
           variableName?: string;
@@ -120,17 +133,16 @@ export function registerVariableTools(server: McpServer): void {
             content: [
               {
                 type: "text",
-                text: `Renamed variable "${typedResult.oldName}" to "${typedResult.newName}" (ID: ${typedResult.variableId})`,
+                text: `Renamed "${typedResult.oldName}" → "${typedResult.newName}"`,
               },
             ],
           };
         }
+        // Terse on purpose: a palette update runs this dozens of times inside a
+        // batch, and the collection name and node id are the same every time.
         return {
           content: [
-            {
-              type: "text",
-              text: `Set variable "${typedResult.variableName}" in collection "${typedResult.collectionName}" (ID: ${typedResult.variableId})`,
-            },
+            { type: "text", text: `Set ${typedResult.variableName}` },
           ],
         };
       } catch (error) {
