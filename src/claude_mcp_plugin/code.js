@@ -1149,6 +1149,16 @@ figma.ui.onmessage = async (msg) => {
     case "notify":
       figma.notify(msg.message);
       break;
+    case "persist-channel":
+      // The channel is the session's identity. Keeping it in clientStorage is
+      // what lets the plugin be closed and reopened — or Figma restarted —
+      // without stranding an agent that is already joined to that channel.
+      if (typeof msg.channel === "string" && msg.channel) {
+        figma.clientStorage.setAsync("mcp_channel", msg.channel).catch((error) => {
+          console.warn("Could not save channel:", (error && error.message) || String(error));
+        });
+      }
+      break;
     case "resize-ui": {
       // Sent continuously while the user drags the corner handle in ui.html.
       const size = clampUiSize(msg.width, msg.height);
@@ -8756,11 +8766,14 @@ async function setTextContent(params) {
       }
     }
 
+    const savedChannel = await figma.clientStorage.getAsync("mcp_channel");
+
     // Send initial settings to UI
     figma.ui.postMessage({
       type: "init-settings",
       settings: {
         serverPort: state.serverPort,
+        channel: typeof savedChannel === "string" ? savedChannel : null,
       },
     });
   } catch (error) {

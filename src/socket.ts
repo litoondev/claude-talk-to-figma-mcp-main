@@ -894,6 +894,14 @@ const server = Bun.serve({
     });
   },
   websocket: {
+    // Stated rather than inherited. Bun's defaults (120s idle, automatic pings)
+    // happen to keep a healthy connection open, but a default is not a contract
+    // — it can change under a runtime upgrade, and "why do sessions drop?" is an
+    // expensive question to answer twice. 240s is comfortably longer than the
+    // 15s client heartbeat, so a client that is talking is never reaped, while a
+    // client that has genuinely gone away is still collected.
+    idleTimeout: 240,
+    sendPings: true,
     open: handleConnection,
     message(ws: ServerWebSocket<any>, message: string | Buffer) {
       try {
@@ -902,6 +910,24 @@ const server = Bun.serve({
 
         logger.debug(`Received message from client ${clientId}:`, typeof message === 'string' ? message : '<binary>');
         const data = JSON.parse(message as string);
+
+        // ─── Heartbeat ─────────────────────────────────────────────────
+        // Answered before anything else and without requiring channel
+        // membership, so a client can prove the connection is alive while it is
+        // still joining — or after a drop it has not noticed yet. Browser
+        // WebSockets cannot send protocol-level pings, so the Figma plugin
+        // needs this application-level one to tell a live socket from a
+        // half-open one.
+        if (data.type === "heartbeat") {
+          try {
+            ws.send(JSON.stringify({ type: "heartbeat_ack", ts: data.ts }));
+            stats.messagesSent++;
+          } catch (error) {
+            logger.error(`Failed to answer heartbeat for client ${clientId}:`, error);
+            stats.errors++;
+          }
+          return;
+        }
 
         // ─── Join ──────────────────────────────────────────────────────
         if (data.type === "join") {
@@ -932,7 +958,10 @@ const server = Bun.serve({
               channels.forEach((clients) => clients.delete(oldWs));
               cleanupClient(oldWs, oldChannels);
               try { oldWs.close(1000, "Replaced by reconnecting session"); } catch {}
-              stats.activeConnections--;
+              // No stats.activeConnections-- here: close() fires the `close`
+              // handler, which already decrements. Doing it in both places drove
+              // the gauge negative over a few reconnects and made the /status
+              // endpoint useless for diagnosing exactly this class of problem.
             }
             sessionToClient.set(sessionId, ws);
             ws.data.sessionId = sessionId;

@@ -159,3 +159,46 @@ Read at the start of every change. Sweep at QA.
   **QA test:** `tests/integration/remote-styles-tool.test.ts` asserts the
   verdict for a truncated scan and for a scan with unreadable subtrees, not the
   presence of a status line.
+
+## L11 — Transport recovery mistaken for session recovery
+
+- **Looked like:** users reported constant "automatic disconnections". Both ends
+  showed Connected, and the MCP log showed a clean reconnect after every drop —
+  yet every command afterwards failed with "Must join a channel before sending
+  commands". The reconnect logic was working exactly as written, which is why
+  reading it never revealed the bug.
+- **Root cause:** the socket and the session were treated as the same object.
+  `ws.on('open')` cleared `currentChannel` and nothing rejoined, so the client
+  recovered its *transport* and silently abandoned its *session*. The plugin had
+  the same confusion twice over: `onclose` had no reconnect path at all, and
+  `connect()` minted a fresh random channel on every call, so a manual reconnect
+  moved the plugin to a channel the agent could not reach.
+- **Guard:** the channel a session belongs to is now stored separately from the
+  channel the live socket is joined to (`desiredChannel` vs `currentChannel` in
+  `utils/websocket.ts`; `state.channel` persisted through `clientStorage` in the
+  plugin). Reconnect restores membership from it; only an explicit disconnect
+  clears it.
+- **QA test:** drive a real drop — not a mocked one — and assert that a *command
+  succeeds afterwards* with nobody rejoining by hand. Asserting "the socket
+  reconnected" is what made this class invisible for so long, because that part
+  was never broken. `tests/unit/session-recovery.test.ts` drops the connection
+  through the relay's own dedup path and then sends a command.
+
+## L12 — A liveness check that becomes the outage
+
+- **Looked like:** caught at QA, before shipping. The new plugin heartbeat closes
+  a socket that has been silent past a timeout, so the reconnect path can run.
+  Against a relay that predates the `heartbeat` message, nothing ever answers —
+  so the watchdog would have closed a perfectly healthy connection every 45
+  seconds and produced precisely the symptom it was added to cure, on exactly
+  the mixed-version setups least able to diagnose it.
+- **Root cause:** the check assumed both ends had been upgraded together. Silence
+  was read as "the peer is dead" when it also means "the peer does not speak
+  this yet".
+- **Guard:** the watchdog is armed only after the relay has answered at least one
+  heartbeat (`state.heartbeatAckSeen`), re-proved per connection. An old relay
+  degrades to no liveness detection, which is the previous behaviour, rather
+  than to a reconnect loop, which is worse than either.
+- **QA test:** every new cross-process check gets a test where the *other side
+  does not implement it*, asserting the check stays passive. Verifying only the
+  upgraded pairing tests the happy path of a compatibility feature.

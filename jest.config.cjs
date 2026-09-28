@@ -12,6 +12,8 @@ module.exports = {
     // drive a real Bun.serve instance.
     '/tests/unit/socket-queue.test.ts',
     '/tests/unit/socket-webflow-routing.test.ts',
+    // Spawns the real relay and drives the real client across a restart.
+    '/tests/unit/session-recovery.test.ts',
     // Loads the extension's plain-JS command table with a fake `webflow` global.
     '/tests/unit/webflow-extension.test.ts'
   ],

@@ -1463,7 +1463,39 @@
           serverPort: 3055,
           pendingRequests: new Map(),
           channel: null,
+          // Set only when the user clicks Disconnect. Every other close is
+          // treated as a fault to recover from, so the difference between "the
+          // relay went away" and "the user is done" has to be recorded here —
+          // onclose cannot tell them apart on its own.
+          userDisconnected: false,
+          heartbeatAckSeen: false,
+          reconnectAttempts: 0,
+          reconnectTimer: null,
+          heartbeatTimer: null,
+          lastInboundAt: 0,
         };
+
+        // Reconnect/heartbeat tuning. The heartbeat exists because a browser
+        // WebSocket gives no way to observe protocol-level pings: after a
+        // laptop sleeps or the network changes, `readyState` can sit at OPEN on
+        // a socket that is already dead, and nothing reveals it until a command
+        // silently never arrives.
+        this.RECONNECT_BASE_MS = 1000;
+        this.RECONNECT_MAX_MS = 30000;
+        this.HEARTBEAT_INTERVAL_MS = 15000;
+        this.HEARTBEAT_TIMEOUT_MS = 45000;
+
+        // `figma.on("run")` posts auto-connect the moment the plugin starts,
+        // while the stored channel arrives from clientStorage one async hop
+        // later. Connecting first would mint a new channel and immediately
+        // strand any agent joined to the stored one, so connect() waits on this
+        // gate. The timeout keeps a missing init-settings from wedging the
+        // panel: a fresh channel is a worse outcome than a slow one, but never
+        // connecting at all is worse than both.
+        this.settingsReady = new Promise((resolve) => {
+          this._resolveSettingsReady = resolve;
+          setTimeout(resolve, 2000);
+        });
 
         // Initialize operations menu
         this.operationsMenu = new OperationsMenu();
@@ -1671,22 +1703,51 @@
       /**
        * Connect to WebSocket server
        */
-      async connect(port = 3055) {
+      async connect(port = null) {
         try {
           if (this.state.connected && this.state.socket) {
             this.updateStatus(true, "Already connected to server");
             return;
           }
 
+          // Wait for the stored channel and port before opening a socket; see
+          // settingsReady for why connecting first loses the session.
+          await this.settingsReady;
+          if (port === null) port = this.state.serverPort || 3055;
+
+          // Fold any pending retry into this attempt. The attempt counter is
+          // deliberately left alone: a successful open resets it, and if this
+          // attempt also fails the backoff should keep growing rather than
+          // restart at one second.
+          if (this.state.reconnectTimer) {
+            clearTimeout(this.state.reconnectTimer);
+            this.state.reconnectTimer = null;
+          }
+
           this.updateStatus(false, "Connecting...");
 
+          this.state.userDisconnected = false;
           this.state.serverPort = port;
           this.state.socket = new WebSocket(`ws://localhost:${port}`);
 
           this.state.socket.onopen = () => {
-            const channelName = this.generateChannelName();
+            // Reuse the channel this session already has. Minting a fresh
+            // random name on every connect is what made a reconnect useless:
+            // the agent stayed joined to the old channel, the plugin landed in
+            // a new one, and the two could no longer reach each other even
+            // though both showed "Connected". A channel is the session's
+            // identity, so it is generated once and kept.
+            const channelName = this.state.channel || this.generateChannelName();
             console.log("Joining channel:", channelName);
             this.state.channel = channelName;
+            this.persistChannel(channelName);
+
+            this.state.reconnectAttempts = 0;
+            this.state.lastInboundAt = Date.now();
+            // Re-proved per connection: a reconnect may land on a different
+            // relay than the one that answered last time.
+            this.state.heartbeatAckSeen = false;
+            this.startHeartbeat();
 
             this.state.socket.send(
               JSON.stringify({
@@ -1699,6 +1760,17 @@
           this.state.socket.onmessage = (event) => {
             try {
               const data = JSON.parse(event.data);
+
+              // Any inbound frame proves the socket is alive, so the heartbeat
+              // watchdog is fed here rather than only on heartbeat_ack — a busy
+              // session should never be torn down for lack of a reply it was
+              // too busy to need.
+              this.state.lastInboundAt = Date.now();
+              if (data.type === "heartbeat_ack") {
+                this.state.heartbeatAckSeen = true;
+                return;
+              }
+
               console.log("Received message:", data);
 
               if (data.type === "system") {
@@ -1723,7 +1795,10 @@
               } else if (data.type === "error") {
                 console.error("Error:", data.message);
                 this.updateStatus(false, `Error: ${data.message}`);
-                this.state.socket.close();
+                // Deliberately not closing the socket. A relay-level error is a
+                // rejected message, not a dead transport, and now that a close
+                // triggers a reconnect, closing here would spin: reconnect →
+                // same error → close → reconnect.
               }
 
               this.handleSocketMessage(data);
@@ -1735,14 +1810,22 @@
           this.state.socket.onclose = () => {
             this.state.connected = false;
             this.state.socket = null;
-            this.updateStatus(false, "Disconnected — start the socket server, then reconnect.");
+            this.stopHeartbeat();
+
+            if (this.state.userDisconnected) {
+              this.updateStatus(false, "Disconnected.");
+              return;
+            }
+            this.scheduleReconnect();
           };
 
           this.state.socket.onerror = (error) => {
             console.error("WebSocket error:", error);
+            // Do not null the socket here. An error is always followed by a
+            // close event, and clearing the reference first meant onclose ran
+            // against a socket the handler no longer owned — so recovery has a
+            // single owner: onclose.
             this.state.connected = false;
-            this.state.socket = null;
-            this.updateStatus(false, "Connection error");
           };
         } catch (error) {
           console.error("Connection error:", error);
@@ -1757,12 +1840,116 @@
        * Disconnect from WebSocket server
        */
       disconnect() {
+        // Mark intent first: onclose reads this to decide whether the close is
+        // something to recover from or something the user asked for.
+        this.state.userDisconnected = true;
+        this.cancelReconnect();
+        this.stopHeartbeat();
+
         if (this.state.socket) {
           this.updateStatus(false, "Disconnecting...");
           this.state.socket.close();
           this.state.socket = null;
           this.state.connected = false;
+        } else {
+          this.updateStatus(false, "Disconnected.");
         }
+      }
+
+      /**
+       * Reconnect after an unintended close, backing off exponentially with
+       * jitter up to RECONNECT_MAX_MS. The attempt counter resets on a
+       * successful open, so a one-off blip recovers in about a second while a
+       * relay that is genuinely down is not polled in a tight loop.
+       */
+      scheduleReconnect() {
+        if (this.state.userDisconnected) return;
+        if (this.state.reconnectTimer) return;
+
+        const attempt = this.state.reconnectAttempts;
+        const exponential = Math.min(
+          this.RECONNECT_MAX_MS,
+          this.RECONNECT_BASE_MS * Math.pow(2, attempt)
+        );
+        const delay = Math.round(exponential * (0.5 + Math.random() * 0.5));
+        this.state.reconnectAttempts = attempt + 1;
+
+        const seconds = Math.max(1, Math.round(delay / 1000));
+        this.updateStatus(
+          false,
+          `Connection lost — reconnecting in ${seconds}s (attempt ${this.state.reconnectAttempts}).`
+        );
+
+        this.state.reconnectTimer = setTimeout(() => {
+          this.state.reconnectTimer = null;
+          if (this.state.userDisconnected) return;
+          this.connect(this.state.serverPort);
+        }, delay);
+      }
+
+      cancelReconnect() {
+        if (this.state.reconnectTimer) {
+          clearTimeout(this.state.reconnectTimer);
+          this.state.reconnectTimer = null;
+        }
+        this.state.reconnectAttempts = 0;
+      }
+
+      /**
+       * Application-level liveness.
+       *
+       * A browser WebSocket exposes no ping/pong API, so a socket whose peer
+       * has vanished without a FIN — laptop sleep, VPN flap, a dropped Wi-Fi
+       * link — stays readyState OPEN indefinitely and every command sent into
+       * it is silently lost. Sending a heartbeat the relay answers turns that
+       * invisible state into a close, which the reconnect path already handles.
+       */
+      startHeartbeat() {
+        this.stopHeartbeat();
+        this.state.heartbeatTimer = setInterval(() => {
+          const socket = this.state.socket;
+          if (!socket || socket.readyState !== WebSocket.OPEN) return;
+
+          // Only police silence once the relay has proved it answers
+          // heartbeats. An older relay ignores the frame entirely, and
+          // enforcing the timeout against one would close a perfectly healthy
+          // socket every HEARTBEAT_TIMEOUT_MS — turning a liveness check into
+          // the very disconnect loop it exists to prevent. Without an ack the
+          // session simply goes back to having no liveness detection.
+          if (
+            this.state.heartbeatAckSeen &&
+            Date.now() - this.state.lastInboundAt > this.HEARTBEAT_TIMEOUT_MS
+          ) {
+            console.warn("No response from relay — closing the socket to force a reconnect.");
+            try { socket.close(); } catch (e) { /* already gone */ }
+            return;
+          }
+
+          try {
+            socket.send(JSON.stringify({ type: "heartbeat", ts: Date.now() }));
+          } catch (e) {
+            // The close handler owns recovery; nothing useful to do here.
+          }
+        }, this.HEARTBEAT_INTERVAL_MS);
+      }
+
+      stopHeartbeat() {
+        if (this.state.heartbeatTimer) {
+          clearInterval(this.state.heartbeatTimer);
+          this.state.heartbeatTimer = null;
+        }
+      }
+
+      /**
+       * Keep the channel across plugin restarts, not just across reconnects.
+       * Closing and reopening the plugin window used to mint a new channel and
+       * strand whatever agent was already joined to the old one.
+       */
+      persistChannel(channelName) {
+        parent.postMessage(
+          { pluginMessage: { type: "persist-channel", channel: channelName } },
+          "*"
+        );
       }
 
       /**
@@ -1811,6 +1998,17 @@
         console.log("Received message from plugin:", message);
 
         switch (message.type) {
+          case "init-settings": {
+            const settings = message.settings || {};
+            if (settings.serverPort) this.state.serverPort = settings.serverPort;
+            // Only adopt the stored channel if this session has not already
+            // established one — a live channel always wins over a stored one.
+            if (settings.channel && !this.state.channel) {
+              this.state.channel = settings.channel;
+            }
+            if (this._resolveSettingsReady) this._resolveSettingsReady();
+            break;
+          }
           case "connection-status":
             this.updateStatus(message.connected, message.message);
             break;
