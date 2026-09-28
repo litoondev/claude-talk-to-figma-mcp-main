@@ -44,7 +44,9 @@
     "test:coverage": "jest --coverage",
     "test:integration": "node scripts/test-integration.js",
     "build:skills": "node scripts/build-skills.js",
-    "build:prompts": "node scripts/build-operation-prompts.js"
+    "build:prompts": "node scripts/build-operation-prompts.js",
+    "dev:push": "node scripts/dev-push.js",
+    "dev:push:fast": "node scripts/dev-push.js --no-build"
   },
   "devDependencies": {
     "@anthropic-ai/dxt": "^0.2.0",
