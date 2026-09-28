@@ -44,6 +44,25 @@ function prompt(title, goal, body) {
 
 const OPERATION_PROMPTS = [
   {
+    id: "figma_to_code",
+    category: "Development",
+    title: "Figma to Code",
+    description: "Turn the selected design into production-ready responsive code",
+    triggers: ["figma to code", "design to code", "generate code", "build this design"],
+    icon: "</>",
+    prompt: prompt(
+      "Figma to Code",
+      "turn the selected Figma design into a running, production-ready, responsive project",
+      [
+        "Load figma_skill \"Code_Generate_v1\" and follow its gated workflow. It is the source of truth for extraction, design-contract.json, implementation, QA and delivery.",
+        "Treat the selection as scope. Scan the platform, present Round 1, then wait for my stack, backend, scope and output choices before generating files. Never choose a framework silently.",
+        "Use read-only Figma tools. Preserve exact copy, hierarchy, variants, bindings, interactions and assets; record unresolved values instead of guessing or using placeholders.",
+        "After each required gate, build tokens, reusable components, sections and routes. Export real assets and keep generated elements traceable to Figma nodes.",
+        "Run every build, responsive, accessibility, asset, visual and structure check required by the skill. Fix failures and mark checks that cannot run UNVERIFIED. Deliver run instructions, counts, decisions, QA results and open issues.",
+      ].join("\n")
+    ),
+  },
+  {
     id: "convert_to_grid",
     category: "Layout",
     title: "Convert to Grid",
@@ -234,6 +253,31 @@ const OPERATION_PROMPTS = [
         "Adding Auto Layout: get_local_components first - if a component already matches the pattern, instance it instead of building a frame; otherwise add Auto Layout to the frame and bind gap and padding with find_variable.",
         "Keep fixed: icons, avatars, small controls, deliberate image crops, brand assets, components with an intentional spec. Unsure whether a height is deliberate? Ask.",
         "Heights shift as parents start hugging: walk up the tree and confirm nothing is clipped, overlapping or collapsed to zero. Never re-fix a height or shrink text to solve overflow. Finish with validate_responsive.",
+      ].join("\n")
+    ),
+  },
+  {
+    id: "scroll_smoother_motion",
+    category: "Animation",
+    title: "ScrollSmoother Motion",
+    description: "Prototype smooth scroll, parallax, pinning, and jump-to-section motion",
+    triggers: [
+      "scroll animation",
+      "smooth scroll",
+      "parallax",
+      "pin on scroll",
+      "scroll smoother",
+      "jump to section",
+    ],
+    icon: "🎬",
+    prompt: prompt(
+      "ScrollSmoother Motion",
+      "apply a Figma-native prototype approximation of the GSAP ScrollSmoother reference to the selected design",
+      [
+        "Reference: https://codepen.io/GreenSock/pen/KKXZOyZ - smooth vertical scroll, decorative layers at different speeds, a temporarily pinned focal layer, and a control that scrolls to it.",
+        "Inspect with get_nodes_info and get_reactions. Map the viewport, scroll content, decorative parallax layers, focal layer and jump control; if a role is unclear, show the mapping and wait.",
+        "Figma cannot reproduce GSAP's continuous scrub, speed clamping or timed pinning exactly. Keep the source untouched; build the closest native demo from clones with clone_node. Use vertical scrolling, staged states with SMART_ANIMATE for the pinned beat, and set_reactions with SCROLL_TO for the jump control. Preserve existing reactions; report conflicts.",
+        "Keep text, navigation, controls and essential content at normal speed. Use smooth easing without bounce; add no copy, colours, imagery, scale or opacity effects. Re-read changed frames and reactions. Leave unsupported behavior unchanged and provide its GSAP handoff note instead of claiming exact parity.",
       ].join("\n")
     ),
   },
