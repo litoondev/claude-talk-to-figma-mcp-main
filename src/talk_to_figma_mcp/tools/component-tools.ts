@@ -164,7 +164,9 @@ export function registerComponentTools(server: McpServer): void {
   // Set Reactions Tool (Prototype Interactions)
   server.tool(
     "set_reactions",
-    "Set prototype interactions (reactions) on a node in Figma. Use this to add hover effects, click interactions, etc. For component variants, set on the default variant to add 'While hovering -> Change to hover variant' interactions.",
+    "Set prototype interactions (reactions) on a node in Figma: navigation, overlays, hover/press states, key and timeout triggers, links, and variable actions. " +
+      "For component variants, set on the default variant to add 'While hovering -> Change to hover variant'. " +
+      "Every field declared here reaches Figma; a field this schema does not declare is dropped, so check the read-back in the result rather than assuming.",
     {
       nodeId: z.string().describe("The ID of the node to set reactions on"),
       reactions: coerceJson(
@@ -175,12 +177,32 @@ export function registerComponentTools(server: McpServer): void {
                 type: z
                   .string()
                   .describe(
-                    "Trigger type: ON_CLICK, ON_HOVER, ON_PRESS, ON_DRAG, AFTER_TIMEOUT, MOUSE_ENTER, MOUSE_LEAVE, MOUSE_UP, MOUSE_DOWN"
+                    "ON_CLICK, ON_HOVER, ON_PRESS, ON_DRAG, MOUSE_ENTER, MOUSE_LEAVE, MOUSE_UP, MOUSE_DOWN, AFTER_TIMEOUT, ON_KEY_DOWN, ON_MEDIA_HIT, ON_MEDIA_END"
                   ),
                 delay: z
                   .number()
                   .optional()
-                  .describe("Delay in seconds (for AFTER_TIMEOUT)"),
+                  .describe("Delay before a MOUSE_* trigger fires"),
+                timeout: z
+                  .number()
+                  .optional()
+                  .describe("How long AFTER_TIMEOUT waits once the frame is shown"),
+                deprecatedVersion: z
+                  .boolean()
+                  .optional()
+                  .describe("Set false on MOUSE_ENTER/MOUSE_LEAVE for the current behaviour"),
+                device: z
+                  .string()
+                  .optional()
+                  .describe("KEYBOARD, for ON_KEY_DOWN"),
+                keyCodes: z
+                  .array(z.number())
+                  .optional()
+                  .describe("Key codes for ON_KEY_DOWN, e.g. [27] for Escape"),
+                mediaHitTime: z
+                  .number()
+                  .optional()
+                  .describe("Playback position in seconds, for ON_MEDIA_HIT"),
               })
               .describe("The trigger for this reaction"),
             actions: z
@@ -188,7 +210,9 @@ export function registerComponentTools(server: McpServer): void {
                 z.object({
                   type: z
                     .string()
-                    .describe("Action type: NODE, BACK, CLOSE, URL"),
+                    .describe(
+                      "NODE, BACK, CLOSE, URL, SET_VARIABLE, SET_VARIABLE_MODE, CONDITIONAL"
+                    ),
                   destinationId: z
                     .string()
                     .optional()
@@ -197,7 +221,7 @@ export function registerComponentTools(server: McpServer): void {
                     .string()
                     .optional()
                     .describe(
-                      "Navigation type: NAVIGATE, SWAP, OVERLAY, SCROLL_TO, CHANGE_TO"
+                      "NAVIGATE, SWAP or OVERLAY (top-level frame), SCROLL_TO (layer in the same frame), CHANGE_TO (variant of the same component set)"
                     ),
                   transition: z
                     .object({
@@ -205,14 +229,38 @@ export function registerComponentTools(server: McpServer): void {
                         .string()
                         .optional()
                         .describe(
-                          "Transition type: DISSOLVE, SMART_ANIMATE, MOVE_IN, MOVE_OUT, PUSH, SLIDE_IN, SLIDE_OUT"
+                          "DISSOLVE, SMART_ANIMATE, SCROLL_ANIMATE, MOVE_IN, MOVE_OUT, PUSH, SLIDE_IN, SLIDE_OUT"
                         ),
-                      easing: z
-                        .object({ type: z.string() })
+                      direction: z
+                        .string()
                         .optional()
-                        .describe(
-                          "Easing: EASE_IN, EASE_OUT, EASE_IN_AND_OUT, LINEAR"
-                        ),
+                        .describe("LEFT, RIGHT, TOP or BOTTOM — required by the directional types"),
+                      matchLayers: z
+                        .boolean()
+                        .optional()
+                        .describe("Smart-animate matching layers during a directional transition"),
+                      easing: z
+                        .object({
+                          type: z
+                            .string()
+                            .describe(
+                              "EASE_IN, EASE_OUT, EASE_IN_AND_OUT, LINEAR, EASE_IN_BACK, EASE_OUT_BACK, EASE_IN_AND_OUT_BACK, GENTLE, QUICK, BOUNCY, SLOW, CUSTOM_CUBIC_BEZIER, CUSTOM_SPRING"
+                            ),
+                          easingFunctionCubicBezier: z
+                            .object({ x1: z.number(), y1: z.number(), x2: z.number(), y2: z.number() })
+                            .optional()
+                            .describe("Control points, for CUSTOM_CUBIC_BEZIER"),
+                          easingFunctionSpring: z
+                            .object({
+                              mass: z.number(),
+                              stiffness: z.number(),
+                              damping: z.number(),
+                            })
+                            .optional()
+                            .describe("Physical spring, for CUSTOM_SPRING (prototype springs, not Motion's {bounce})"),
+                        })
+                        .optional()
+                        .describe("Easing"),
                       duration: z.number().optional().describe("Duration in seconds"),
                     })
                     .optional()
@@ -226,10 +274,33 @@ export function registerComponentTools(server: McpServer): void {
                     .describe(
                       "Position of the overlay relative to the viewport top-left (for OVERLAY navigation)"
                     ),
+                  overlayPositionType: z
+                    .string()
+                    .optional()
+                    .describe(
+                      "Written to the destination frame: CENTER, TOP_LEFT, TOP_CENTER, TOP_RIGHT, BOTTOM_LEFT, BOTTOM_CENTER, BOTTOM_RIGHT or MANUAL. Omit to leave the frame's own setting alone"
+                    ),
+                  overlayBackgroundInteraction: z
+                    .string()
+                    .optional()
+                    .describe(
+                      "Written to the destination frame: NONE or CLOSE_ON_CLICK_OUTSIDE. Omit to leave the frame's own setting alone"
+                    ),
+                  url: z.string().optional().describe("Destination (for URL type)"),
+                  openInNewTab: z.boolean().optional().describe("Open the URL in a new tab"),
+                  variableId: z.string().optional().describe("For SET_VARIABLE"),
+                  variableValue: z.any().optional().describe("For SET_VARIABLE — the typed value object"),
+                  variableCollectionId: z.string().optional().describe("For SET_VARIABLE_MODE"),
+                  variableModeId: z.string().optional().describe("For SET_VARIABLE_MODE"),
+                  conditionalBlocks: z
+                    .any()
+                    .optional()
+                    .describe("For CONDITIONAL — blocks of {condition, actions}; read one built in the UI first to copy its exact shape"),
                   // New fields from PR #82
                   resetVideoPosition: z.boolean().optional(),
                   resetScrollPosition: z.boolean().optional(),
                   resetInteractiveComponents: z.boolean().optional(),
+                  preserveScrollPosition: z.boolean().optional(),
                 })
               )
               .describe("Actions to perform when triggered"),

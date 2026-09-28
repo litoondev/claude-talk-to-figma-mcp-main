@@ -257,6 +257,25 @@ const OPERATION_PROMPTS = [
     ),
   },
   {
+    id: "prototype_motion",
+    category: "Animation",
+    title: "Prototype & Motion",
+    description: "Wire up flows, interactions and timeline motion in the selected design",
+    triggers: ["prototype this", "add interactions", "hover state", "smart animate", "add motion", "animate the hero"],
+    icon: "🎛️",
+    prompt: prompt(
+      "Prototype & Motion",
+      "plan and build the prototype interactions and timeline motion for the selection",
+      [
+        "Load figma_skill \"Prototype_Motion_v1\" and follow it; this prompt only sets scope and limits.",
+        "Read with get_nodes_info and get_reactions, run the inventory script, and probe Figma Motion once before planning motion. Not enabled: say so, offer the prototype equivalent, never fake a timeline.",
+        "Ask scope, device and start frame, and intensity (Subtle, Expressive, Playful) only if unspecified. Show the Interaction Map and Motion Spec, wait for approval, build only approved rows.",
+        "Write with set_reactions - it carries directions, key codes, timeouts, links, variables and overlay placement. Use execute_code only to merge with existing reactions or to write many nodes in one call. Hover and press go on main-component variants, never a sublayer inside an instance.",
+        "Keyframes on descendants of a top-level frame, never the frame itself; extend the timeline to the last keyframe. One motion language file-wide. Audit before reporting: broken destinations, dead ends, Smart Animate mismatches, short timelines. Say what still needs the Figma UI, with exact values.",
+      ].join("\n")
+    ),
+  },
+  {
     id: "scroll_smoother_motion",
     category: "Animation",
     title: "ScrollSmoother Motion",

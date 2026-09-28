@@ -126,6 +126,15 @@ export function makeNode(spec: any = {}): any {
     boundVariables: spec.boundVariables ?? {},
     explicitVariableModes: { ...(spec.explicitVariableModes ?? {}) },
     resolvedVariableModes: { ...(spec.resolvedVariableModes ?? spec.explicitVariableModes ?? {}) },
+    // Prototype interactions. Stored as written, so a test can assert on the
+    // exact object that reached Figma — which is the only way to catch a field
+    // being dropped on the way in, since dropping one raises no error.
+    reactions: spec.reactions ?? [],
+    overlayPositionType: spec.overlayPositionType ?? "CENTER",
+    overlayBackgroundInteraction: spec.overlayBackgroundInteraction ?? "NONE",
+    async setReactionsAsync(next: any[]) {
+      this.reactions = JSON.parse(JSON.stringify(next));
+    },
     getPluginData: () => "",
     resize(w: number, h: number) {
       if (engine.enabled) {

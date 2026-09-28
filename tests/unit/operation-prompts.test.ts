@@ -97,7 +97,7 @@ const operations = injectedOperations("ui.html");
 const VERBATIM_PROMPTS = new Set(["local_mode_only"]);
 
 describe("operation prompts", () => {
-  it("ships the twelve panel operations", () => {
+  it("ships the thirteen panel operations", () => {
     expect(operations.map((op) => op.id)).toEqual([
       "figma_to_code",
       "convert_to_grid",
@@ -110,6 +110,7 @@ describe("operation prompts", () => {
       "fix_typography",
       "audit_spacing",
       "hug_heights",
+      "prototype_motion",
       "scroll_smoother_motion",
     ]);
   });

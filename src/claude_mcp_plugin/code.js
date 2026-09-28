@@ -14910,17 +14910,26 @@ async function setReactions(params) {
               info.hasOverlayPositionType = "overlayPositionType" in targetNode;
               info.beforePositionType = targetNode.overlayPositionType;
               info.beforeBgInteraction = targetNode.overlayBackgroundInteraction;
-              try {
-                targetNode.overlayPositionType = a.overlayPositionType || "CENTER";
-                info.afterPositionType = targetNode.overlayPositionType;
-              } catch (e) {
-                info.positionTypeError = e.message || String(e);
+              // Only write what the caller asked for. These are settings on the
+              // designer's overlay frame, not properties of this reaction, so
+              // defaulting them here silently re-centred every overlay and
+              // turned on click-outside-to-close on frames that had chosen
+              // otherwise — a restyle nobody requested.
+              if (a.overlayPositionType !== undefined) {
+                try {
+                  targetNode.overlayPositionType = a.overlayPositionType;
+                  info.afterPositionType = targetNode.overlayPositionType;
+                } catch (e) {
+                  info.positionTypeError = e.message || String(e);
+                }
               }
-              try {
-                targetNode.overlayBackgroundInteraction = a.overlayBackgroundInteraction || "CLOSE_ON_CLICK_OUTSIDE";
-                info.afterBgInteraction = targetNode.overlayBackgroundInteraction;
-              } catch (e) {
-                info.bgInteractionError = e.message || String(e);
+              if (a.overlayBackgroundInteraction !== undefined) {
+                try {
+                  targetNode.overlayBackgroundInteraction = a.overlayBackgroundInteraction;
+                  info.afterBgInteraction = targetNode.overlayBackgroundInteraction;
+                } catch (e) {
+                  info.bgInteractionError = e.message || String(e);
+                }
               }
             }
             overlayDebug.push(info);
@@ -14936,22 +14945,41 @@ async function setReactions(params) {
   const reactions = params.reactions.map((r) => {
     const reaction = {};
 
-    // Set trigger
+    // Copy a field only when the caller supplied it, so an omitted field keeps
+    // Figma's own default instead of being pinned to ours.
+    const carry = (target, source, fields) => {
+      for (const field of fields) if (source[field] !== undefined) target[field] = source[field];
+      return target;
+    };
+
+    // Set trigger. Each trigger type carries different fields — a dropped
+    // `keyCodes` or `timeout` produces a trigger that simply never fires, with
+    // no error, so every documented field is forwarded.
     if (r.trigger) {
-      reaction.trigger = { type: r.trigger.type };
-      if (r.trigger.delay !== undefined) {
-        reaction.trigger.delay = r.trigger.delay;
-      }
+      reaction.trigger = carry({ type: r.trigger.type }, r.trigger, [
+        "delay",
+        "timeout",
+        "deprecatedVersion",
+        "device",
+        "keyCodes",
+        "mediaHitTime",
+      ]);
     }
 
-    // Build transition object helper
+    // Build transition object helper. `direction` and `matchLayers` belong to
+    // the directional types; without them MOVE_IN/PUSH/SLIDE_IN play in Figma's
+    // default direction rather than the one that was asked for.
     const buildTransition = (t) => {
       if (!t) return null;
-      return {
-        type: t.type || "DISSOLVE",
-        easing: t.easing || { type: "EASE_IN_AND_OUT" },
-        duration: t.duration !== undefined ? t.duration : 0.2,
-      };
+      return carry(
+        {
+          type: t.type || "DISSOLVE",
+          easing: t.easing || { type: "EASE_IN_AND_OUT" },
+          duration: t.duration !== undefined ? t.duration : 0.2,
+        },
+        t,
+        ["direction", "matchLayers"]
+      );
     };
 
     // Set actions - support both "actions" (array, new API) and "action" (single, old API)
@@ -14978,7 +15006,13 @@ async function setReactions(params) {
         } else if (a.type === "CLOSE") {
           return { type: "CLOSE" };
         } else if (a.type === "URL") {
-          return { type: "URL", url: a.url || "" };
+          return carry({ type: "URL", url: a.url || "" }, a, ["openInNewTab"]);
+        } else if (a.type === "SET_VARIABLE") {
+          return carry({ type: "SET_VARIABLE" }, a, ["variableId", "variableValue"]);
+        } else if (a.type === "SET_VARIABLE_MODE") {
+          return carry({ type: "SET_VARIABLE_MODE" }, a, ["variableCollectionId", "variableModeId"]);
+        } else if (a.type === "CONDITIONAL") {
+          return carry({ type: "CONDITIONAL" }, a, ["conditionalBlocks"]);
         }
         return { type: a.type };
       });
