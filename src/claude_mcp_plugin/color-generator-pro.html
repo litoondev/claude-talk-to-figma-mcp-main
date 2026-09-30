@@ -1,0 +1,784 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Color Generator Pro</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --bg-primary: #ffffff;
+            --bg-secondary: #f8f9fa;
+            --bg-tertiary: #f0f2f5;
+            --text-primary: #1a1a1a;
+            --text-secondary: #666666;
+            --border-color: #e0e0e0;
+            --button-primary: #0066ff;
+            --button-hover: #0052cc;
+            --border-radius: 8px;
+            --transition: 150ms cubic-bezier(0.4, 0, 0.2, 1);
+            --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+            --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.07);
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 24px;
+            max-width: 1400px;
+            width: 100%;
+        }
+
+        /* ────────────────────────────────────────────────────────────────── */
+        /* Left Panel - Generator */
+        /* ────────────────────────────────────────────────────────────────── */
+
+        .generator-panel {
+            background: var(--bg-primary);
+            border-radius: var(--border-radius);
+            padding: 32px;
+            box-shadow: var(--shadow-md);
+        }
+
+        .panel-title {
+            font-size: 24px;
+            font-weight: 700;
+            color: var(--text-primary);
+            margin-bottom: 8px;
+        }
+
+        .panel-subtitle {
+            font-size: 14px;
+            color: var(--text-secondary);
+            margin-bottom: 24px;
+        }
+
+        /* Generator Settings Section */
+        .settings-section {
+            margin-bottom: 28px;
+        }
+
+        .section-title {
+            font-size: 12px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-secondary);
+            margin-bottom: 12px;
+        }
+
+        .form-group {
+            margin-bottom: 16px;
+        }
+
+        .form-label {
+            display: block;
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--text-primary);
+            margin-bottom: 6px;
+        }
+
+        .hex-input-wrapper {
+            display: flex;
+            gap: 12px;
+            align-items: flex-start;
+        }
+
+        .color-preview-box {
+            width: 56px;
+            height: 56px;
+            border-radius: 6px;
+            border: 2px solid var(--border-color);
+            flex-shrink: 0;
+            cursor: pointer;
+            transition: all var(--transition);
+            box-shadow: var(--shadow-sm);
+        }
+
+        .color-preview-box:hover {
+            border-color: var(--button-primary);
+            transform: scale(1.05);
+        }
+
+        .hex-input {
+            flex: 1;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            padding: 8px 12px;
+            font-size: 13px;
+            font-family: 'Monaco', 'Menlo', monospace;
+            color: var(--text-primary);
+            transition: all var(--transition);
+        }
+
+        .hex-input:focus {
+            outline: none;
+            border-color: var(--button-primary);
+            box-shadow: 0 0 0 3px rgba(0, 102, 255, 0.1);
+        }
+
+        /* HSL Sliders */
+        .hsl-controls {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .slider-control {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .slider-label {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 12px;
+        }
+
+        .slider-label-text {
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .slider-value {
+            font-family: 'Monaco', 'Menlo', monospace;
+            color: var(--button-primary);
+            font-weight: 600;
+            font-size: 13px;
+        }
+
+        input[type="range"] {
+            width: 100%;
+            height: 6px;
+            border-radius: 3px;
+            background: linear-gradient(to right, #ddd, #999);
+            outline: none;
+            -webkit-appearance: none;
+            appearance: none;
+        }
+
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: white;
+            cursor: pointer;
+            box-shadow: var(--shadow-md);
+            border: 2px solid var(--button-primary);
+            transition: all var(--transition);
+        }
+
+        input[type="range"]::-webkit-slider-thumb:hover {
+            transform: scale(1.2);
+            box-shadow: 0 0 0 4px rgba(0, 102, 255, 0.2);
+        }
+
+        input[type="range"]::-moz-range-thumb {
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: white;
+            cursor: pointer;
+            box-shadow: var(--shadow-md);
+            border: 2px solid var(--button-primary);
+            transition: all var(--transition);
+        }
+
+        /* Hue slider gradient */
+        #hueSlider {
+            background: linear-gradient(to right,
+                red, yellow, lime, cyan, blue, magenta, red);
+        }
+
+        /* Text Inputs for HSL */
+        .hsl-inputs {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+        }
+
+        .hsl-input {
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            padding: 6px 8px;
+            font-size: 12px;
+            text-align: center;
+            font-family: 'Monaco', 'Menlo', monospace;
+            color: var(--text-primary);
+        }
+
+        .hsl-input:focus {
+            outline: none;
+            border-color: var(--button-primary);
+        }
+
+        /* Export Section */
+        .export-section {
+            margin-top: 28px;
+            padding-top: 24px;
+            border-top: 1px solid var(--border-color);
+        }
+
+        .export-name {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+
+        .export-name input {
+            flex: 1;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            padding: 8px 12px;
+            font-size: 13px;
+            color: var(--text-primary);
+        }
+
+        .export-name input:focus {
+            outline: none;
+            border-color: var(--button-primary);
+        }
+
+        .export-copy-btn {
+            background-color: white;
+            border: 1px solid var(--border-color);
+            color: var(--text-secondary);
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all var(--transition);
+            flex-shrink: 0;
+        }
+
+        .export-copy-btn:hover {
+            border-color: var(--button-primary);
+            color: var(--button-primary);
+        }
+
+        /* Action Buttons */
+        .action-buttons {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-top: 20px;
+        }
+
+        .btn {
+            padding: 10px 16px;
+            border-radius: 4px;
+            border: none;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all var(--transition);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+        }
+
+        .btn-primary {
+            background-color: var(--button-primary);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background-color: var(--button-hover);
+            transform: translateY(-1px);
+        }
+
+        .btn-secondary {
+            background-color: var(--bg-secondary);
+            color: var(--text-primary);
+            border: 1px solid var(--border-color);
+        }
+
+        .btn-secondary:hover {
+            background-color: var(--bg-tertiary);
+            border-color: var(--button-primary);
+        }
+
+        /* ────────────────────────────────────────────────────────────────── */
+        /* Right Panel - Preview */
+        /* ────────────────────────────────────────────────────────────────── */
+
+        .preview-panel {
+            background: var(--bg-primary);
+            border-radius: var(--border-radius);
+            padding: 32px;
+            box-shadow: var(--shadow-md);
+            display: flex;
+            flex-direction: column;
+        }
+
+        .preview-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 20px;
+            padding-bottom: 16px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .preview-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .color-count {
+            background-color: var(--bg-secondary);
+            color: var(--text-secondary);
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .color-scale {
+            flex: 1;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .color-stop {
+            display: grid;
+            grid-template-columns: 80px 1fr auto;
+            gap: 12px;
+            align-items: center;
+            padding: 12px;
+            background-color: var(--bg-secondary);
+            border-radius: 6px;
+            transition: all var(--transition);
+        }
+
+        .color-stop:hover {
+            background-color: var(--bg-tertiary);
+        }
+
+        .stop-swatch {
+            width: 80px;
+            height: 60px;
+            border-radius: 4px;
+            border: 1px solid var(--border-color);
+            cursor: pointer;
+            transition: all var(--transition);
+        }
+
+        .stop-swatch:hover {
+            transform: scale(1.05);
+            box-shadow: var(--shadow-md);
+        }
+
+        .stop-info {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .stop-name {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .stop-values {
+            display: flex;
+            gap: 12px;
+            font-size: 11px;
+            color: var(--text-secondary);
+            font-family: 'Monaco', 'Menlo', monospace;
+        }
+
+        .stop-copy {
+            background-color: transparent;
+            border: 1px solid var(--border-color);
+            color: var(--text-secondary);
+            padding: 4px 8px;
+            border-radius: 3px;
+            font-size: 11px;
+            cursor: pointer;
+            transition: all var(--transition);
+            white-space: nowrap;
+        }
+
+        .stop-copy:hover {
+            border-color: var(--button-primary);
+            color: var(--button-primary);
+            background-color: rgba(0, 102, 255, 0.05);
+        }
+
+        /* Empty State */
+        .empty-state {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            flex: 1;
+            color: var(--text-secondary);
+            text-align: center;
+        }
+
+        .empty-icon {
+            font-size: 48px;
+            margin-bottom: 12px;
+            opacity: 0.5;
+        }
+
+        .empty-text {
+            font-size: 13px;
+            line-height: 1.5;
+        }
+
+        /* Scrollbar */
+        .color-scale::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .color-scale::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .color-scale::-webkit-scrollbar-thumb {
+            background-color: var(--border-color);
+            border-radius: 3px;
+        }
+
+        .color-scale::-webkit-scrollbar-thumb:hover {
+            background-color: #bbb;
+        }
+
+        /* Responsive */
+        @media (max-width: 1200px) {
+            .container {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-width: 600px) {
+            .generator-panel,
+            .preview-panel {
+                padding: 20px;
+            }
+
+            .action-buttons {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .message {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background-color: #10a981;
+            color: white;
+            padding: 12px 16px;
+            border-radius: 4px;
+            font-size: 12px;
+            animation: slideInUp 0.3s ease;
+            z-index: 1000;
+        }
+
+        @keyframes slideInUp {
+            from {
+                transform: translateY(20px);
+                opacity: 0;
+            }
+            to {
+                transform: translateY(0);
+                opacity: 1;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Left: Generator -->
+        <div class="generator-panel">
+            <h1 class="panel-title">Colors</h1>
+            <p class="panel-subtitle">Tailwind CSS Color Generator</p>
+
+            <!-- Generator Settings -->
+            <div class="settings-section">
+                <div class="section-title">Generator settings</div>
+
+                <!-- Hex Input -->
+                <div class="form-group">
+                    <label class="form-label">Hex code input</label>
+                    <div class="hex-input-wrapper">
+                        <div class="color-preview-box" id="colorPreview" style="background-color: #8C41F1;"></div>
+                        <input type="color" id="colorPicker" value="#8C41F1" style="display: none;">
+                        <input type="text" id="hexInput" class="hex-input" value="#8C41F1" placeholder="#000000">
+                    </div>
+                </div>
+
+                <!-- HSL Controls -->
+                <div class="form-group">
+                    <label class="form-label">HSL input</label>
+                    <div class="hsl-controls">
+                        <div class="slider-control">
+                            <div class="slider-label">
+                                <span class="slider-label-text">H</span>
+                                <span class="slider-value" id="hueValue">266</span>
+                            </div>
+                            <input type="range" id="hueSlider" min="0" max="360" value="266">
+                        </div>
+
+                        <div class="slider-control">
+                            <div class="slider-label">
+                                <span class="slider-label-text">S</span>
+                                <span class="slider-value" id="satValue">86</span>
+                            </div>
+                            <input type="range" id="satSlider" min="0" max="100" value="86">
+                        </div>
+
+                        <div class="slider-control">
+                            <div class="slider-label">
+                                <span class="slider-label-text">L</span>
+                                <span class="slider-value" id="lightValue">60</span>
+                            </div>
+                            <input type="range" id="lightSlider" min="0" max="100" value="60">
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Export Section -->
+            <div class="export-section">
+                <div class="section-title">Export</div>
+                <div class="export-name">
+                    <input type="text" id="colorName" placeholder="Electric Violet" value="Electric Violet">
+                    <button class="export-copy-btn">📋 Copy</button>
+                </div>
+                <button class="btn btn-primary" id="createVariablesBtn" style="width: 100%;">
+                    📦 Create variables
+                </button>
+
+                <div style="margin-top: 12px; display: flex; gap: 10px;">
+                    <button class="btn btn-secondary" id="insertStyleGuideBtn" style="flex: 1;">
+                        ➕ Insert style guide
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Right: Preview -->
+        <div class="preview-panel">
+            <div class="preview-header">
+                <div class="preview-title">Color scale</div>
+                <div class="color-count">11 colors</div>
+            </div>
+
+            <div id="scalePreview" class="empty-state">
+                <div class="empty-icon">🎨</div>
+                <div class="empty-text">Adjust the settings to preview your color scale</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        class ColorGeneratorPro {
+            constructor() {
+                this.currentScale = null;
+                this.init();
+            }
+
+            init() {
+                this.setupEventListeners();
+                this.generate();
+            }
+
+            setupEventListeners() {
+                const hexInput = document.getElementById('hexInput');
+                const colorPreview = document.getElementById('colorPreview');
+                const hueSlider = document.getElementById('hueSlider');
+                const satSlider = document.getElementById('satSlider');
+                const lightSlider = document.getElementById('lightSlider');
+                const hueValue = document.getElementById('hueValue');
+                const satValue = document.getElementById('satValue');
+                const lightValue = document.getElementById('lightValue');
+                const createBtn = document.getElementById('createVariablesBtn');
+                const copyBtn = document.querySelector('.export-copy-btn');
+
+                // Hex input changes
+                hexInput.addEventListener('change', (e) => {
+                    if (/^#[0-9A-Fa-f]{6}$/.test(e.target.value)) {
+                        this.updateFromHex(e.target.value);
+                    }
+                });
+
+                colorPreview.addEventListener('click', () => {
+                    document.getElementById('colorPicker').click();
+                });
+
+                document.getElementById('colorPicker').addEventListener('change', (e) => {
+                    hexInput.value = e.target.value;
+                    this.updateFromHex(e.target.value);
+                });
+
+                // HSL sliders
+                hueSlider.addEventListener('input', (e) => {
+                    hueValue.textContent = e.target.value;
+                    this.generate();
+                });
+
+                satSlider.addEventListener('input', (e) => {
+                    satValue.textContent = e.target.value;
+                    this.generate();
+                });
+
+                lightSlider.addEventListener('input', (e) => {
+                    lightValue.textContent = e.target.value;
+                    this.generate();
+                });
+
+                // Buttons
+                createBtn.addEventListener('click', () => this.createVariables());
+                copyBtn.addEventListener('click', () => this.copyColorName());
+
+                // Real-time generation
+                document.getElementById('colorName').addEventListener('change', () => this.generate());
+            }
+
+            updateFromHex(hex) {
+                parent.postMessage({
+                    pluginMessage: {
+                        type: 'analyzeColor',
+                        hexColor: hex
+                    }
+                }, '*');
+
+                // Update preview
+                document.getElementById('colorPreview').style.backgroundColor = hex;
+                this.generate();
+            }
+
+            generate() {
+                const baseColor = document.getElementById('hexInput').value;
+                const colorName = document.getElementById('colorName').value || 'Color';
+
+                if (!/^#[0-9A-Fa-f]{6}$/.test(baseColor)) return;
+
+                parent.postMessage({
+                    pluginMessage: {
+                        type: 'generateColorScale',
+                        baseColor,
+                        colorName,
+                        saturationAdjustment: 1.0
+                    }
+                }, '*');
+            }
+
+            createVariables() {
+                const baseColor = document.getElementById('hexInput').value;
+                const colorName = document.getElementById('colorName').value || 'Color';
+
+                parent.postMessage({
+                    pluginMessage: {
+                        type: 'createColorVariables',
+                        baseColor,
+                        colorName,
+                        collectionName: 'Colors'
+                    }
+                }, '*');
+            }
+
+            copyColorName() {
+                const name = document.getElementById('colorName').value;
+                navigator.clipboard.writeText(name).then(() => {
+                    this.showMessage(`✓ Copied "${name}"`);
+                });
+            }
+
+            displayScale(scale) {
+                this.currentScale = scale;
+
+                const preview = document.getElementById('scalePreview');
+                const weights = [50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950];
+
+                preview.innerHTML = weights.map(weight => {
+                    const stop = scale.stops[weight];
+                    return `
+                        <div class="color-stop">
+                            <div class="stop-swatch" style="background-color: ${stop.hex};" title="${stop.hex}"></div>
+                            <div class="stop-info">
+                                <div class="stop-name">${weight}</div>
+                                <div class="stop-values">
+                                    <span>${stop.hex}</span>
+                                    <span>HSL(${stop.hsl.h}°, ${stop.hsl.s}%, ${stop.hsl.l}%)</span>
+                                </div>
+                            </div>
+                            <button class="stop-copy" data-hex="${stop.hex}">Copy</button>
+                        </div>
+                    `;
+                }).join('');
+
+                preview.querySelectorAll('.stop-copy').forEach(btn => {
+                    btn.addEventListener('click', (e) => {
+                        const hex = btn.getAttribute('data-hex');
+                        navigator.clipboard.writeText(hex).then(() => {
+                            this.showMessage(`✓ Copied ${hex}`);
+                        });
+                    });
+                });
+            }
+
+            showMessage(text) {
+                const msg = document.createElement('div');
+                msg.className = 'message';
+                msg.textContent = text;
+                document.body.appendChild(msg);
+                setTimeout(() => msg.remove(), 2500);
+            }
+        }
+
+        let ui;
+        window.addEventListener('DOMContentLoaded', () => {
+            ui = new ColorGeneratorPro();
+            window.__colorGeneratorPro = ui;
+        });
+
+        window.onmessage = (event) => {
+            const message = event.data.pluginMessage;
+            if (!message) return;
+
+            if (message.type === 'colorScaleGenerated' && ui) {
+                ui.displayScale(message.scale);
+            } else if (message.type === 'colorAnalysis' && ui && message.hsl) {
+                document.getElementById('hueSlider').value = message.hsl.h;
+                document.getElementById('satSlider').value = message.hsl.s;
+                document.getElementById('lightSlider').value = message.hsl.l;
+                document.getElementById('hueValue').textContent = message.hsl.h;
+                document.getElementById('satValue').textContent = message.hsl.s;
+                document.getElementById('lightValue').textContent = message.hsl.l;
+                ui.generate();
+            } else if (message.type === 'notify' && ui) {
+                ui.showMessage(message.text);
+            }
+        };
+    </script>
+</body>
+</html>
