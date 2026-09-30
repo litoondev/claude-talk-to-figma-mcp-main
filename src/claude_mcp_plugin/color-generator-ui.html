@@ -1,0 +1,762 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Color Generator</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --bg-primary: #1a1a1a;
+            --bg-secondary: #252525;
+            --bg-tertiary: #303030;
+            --text-primary: #ffffff;
+            --text-secondary: #b0b0b0;
+            --border-color: #3f3f3f;
+            --button-primary: #0066ff;
+            --button-hover: #0052cc;
+            --button-success: #10a981;
+            --border-radius: 6px;
+            --transition: 200ms cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-primary);
+            color: var(--text-primary);
+            padding: 20px;
+            overflow: hidden;
+        }
+
+        .container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            height: 100vh;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding-bottom: 16px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .header-icon {
+            font-size: 28px;
+        }
+
+        .header-title {
+            font-size: 20px;
+            font-weight: 600;
+        }
+
+        .content {
+            display: flex;
+            gap: 20px;
+            flex: 1;
+            overflow: hidden;
+        }
+
+        /* ────────────────────────────────────────────────────────────────── */
+        /* Generator Panel */
+        /* ────────────────────────────────────────────────────────────────── */
+
+        .generator-panel {
+            width: 280px;
+            background-color: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: var(--border-radius);
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            overflow-y: auto;
+            flex-shrink: 0;
+        }
+
+        .generator-panel h2 {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 8px;
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .form-label {
+            font-size: 12px;
+            font-weight: 500;
+            color: var(--text-secondary);
+        }
+
+        .form-input {
+            background-color: var(--bg-tertiary);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            padding: 8px 12px;
+            color: var(--text-primary);
+            font-size: 13px;
+            font-family: 'Monaco', 'Menlo', monospace;
+            transition: all var(--transition);
+        }
+
+        .form-input:hover {
+            border-color: var(--button-primary);
+        }
+
+        .form-input:focus {
+            outline: none;
+            border-color: var(--button-primary);
+            box-shadow: 0 0 0 2px rgba(0, 102, 255, 0.1);
+        }
+
+        .color-input-wrapper {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .color-input-preview {
+            width: 40px;
+            height: 40px;
+            border-radius: 4px;
+            border: 1px solid var(--border-color);
+            cursor: pointer;
+            flex-shrink: 0;
+        }
+
+        .color-input-text {
+            flex: 1;
+        }
+
+        .slider-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .slider-label {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 12px;
+        }
+
+        .slider-value {
+            color: var(--button-primary);
+            font-weight: 600;
+            font-size: 13px;
+        }
+
+        input[type="range"] {
+            width: 100%;
+            height: 4px;
+            border-radius: 2px;
+            background: var(--border-color);
+            outline: none;
+            -webkit-appearance: none;
+            appearance: none;
+        }
+
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: var(--button-primary);
+            cursor: pointer;
+            transition: all var(--transition);
+        }
+
+        input[type="range"]::-webkit-slider-thumb:hover {
+            box-shadow: 0 0 0 4px rgba(0, 102, 255, 0.2);
+        }
+
+        input[type="range"]::-moz-range-thumb {
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: var(--button-primary);
+            cursor: pointer;
+            border: none;
+            transition: all var(--transition);
+        }
+
+        .button-group {
+            display: flex;
+            gap: 8px;
+            flex-direction: column;
+            margin-top: 8px;
+        }
+
+        .btn {
+            background-color: var(--button-primary);
+            color: white;
+            border: none;
+            border-radius: 4px;
+            padding: 10px 16px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all var(--transition);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            white-space: nowrap;
+        }
+
+        .btn:hover {
+            background-color: var(--button-hover);
+            transform: translateY(-1px);
+        }
+
+        .btn:active {
+            transform: translateY(0);
+        }
+
+        .btn-secondary {
+            background-color: var(--bg-tertiary);
+            color: var(--text-primary);
+            border: 1px solid var(--border-color);
+        }
+
+        .btn-secondary:hover {
+            background-color: var(--border-color);
+            border-color: var(--button-primary);
+        }
+
+        .btn-success {
+            background-color: var(--button-success);
+        }
+
+        .btn-success:hover {
+            background-color: #059669;
+        }
+
+        /* ────────────────────────────────────────────────────────────────── */
+        /* Preview Panel */
+        /* ────────────────────────────────────────────────────────────────── */
+
+        .preview-panel {
+            flex: 1;
+            background-color: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: var(--border-radius);
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            overflow: hidden;
+        }
+
+        .preview-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 12px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .preview-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .preview-count {
+            font-size: 12px;
+            color: var(--text-secondary);
+            background-color: var(--bg-tertiary);
+            padding: 4px 8px;
+            border-radius: 3px;
+        }
+
+        .color-scale-container {
+            flex: 1;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .color-stop {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px;
+            background-color: var(--bg-tertiary);
+            border-radius: 4px;
+            transition: all var(--transition);
+        }
+
+        .color-stop:hover {
+            background-color: var(--border-color);
+        }
+
+        .color-swatch {
+            width: 60px;
+            height: 60px;
+            border-radius: 4px;
+            border: 1px solid var(--border-color);
+            flex-shrink: 0;
+            cursor: pointer;
+            transition: all var(--transition);
+        }
+
+        .color-swatch:hover {
+            transform: scale(1.05);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        }
+
+        .color-info {
+            flex: 1;
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .color-weight {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .color-values {
+            display: flex;
+            gap: 12px;
+            font-size: 11px;
+            color: var(--text-secondary);
+            font-family: 'Monaco', 'Menlo', monospace;
+        }
+
+        .color-value-item {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .copy-btn {
+            background-color: transparent;
+            border: 1px solid var(--border-color);
+            color: var(--text-secondary);
+            padding: 4px 8px;
+            border-radius: 3px;
+            font-size: 11px;
+            cursor: pointer;
+            transition: all var(--transition);
+            flex-shrink: 0;
+        }
+
+        .copy-btn:hover {
+            border-color: var(--button-primary);
+            color: var(--button-primary);
+            background-color: rgba(0, 102, 255, 0.05);
+        }
+
+        /* ────────────────────────────────────────────────────────────────── */
+        /* Empty State */
+        /* ────────────────────────────────────────────────────────────────── */
+
+        .empty-state {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            flex: 1;
+            color: var(--text-secondary);
+            text-align: center;
+            gap: 12px;
+        }
+
+        .empty-icon {
+            font-size: 48px;
+            opacity: 0.5;
+        }
+
+        .empty-text {
+            font-size: 13px;
+            line-height: 1.5;
+            max-width: 200px;
+        }
+
+        /* ────────────────────────────────────────────────────────────────── */
+        /* Scrollbar */
+        /* ────────────────────────────────────────────────────────────────── */
+
+        .generator-panel::-webkit-scrollbar,
+        .color-scale-container::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .generator-panel::-webkit-scrollbar-track,
+        .color-scale-container::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .generator-panel::-webkit-scrollbar-thumb,
+        .color-scale-container::-webkit-scrollbar-thumb {
+            background-color: var(--border-color);
+            border-radius: 3px;
+        }
+
+        .generator-panel::-webkit-scrollbar-thumb:hover,
+        .color-scale-container::-webkit-scrollbar-thumb:hover {
+            background-color: #4a4a4a;
+        }
+
+        /* ────────────────────────────────────────────────────────────────── */
+        /* Responsive */
+        /* ────────────────────────────────────────────────────────────────── */
+
+        @media (max-width: 900px) {
+            .content {
+                flex-direction: column;
+            }
+
+            .generator-panel {
+                width: 100%;
+                max-height: 200px;
+            }
+
+            .preview-panel {
+                max-height: calc(100vh - 300px);
+            }
+        }
+
+        .message {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background-color: var(--button-success);
+            color: white;
+            padding: 12px 16px;
+            border-radius: 4px;
+            font-size: 12px;
+            animation: slideInUp 0.3s ease;
+            z-index: 1000;
+        }
+
+        @keyframes slideInUp {
+            from {
+                transform: translateY(20px);
+                opacity: 0;
+            }
+            to {
+                transform: translateY(0);
+                opacity: 1;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <div class="header-icon">🎨</div>
+            <div class="header-title">Color Generator</div>
+        </div>
+
+        <!-- Main Content -->
+        <div class="content">
+            <!-- Generator Panel -->
+            <div class="generator-panel">
+                <h2>Generate Palette</h2>
+
+                <!-- Base Color Input -->
+                <div class="form-group">
+                    <label class="form-label">Base Color</label>
+                    <div class="color-input-wrapper">
+                        <input type="color" id="colorPicker" class="color-input-preview" value="#8C41F1">
+                        <input type="text" id="hexInput" class="form-input color-input-text" value="#8C41F1" placeholder="#8C41F1">
+                    </div>
+                </div>
+
+                <!-- Color Name -->
+                <div class="form-group">
+                    <label class="form-label">Palette Name</label>
+                    <input type="text" id="colorName" class="form-input" value="Violet" placeholder="e.g., Primary, Violet">
+                </div>
+
+                <!-- Saturation Slider -->
+                <div class="slider-group">
+                    <div class="slider-label">
+                        <span class="form-label">Saturation</span>
+                        <span class="slider-value" id="saturationValue">100%</span>
+                    </div>
+                    <input type="range" id="saturationSlider" min="0" max="200" value="100" step="5">
+                </div>
+
+                <!-- Collection Name -->
+                <div class="form-group">
+                    <label class="form-label">Figma Collection</label>
+                    <input type="text" id="collectionName" class="form-input" value="Colors" placeholder="e.g., Colors, Design Tokens">
+                </div>
+
+                <!-- Action Buttons -->
+                <div class="button-group" style="margin-top: 16px;">
+                    <button class="btn" id="generateBtn">
+                        ✨ Generate Scale
+                    </button>
+                    <button class="btn btn-success" id="createVariablesBtn" style="display: none;">
+                        📦 Create in Figma
+                    </button>
+                    <button class="btn btn-secondary" id="exportBtn" style="display: none;">
+                        💾 Export JSON
+                    </button>
+                </div>
+            </div>
+
+            <!-- Preview Panel -->
+            <div class="preview-panel">
+                <div class="preview-header">
+                    <div class="preview-title">Color Scale</div>
+                    <div class="preview-count" id="colorCount">0 colors</div>
+                </div>
+
+                <div id="scalePreview" class="empty-state">
+                    <div class="empty-icon">🎨</div>
+                    <div class="empty-text">Generate a color scale to see the preview</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        /**
+         * Color Generator UI Manager
+         * Handles color generation and Figma variable creation
+         */
+        class ColorGeneratorUI {
+            constructor() {
+                this.currentScale = null;
+                this.init();
+            }
+
+            init() {
+                this.setupEventListeners();
+                // Generate initial scale
+                this.generate();
+            }
+
+            setupEventListeners() {
+                const colorPicker = document.getElementById('colorPicker');
+                const hexInput = document.getElementById('hexInput');
+                const saturationSlider = document.getElementById('saturationSlider');
+                const saturationValue = document.getElementById('saturationValue');
+                const generateBtn = document.getElementById('generateBtn');
+                const createVariablesBtn = document.getElementById('createVariablesBtn');
+                const exportBtn = document.getElementById('exportBtn');
+
+                // Color input sync
+                colorPicker.addEventListener('change', (e) => {
+                    hexInput.value = e.target.value;
+                    this.generate();
+                });
+
+                hexInput.addEventListener('change', (e) => {
+                    const val = e.target.value;
+                    if (/^#[0-9A-Fa-f]{6}$/.test(val)) {
+                        colorPicker.value = val;
+                        this.generate();
+                    }
+                });
+
+                // Saturation slider
+                saturationSlider.addEventListener('input', (e) => {
+                    saturationValue.textContent = e.target.value + '%';
+                    this.generate();
+                });
+
+                // Generate button
+                generateBtn.addEventListener('click', () => this.generate());
+
+                // Create variables button
+                createVariablesBtn.addEventListener('click', () => this.createVariables());
+
+                // Export button
+                exportBtn.addEventListener('click', () => this.exportJSON());
+
+                // Real-time generation on input
+                document.getElementById('colorName').addEventListener('change', () => this.generate());
+                document.getElementById('collectionName').addEventListener('change', () => this.generate());
+            }
+
+            generate() {
+                try {
+                    const baseColor = document.getElementById('hexInput').value;
+                    const colorName = document.getElementById('colorName').value || 'Color';
+                    const saturation = parseInt(document.getElementById('saturationSlider').value) / 100;
+
+                    if (!/^#[0-9A-Fa-f]{6}$/.test(baseColor)) {
+                        this.showEmptyState();
+                        return;
+                    }
+
+                    // Call the color generator
+                    parent.postMessage({
+                        pluginMessage: {
+                            type: 'generateColorScale',
+                            baseColor,
+                            colorName,
+                            saturationAdjustment: saturation
+                        }
+                    }, '*');
+
+                } catch (error) {
+                    console.error('Generation error:', error);
+                    this.showEmptyState();
+                }
+            }
+
+            createVariables() {
+                if (!this.currentScale) return;
+
+                const baseColor = document.getElementById('hexInput').value;
+                const colorName = document.getElementById('colorName').value;
+                const collectionName = document.getElementById('collectionName').value;
+                const saturation = parseInt(document.getElementById('saturationSlider').value) / 100;
+
+                parent.postMessage({
+                    pluginMessage: {
+                        type: 'createColorVariables',
+                        baseColor,
+                        colorName,
+                        collectionName,
+                        saturationAdjustment: saturation
+                    }
+                }, '*');
+            }
+
+            exportJSON() {
+                if (!this.currentScale) return;
+
+                const data = JSON.stringify(this.currentScale, null, 2);
+                const blob = new Blob([data], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `${this.currentScale.name}-palette.json`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+
+                this.showMessage('✓ Palette exported as JSON');
+            }
+
+            displayScale(scale) {
+                this.currentScale = scale;
+
+                const container = document.getElementById('scalePreview');
+                const count = document.getElementById('colorCount');
+
+                // Show buttons
+                document.getElementById('createVariablesBtn').style.display = 'flex';
+                document.getElementById('exportBtn').style.display = 'flex';
+
+                count.textContent = '11 colors';
+
+                const weights = [50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950];
+                const html = weights.map(weight => {
+                    const stop = scale.stops[weight];
+                    return `
+                        <div class="color-stop">
+                            <div class="color-swatch" style="background-color: ${stop.hex};" title="${stop.hex}"></div>
+                            <div class="color-info">
+                                <div class="color-weight">${stop.name}</div>
+                                <div class="color-values">
+                                    <div class="color-value-item">
+                                        <span>${stop.hex}</span>
+                                    </div>
+                                    <div class="color-value-item">
+                                        <span>HSL(${stop.hsl.h}°, ${stop.hsl.s}%, ${stop.hsl.l}%)</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <button class="copy-btn" data-hex="${stop.hex}">Copy</button>
+                        </div>
+                    `;
+                }).join('');
+
+                container.innerHTML = html;
+
+                // Add copy button listeners
+                container.querySelectorAll('.copy-btn').forEach(btn => {
+                    btn.addEventListener('click', (e) => {
+                        const hex = btn.getAttribute('data-hex');
+                        navigator.clipboard.writeText(hex).then(() => {
+                            this.showMessage(`✓ Copied ${hex}`);
+                        });
+                    });
+                });
+            }
+
+            showEmptyState() {
+                const container = document.getElementById('scalePreview');
+                document.getElementById('createVariablesBtn').style.display = 'none';
+                document.getElementById('exportBtn').style.display = 'none';
+                document.getElementById('colorCount').textContent = '0 colors';
+
+                container.innerHTML = `
+                    <div class="empty-icon">🎨</div>
+                    <div class="empty-text">Enter a valid hex color to generate a palette</div>
+                `;
+            }
+
+            showMessage(text) {
+                const msg = document.createElement('div');
+                msg.className = 'message';
+                msg.textContent = text;
+                document.body.appendChild(msg);
+
+                setTimeout(() => {
+                    msg.remove();
+                }, 2500);
+            }
+        }
+
+        // Initialize on load
+        let ui;
+        window.addEventListener('DOMContentLoaded', () => {
+            ui = new ColorGeneratorUI();
+            window.__colorGeneratorUI = ui;
+        });
+
+        // Handle messages from Figma plugin
+        window.onmessage = (event) => {
+            const message = event.data.pluginMessage;
+            if (!message) return;
+
+            if (message.type === 'colorScaleGenerated') {
+                if (ui) {
+                    ui.displayScale(message.scale);
+                }
+            } else if (message.type === 'notify') {
+                if (ui) {
+                    ui.showMessage(message.text);
+                }
+            }
+        };
+    </script>
+</body>
+</html>

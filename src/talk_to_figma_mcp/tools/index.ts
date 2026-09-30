@@ -24,6 +24,7 @@ import { registerHtmlImportTools } from "./html-import-tools";
 import { registerResponsiveTools } from "./responsive-tools";
 import { registerBatchTools } from "./batch-tools";
 import { registerUsageTools } from "./usage-tools";
+import { registerColorGeneratorTools } from "./color-generator-tools";
 import { getProfile, makeToolFilter } from "../config/profiles";
 import { logger } from "../utils/logger";
 import { capResponse } from "../utils/respond";
@@ -105,6 +106,8 @@ export function registerTools(server: McpServer): void {
     // Registered early because the "reuse before creating" rule requires it to be
     // called before any creation tool.
     registerDesignSystemTools(server);
+    // Color generator — Tailwind-like palette generation — see tools/color-generator-tools.ts
+    registerColorGeneratorTools(server);
     // HTML / URL → Figma import — see tools/html-import-tools.ts
     registerHtmlImportTools(server);
     // Responsive website generation — see tools/responsive-tools.ts
@@ -183,6 +186,7 @@ export {
   registerSectionScopeTools,
   registerActivityTools,
   registerDesignSystemTools,
+  registerColorGeneratorTools,
   registerHtmlImportTools,
   registerResponsiveTools,
   registerBatchTools,
