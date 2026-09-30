@@ -1,0 +1,694 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bulk Color Generator</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --bg-primary: #1a1a1a;
+            --bg-secondary: #252525;
+            --bg-tertiary: #303030;
+            --text-primary: #ffffff;
+            --text-secondary: #b0b0b0;
+            --border-color: #3f3f3f;
+            --button-primary: #0066ff;
+            --button-hover: #0052cc;
+            --button-success: #10a981;
+            --border-radius: 6px;
+            --transition: 200ms cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-primary);
+            color: var(--text-primary);
+            padding: 20px;
+            overflow-y: auto;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding-bottom: 20px;
+            border-bottom: 1px solid var(--border-color);
+            margin-bottom: 20px;
+        }
+
+        .header-icon {
+            font-size: 28px;
+        }
+
+        .header-title {
+            font-size: 20px;
+            font-weight: 600;
+        }
+
+        .header-subtitle {
+            font-size: 13px;
+            color: var(--text-secondary);
+            margin-left: auto;
+        }
+
+        /* ────────────────────────────────────────────────────────────────── */
+        /* Color Grid */
+        /* ────────────────────────────────────────────────────────────────── */
+
+        .colors-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        .color-card {
+            background-color: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: var(--border-radius);
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            cursor: pointer;
+            transition: all var(--transition);
+        }
+
+        .color-card:hover {
+            border-color: var(--button-primary);
+            background-color: var(--bg-tertiary);
+            transform: translateY(-2px);
+        }
+
+        .color-card.selected {
+            border-color: var(--button-success);
+            background-color: rgba(16, 169, 129, 0.1);
+            box-shadow: 0 0 0 2px rgba(16, 169, 129, 0.2);
+        }
+
+        .color-card-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .color-swatch {
+            width: 48px;
+            height: 48px;
+            border-radius: 4px;
+            border: 1px solid var(--border-color);
+            flex-shrink: 0;
+        }
+
+        .color-info {
+            flex: 1;
+        }
+
+        .color-name {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .color-hex {
+            font-size: 12px;
+            font-family: 'Monaco', 'Menlo', monospace;
+            color: var(--text-secondary);
+        }
+
+        .checkbox {
+            width: 20px;
+            height: 20px;
+            border: 1px solid var(--border-color);
+            border-radius: 3px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background-color: var(--bg-tertiary);
+            transition: all var(--transition);
+            flex-shrink: 0;
+        }
+
+        .color-card:hover .checkbox {
+            border-color: var(--button-primary);
+        }
+
+        .color-card.selected .checkbox {
+            background-color: var(--button-success);
+            border-color: var(--button-success);
+        }
+
+        .checkbox::after {
+            content: '✓';
+            color: white;
+            font-size: 12px;
+            font-weight: 600;
+            display: none;
+        }
+
+        .color-card.selected .checkbox::after {
+            display: block;
+        }
+
+        .color-card-actions {
+            display: flex;
+            gap: 6px;
+        }
+
+        .btn-small {
+            flex: 1;
+            background-color: var(--bg-tertiary);
+            border: 1px solid var(--border-color);
+            color: var(--text-secondary);
+            padding: 6px 8px;
+            border-radius: 3px;
+            font-size: 11px;
+            cursor: pointer;
+            transition: all var(--transition);
+        }
+
+        .btn-small:hover {
+            border-color: var(--button-primary);
+            color: var(--button-primary);
+            background-color: rgba(0, 102, 255, 0.05);
+        }
+
+        /* ────────────────────────────────────────────────────────────────── */
+        /* Controls */
+        /* ────────────────────────────────────────────────────────────────── */
+
+        .controls {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 24px;
+            padding: 16px;
+            background-color: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: var(--border-radius);
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .control-group {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .control-label {
+            font-size: 12px;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .control-input {
+            background-color: var(--bg-tertiary);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            padding: 6px 10px;
+            color: var(--text-primary);
+            font-size: 12px;
+            font-family: 'Monaco', 'Menlo', monospace;
+        }
+
+        .control-input:focus {
+            outline: none;
+            border-color: var(--button-primary);
+            box-shadow: 0 0 0 2px rgba(0, 102, 255, 0.1);
+        }
+
+        .btn-action {
+            background-color: var(--button-primary);
+            color: white;
+            border: none;
+            border-radius: 4px;
+            padding: 8px 14px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all var(--transition);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            white-space: nowrap;
+        }
+
+        .btn-action:hover {
+            background-color: var(--button-hover);
+            transform: translateY(-1px);
+        }
+
+        .btn-action:disabled {
+            background-color: var(--border-color);
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .btn-success {
+            background-color: var(--button-success);
+        }
+
+        .btn-success:hover {
+            background-color: #059669;
+        }
+
+        .selection-info {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-left: auto;
+        }
+
+        /* ────────────────────────────────────────────────────────────────── */
+        /* Preview Section */
+        /* ────────────────────────────────────────────────────────────────── */
+
+        .preview-section {
+            display: none;
+        }
+
+        .preview-section.active {
+            display: block;
+        }
+
+        .preview-header {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 12px;
+            padding-top: 12px;
+            border-top: 1px solid var(--border-color);
+        }
+
+        .scale-preview {
+            background-color: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: var(--border-radius);
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+
+        .scale-title {
+            font-size: 13px;
+            font-weight: 600;
+            margin-bottom: 12px;
+            color: var(--text-primary);
+        }
+
+        .scale-stops {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(60px, 1fr));
+            gap: 8px;
+        }
+
+        .stop {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            text-align: center;
+        }
+
+        .stop-swatch {
+            width: 100%;
+            height: 60px;
+            border-radius: 3px;
+            border: 1px solid var(--border-color);
+            cursor: pointer;
+            transition: all var(--transition);
+        }
+
+        .stop-swatch:hover {
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+            transform: scale(1.05);
+        }
+
+        .stop-label {
+            font-size: 10px;
+            color: var(--text-secondary);
+            font-weight: 500;
+        }
+
+        /* ────────────────────────────────────────────────────────────────── */
+        /* Empty State */
+        /* ────────────────────────────────────────────────────────────────── */
+
+        .empty-state {
+            text-align: center;
+            padding: 40px 20px;
+            color: var(--text-secondary);
+        }
+
+        .empty-icon {
+            font-size: 48px;
+            margin-bottom: 12px;
+            opacity: 0.5;
+        }
+
+        .empty-text {
+            font-size: 13px;
+            line-height: 1.6;
+        }
+
+        /* ────────────────────────────────────────────────────────────────── */
+        /* Responsive */
+        /* ────────────────────────────────────────────────────────────────── */
+
+        @media (max-width: 600px) {
+            .colors-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .controls {
+                flex-direction: column;
+                align-items: stretch;
+            }
+
+            .control-group {
+                width: 100%;
+            }
+
+            .selection-info {
+                margin-left: 0;
+            }
+        }
+
+        .message {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background-color: var(--button-success);
+            color: white;
+            padding: 12px 16px;
+            border-radius: 4px;
+            font-size: 12px;
+            animation: slideInUp 0.3s ease;
+            z-index: 1000;
+        }
+
+        @keyframes slideInUp {
+            from {
+                transform: translateY(20px);
+                opacity: 0;
+            }
+            to {
+                transform: translateY(0);
+                opacity: 1;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <div class="header-icon">🎨</div>
+            <div class="header-title">Bulk Color Generator</div>
+            <div class="header-subtitle">Generate scales for multiple colors</div>
+        </div>
+
+        <!-- Color Grid -->
+        <div class="colors-grid" id="colorsGrid">
+            <!-- Populated by JavaScript -->
+        </div>
+
+        <!-- Controls -->
+        <div class="controls">
+            <div class="control-group">
+                <span class="control-label">Collection</span>
+                <input type="text" id="collectionInput" class="control-input" value="Colors" placeholder="Figma collection name">
+            </div>
+            <button class="btn-action" id="selectAllBtn">☑️ Select All</button>
+            <button class="btn-action" id="clearBtn">✕ Clear</button>
+            <button class="btn-action btn-success" id="generateBtn" disabled>
+                ✨ Generate Selected
+            </button>
+            <div class="selection-info" id="selectionInfo">0 selected</div>
+        </div>
+
+        <!-- Preview Section -->
+        <div class="preview-section" id="previewSection">
+            <div class="preview-header">Preview (50 / 500 / 950)</div>
+            <div id="previewContainer">
+                <!-- Populated by JavaScript -->
+            </div>
+        </div>
+
+        <!-- Empty State -->
+        <div id="emptyState" class="empty-state">
+            <div class="empty-icon">🎨</div>
+            <div class="empty-text">Select colors above and click "Generate Selected" to preview the scales</div>
+        </div>
+    </div>
+
+    <script>
+        /**
+         * Bulk Color Generator UI
+         * Manages multiple color palette generation
+         */
+        class BulkColorGeneratorUI {
+            constructor() {
+                // Default colors based on the design system shown
+                this.defaultColors = [
+                    { name: 'Primary', hex: '#0066FF' },
+                    { name: 'Secondary', hex: '#FF6B6B' },
+                    { name: 'Tertiary', hex: '#4ECDC4' },
+                    { name: 'Tertiary 2', hex: '#95E1D3' },
+                    { name: 'Accent', hex: '#FFD93D' },
+                    { name: 'CTA', hex: '#6BCF7F' },
+                    { name: 'Gray Main', hex: '#9DA5B0' },
+                ];
+
+                this.selectedColors = new Set();
+                this.generatedScales = new Map();
+                this.init();
+            }
+
+            init() {
+                this.renderColorGrid();
+                this.setupEventListeners();
+                this.loadFromFigma();
+            }
+
+            renderColorGrid() {
+                const grid = document.getElementById('colorsGrid');
+                grid.innerHTML = this.defaultColors.map((color, idx) => `
+                    <div class="color-card" data-index="${idx}" data-name="${color.name}" data-hex="${color.hex}">
+                        <div class="color-card-header">
+                            <div class="color-swatch" style="background-color: ${color.hex};"></div>
+                            <div class="color-info">
+                                <div class="color-name">${color.name}</div>
+                                <div class="color-hex">${color.hex}</div>
+                            </div>
+                            <div class="checkbox"></div>
+                        </div>
+                        <div class="color-card-actions">
+                            <button class="btn-small edit-btn" data-index="${idx}">Edit</button>
+                            <button class="btn-small preview-btn" data-index="${idx}">Preview</button>
+                        </div>
+                    </div>
+                `).join('');
+
+                // Add event listeners
+                grid.querySelectorAll('.color-card').forEach(card => {
+                    card.addEventListener('click', (e) => {
+                        if (!e.target.closest('.btn-small')) {
+                            this.toggleColor(card);
+                        }
+                    });
+                });
+
+                grid.querySelectorAll('.edit-btn').forEach(btn => {
+                    btn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        this.editColor(parseInt(btn.getAttribute('data-index')));
+                    });
+                });
+
+                grid.querySelectorAll('.preview-btn').forEach(btn => {
+                    btn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        const idx = parseInt(btn.getAttribute('data-index'));
+                        this.previewSingleColor(this.defaultColors[idx]);
+                    });
+                });
+            }
+
+            setupEventListeners() {
+                document.getElementById('selectAllBtn').addEventListener('click', () => this.selectAll());
+                document.getElementById('clearBtn').addEventListener('click', () => this.clearSelection());
+                document.getElementById('generateBtn').addEventListener('click', () => this.generate());
+            }
+
+            toggleColor(card) {
+                const name = card.getAttribute('data-name');
+                if (this.selectedColors.has(name)) {
+                    this.selectedColors.delete(name);
+                    card.classList.remove('selected');
+                } else {
+                    this.selectedColors.add(name);
+                    card.classList.add('selected');
+                }
+                this.updateSelectionInfo();
+            }
+
+            selectAll() {
+                this.defaultColors.forEach(color => {
+                    this.selectedColors.add(color.name);
+                });
+                document.querySelectorAll('.color-card').forEach(card => {
+                    card.classList.add('selected');
+                });
+                this.updateSelectionInfo();
+            }
+
+            clearSelection() {
+                this.selectedColors.clear();
+                document.querySelectorAll('.color-card').forEach(card => {
+                    card.classList.remove('selected');
+                });
+                this.updateSelectionInfo();
+            }
+
+            updateSelectionInfo() {
+                const count = this.selectedColors.size;
+                document.getElementById('selectionInfo').textContent = `${count} selected`;
+                document.getElementById('generateBtn').disabled = count === 0;
+            }
+
+            editColor(index) {
+                const color = this.defaultColors[index];
+                const newHex = prompt(`Edit color "${color.name}":`, color.hex);
+                if (newHex && /^#[0-9A-Fa-f]{6}$/.test(newHex)) {
+                    this.defaultColors[index].hex = newHex;
+                    this.renderColorGrid();
+                }
+            }
+
+            previewSingleColor(color) {
+                this.selectedColors.clear();
+                this.selectedColors.add(color.name);
+                this.generate();
+            }
+
+            generate() {
+                if (this.selectedColors.size === 0) return;
+
+                const colors = this.defaultColors.filter(c =>
+                    this.selectedColors.has(c.name)
+                );
+
+                const collection = document.getElementById('collectionInput').value || 'Colors';
+
+                // Send to parent/Claude
+                parent.postMessage({
+                    pluginMessage: {
+                        type: 'generateBulkColorScales',
+                        colors,
+                        collectionName: collection
+                    }
+                }, '*');
+
+                this.showMessage('✓ Generating scales...');
+            }
+
+            displayScales(scales) {
+                this.generatedScales.clear();
+
+                const preview = document.getElementById('previewSection');
+                const container = document.getElementById('previewContainer');
+                const emptyState = document.getElementById('emptyState');
+
+                scales.forEach(scale => {
+                    this.generatedScales.set(scale.name, scale);
+                });
+
+                container.innerHTML = scales.map(scale => `
+                    <div class="scale-preview">
+                        <div class="scale-title">${scale.name}</div>
+                        <div class="scale-stops">
+                            ${[50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950].map(weight => {
+                                const stop = scale.stops[weight];
+                                return `
+                                    <div class="stop" title="${stop.hex}">
+                                        <div class="stop-swatch" style="background-color: ${stop.hex};" data-hex="${stop.hex}"></div>
+                                        <div class="stop-label">${weight}</div>
+                                    </div>
+                                `;
+                            }).join('')}
+                        </div>
+                    </div>
+                `).join('');
+
+                // Add click handlers for copying
+                container.querySelectorAll('.stop-swatch').forEach(swatch => {
+                    swatch.addEventListener('click', (e) => {
+                        const hex = e.target.getAttribute('data-hex');
+                        navigator.clipboard.writeText(hex).then(() => {
+                            this.showMessage(`✓ Copied ${hex}`);
+                        });
+                    });
+                });
+
+                preview.classList.add('active');
+                emptyState.style.display = 'none';
+            }
+
+            loadFromFigma() {
+                // Try to load actual colors from Figma
+                parent.postMessage({
+                    pluginMessage: {
+                        type: 'loadDesignSystemColors'
+                    }
+                }, '*');
+            }
+
+            showMessage(text) {
+                const msg = document.createElement('div');
+                msg.className = 'message';
+                msg.textContent = text;
+                document.body.appendChild(msg);
+
+                setTimeout(() => msg.remove(), 2500);
+            }
+        }
+
+        // Initialize on load
+        let ui;
+        window.addEventListener('DOMContentLoaded', () => {
+            ui = new BulkColorGeneratorUI();
+            window.__bulkColorGeneratorUI = ui;
+        });
+
+        // Handle messages from Figma plugin
+        window.onmessage = (event) => {
+            const message = event.data.pluginMessage;
+            if (!message) return;
+
+            if (message.type === 'scalesToDisplay') {
+                if (ui) ui.displayScales(message.scales);
+            } else if (message.type === 'designSystemColors') {
+                if (ui && message.colors) {
+                    ui.defaultColors = message.colors;
+                    ui.renderColorGrid();
+                }
+            } else if (message.type === 'notify') {
+                if (ui) ui.showMessage(message.text);
+            }
+        };
+    </script>
+</body>
+</html>
