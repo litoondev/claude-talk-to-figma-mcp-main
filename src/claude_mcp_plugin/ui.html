@@ -504,6 +504,7 @@
       flex: 0 0 auto;
       margin-left: auto;
       display: flex;
+      flex-wrap: wrap;
       gap: 8px;
     }
 
@@ -995,8 +996,15 @@
         margin-left: 0;
       }
 
+      /* Share the row in proportion to the labels, not 50/50: an equal split
+         is narrower than "Copy Channel ID" needs, so the label broke across
+         two lines while "Disconnect" sat on one. min-width keeps each button
+         at least as wide as its own unbroken label, and the wrap above drops
+         the second one onto a full-width row of its own when both no longer
+         fit — at 320px, the narrowest the panel goes. */
       .status-card__actions .btn {
-        flex: 1;
+        flex: 1 1 auto;
+        min-width: max-content;
         padding-inline: 10px;
       }
 
@@ -1683,7 +1691,6 @@
        * Update the connection status UI
        */
       updateStatus(isConnected, message) {
-        const wasConnected = this.state.connected;
         this.state.connected = isConnected;
 
         this.ui.connectionStatus.innerHTML =
@@ -1710,8 +1717,10 @@
         this.ui.connChipText.textContent =
           isConnected ? "Connected" : (connecting ? "Connecting" : "Idle");
 
-        // Session clock runs from the moment the socket is live.
-        if (isConnected && !wasConnected) this.stats.connectedAt = Date.now();
+        // Session clock runs from the moment the socket is live. Keyed off
+        // connectedAt itself rather than a was/is edge, so a caller that has
+        // already flipped state.connected cannot stop the clock from starting.
+        if (isConnected && this.stats.connectedAt == null) this.stats.connectedAt = Date.now();
         if (!isConnected) this.stats.connectedAt = null;
         this.renderStats();
       }
@@ -1791,7 +1800,10 @@
 
               if (data.type === "system") {
                 if (data.message && data.message.result) {
-                  this.state.connected = true;
+                  // Do not set state.connected here. updateStatus() below
+                  // sets it; it used to read the old value to spot the connect
+                  // edge, so setting it first made that edge invisible and
+                  // left the session clock parked at 00:00 all session.
                   const channelName = data.channel;
                   this.updateStatus(
                     true,
@@ -2234,7 +2246,7 @@
         this.ui.statNodes.textContent = pad(this.stats.nodes.size);
         this.ui.statOps.textContent = pad(this.stats.ops);
 
-        const seconds = this.stats.connectedAt
+        const seconds = this.stats.connectedAt != null
           ? Math.max(0, Math.round((Date.now() - this.stats.connectedAt) / 1000))
           : 0;
         this.ui.statUptime.textContent =
