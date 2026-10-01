@@ -27,6 +27,8 @@ function safePaint(color) {
 // Plugin state
 const state = {
   serverPort: 3055, // Default port
+  magnificApiKey: null,
+  magnificQuality: "standard", // standard, hd, ultra
 };
 
 // Helper function for progress updates
@@ -1140,6 +1142,81 @@ async function restoreUiSize() {
   }
 }
 
+// ─── Magnific Integration ─────────────────────────────────────────────────
+// Test Magnific API connection
+async function testMagnificConnection(apiKey) {
+  try {
+    // Simple test call to Magnific API to validate the key
+    // Using a minimal POST request to their API endpoint
+    const response = await fetch("https://api.magnific.ai/v1/models", {
+      method: "GET",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json"
+      },
+      timeout: 5000
+    });
+
+    if (response.ok) {
+      state.magnificApiKey = apiKey;
+      return true;
+    } else {
+      throw new Error(`API returned status ${response.status}`);
+    }
+  } catch (error) {
+    console.error("Magnific connection test failed:", error);
+    throw error;
+  }
+}
+
+// Upscale an image using Magnific API
+async function upscaleImageWithMagnific(imageUrl, quality = "standard") {
+  if (!state.magnificApiKey) {
+    throw new Error("Magnific API key not configured");
+  }
+
+  try {
+    const response = await fetch("https://api.magnific.ai/v1/upscale", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${state.magnificApiKey}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        image_url: imageUrl,
+        upscale_strength: quality === "ultra" ? 4 : quality === "hd" ? 2 : 1,
+        model: quality === "ultra" ? "magnific-ultra" : "magnific-standard"
+      }),
+      timeout: 30000
+    });
+
+    if (!response.ok) {
+      throw new Error(`Magnific API error: ${response.status}`);
+    }
+
+    const result = await response.json();
+    return result.upscaled_url || result.image_url;
+  } catch (error) {
+    console.error("Image upscaling failed:", error);
+    throw error;
+  }
+}
+
+// Load Magnific settings from storage
+async function loadMagnificSettings() {
+  try {
+    const key = await figma.clientStorage.getAsync("mcp_magnific_key");
+    const quality = await figma.clientStorage.getAsync("mcp_magnific_quality");
+
+    if (key) state.magnificApiKey = key;
+    if (quality) state.magnificQuality = quality;
+
+    console.log("Magnific settings loaded:", { configured: !!key, quality });
+  } catch (error) {
+    console.warn("Could not load Magnific settings:", error);
+  }
+}
+
 // Plugin commands from UI
 figma.ui.onmessage = async (msg) => {
   switch (msg.type) {
@@ -1189,6 +1266,46 @@ figma.ui.onmessage = async (msg) => {
           figma.clientStorage.setAsync("mcp_custom_file_key", parsed).catch(() => {});
           figma.notify(`Figma file key set: ${parsed}`);
         }
+      }
+      break;
+    }
+    case "set-magnific-key": {
+      if (msg.apiKey) {
+        figma.clientStorage.setAsync("mcp_magnific_key", msg.apiKey).catch((error) => {
+          console.warn("Could not save Magnific API key:", (error && error.message) || String(error));
+        });
+        figma.clientStorage.setAsync("mcp_magnific_quality", msg.quality || "standard").catch(() => {});
+        figma.notify(`Magnific API key saved (${msg.quality || 'standard'} quality)`);
+      }
+      break;
+    }
+    case "test-magnific-key": {
+      if (msg.apiKey) {
+        // Test Magnific API connection
+        testMagnificConnection(msg.apiKey).then((success) => {
+          figma.ui.postMessage({
+            type: "magnific-test-result",
+            success: success,
+            message: success ? "✓ Magnific connection successful" : "✗ Failed to connect to Magnific"
+          });
+          if (success) {
+            figma.notify("✓ Magnific connection successful");
+          }
+        }).catch((error) => {
+          figma.ui.postMessage({
+            type: "magnific-test-result",
+            success: false,
+            message: `✗ Error: ${error.message}`
+          });
+          figma.notify(`✗ Magnific error: ${error.message}`);
+        });
+      }
+      break;
+    }
+    case "set-magnific-quality": {
+      if (msg.quality) {
+        figma.clientStorage.setAsync("mcp_magnific_quality", msg.quality).catch(() => {});
+        console.log(`Magnific quality set to: ${msg.quality}`);
       }
       break;
     }
@@ -1258,6 +1375,8 @@ figma.ui.onmessage = async (msg) => {
 
 // Listen for plugin commands from menu
 figma.on("run", ({ command }) => {
+  // Load stored settings (Magnific, file key, etc.)
+  loadMagnificSettings().catch(console.warn);
   figma.ui.postMessage({ type: "auto-connect" });
 });
 

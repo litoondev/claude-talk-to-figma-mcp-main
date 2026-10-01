@@ -1218,6 +1218,60 @@
           </label>
         </div>
 
+        <h2 class="section-title" style="margin-top:18px">Image Enhancement</h2>
+        <div class="settings-grid">
+          <label class="switch">
+            <input type="checkbox" data-opt="magnific-enable" />
+            <span class="switch__box"><span class="switch__knob"></span></span>
+            <span>
+              <span class="switch__label">Enable Magnific</span>
+              <span class="switch__note" style="display:block">Upscale & enhance images when imported.</span>
+            </span>
+          </label>
+          <label class="switch">
+            <input type="checkbox" data-opt="magnific-auto" checked />
+            <span class="switch__box"><span class="switch__knob"></span></span>
+            <span>
+              <span class="switch__label">Auto-enhance</span>
+              <span class="switch__note" style="display:block">Process automatically (no confirmation needed).</span>
+            </span>
+          </label>
+        </div>
+
+        <div style="margin-top:12px">
+          <label style="display:block;font-size:12.5px;font-weight:500;color:var(--ink);margin-bottom:8px">
+            Upscale Quality
+          </label>
+          <div style="display:flex;gap:8px">
+            <label style="flex:1;display:flex;align-items:center;gap:6px;cursor:pointer">
+              <input type="radio" name="magnific-quality" value="standard" checked style="cursor:pointer" />
+              <span style="font-size:12.5px;color:var(--mute)">Standard</span>
+            </label>
+            <label style="flex:1;display:flex;align-items:center;gap:6px;cursor:pointer">
+              <input type="radio" name="magnific-quality" value="hd" style="cursor:pointer" />
+              <span style="font-size:12.5px;color:var(--mute)">HD</span>
+            </label>
+            <label style="flex:1;display:flex;align-items:center;gap:6px;cursor:pointer">
+              <input type="radio" name="magnific-quality" value="ultra" style="cursor:pointer" />
+              <span style="font-size:12.5px;color:var(--mute)">Ultra</span>
+            </label>
+          </div>
+          <div style="font-size:11.5px;color:var(--mute);margin-top:6px">
+            Higher quality = slower processing but better results.
+          </div>
+        </div>
+
+        <div class="file-key-row" style="margin-top:14px">
+          <input id="input-magnific-key" class="input" type="password"
+            placeholder="Magnific API key" />
+          <button id="btn-test-magnific" class="btn btn--ghost" type="button" title="Test connection">Test</button>
+          <button id="btn-save-magnific-key" class="btn btn--primary" type="button">Save</button>
+        </div>
+        <div class="file-key-hint">
+          Get your key from <a href="https://magnific.ai" target="_blank" style="color:var(--acc);text-decoration:none;font-weight:500">magnific.ai</a>
+          <span id="magnific-status" style="margin-left:8px">Not configured</span>
+        </div>
+
         <h2 class="section-title" style="margin-top:18px">Figma file</h2>
         <div class="file-key-row">
           <input id="input-file-key" class="input" type="text"
@@ -1650,6 +1704,72 @@
           input.addEventListener("change", () => {
             this.setOpt(input.getAttribute("data-opt"), input.checked);
             this.pushActivitySettings();
+          });
+        });
+
+        // Magnific controls
+        const saveMagnificKeyBtn = document.getElementById("btn-save-magnific-key");
+        const testMagnificBtn = document.getElementById("btn-test-magnific");
+        const magnificKeyInput = document.getElementById("input-magnific-key");
+        const magnificStatus = document.getElementById("magnific-status");
+
+        if (saveMagnificKeyBtn && magnificKeyInput) {
+          saveMagnificKeyBtn.addEventListener("click", () => {
+            const val = magnificKeyInput.value.trim();
+            if (val) {
+              parent.postMessage({
+                pluginMessage: {
+                  type: "set-magnific-key",
+                  apiKey: val,
+                  quality: document.querySelector('input[name="magnific-quality"]:checked').value
+                }
+              }, "*");
+              if (magnificStatus) {
+                magnificStatus.innerText = "Saved!";
+                magnificStatus.style.color = "var(--ok)";
+                setTimeout(() => {
+                  magnificStatus.innerText = "Configured";
+                  magnificStatus.style.color = "var(--mute)";
+                }, 2500);
+              }
+            } else {
+              if (magnificStatus) {
+                magnificStatus.innerText = "Enter API key";
+                magnificStatus.style.color = "var(--err)";
+              }
+            }
+          });
+        }
+
+        if (testMagnificBtn && magnificKeyInput) {
+          testMagnificBtn.addEventListener("click", () => {
+            const val = magnificKeyInput.value.trim();
+            if (val) {
+              testMagnificBtn.disabled = true;
+              testMagnificBtn.textContent = "Testing...";
+              parent.postMessage({
+                pluginMessage: {
+                  type: "test-magnific-key",
+                  apiKey: val
+                }
+              }, "*");
+              setTimeout(() => {
+                testMagnificBtn.disabled = false;
+                testMagnificBtn.textContent = "Test";
+              }, 3000);
+            }
+          });
+        }
+
+        // Quality setting change listener
+        document.querySelectorAll('input[name="magnific-quality"]').forEach((radio) => {
+          radio.addEventListener("change", () => {
+            parent.postMessage({
+              pluginMessage: {
+                type: "set-magnific-quality",
+                quality: radio.value
+              }
+            }, "*");
           });
         });
 
