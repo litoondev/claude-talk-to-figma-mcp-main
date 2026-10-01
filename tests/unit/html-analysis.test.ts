@@ -168,6 +168,47 @@ describe("page analysis", () => {
     expect(text).toContain("at (max-width: 768px): grid, 2 columns");
     expect(text).toContain("Call match_design_tokens with exactly these values");
   });
+
+  describe("a report larger than one response", () => {
+    const loaded = { location: "/tmp/page.html", stylesheets: [], warnings: [] };
+    const big = {
+      ...analysis,
+      texts: Array.from({ length: 300 }, (_, i) => ({ tag: "p", text: `Paragraph ${i} — exact copy that must survive.` })),
+    };
+    const budget = 6000;
+
+    it("keeps styles and the token list, and names every part it left out", () => {
+      const text = renderHtmlAnalysis(big, loaded, { budget });
+      expect(text.length).toBeLessThanOrEqual(budget);
+      expect(text).toContain("COLOURS — most used first");
+      expect(text).toContain("SPACING & RADII");
+      expect(text).toContain("Call match_design_tokens with exactly these values");
+      expect(text).toContain("NOT IN THIS RESPONSE");
+      expect(text).toContain('part: "text"');
+      expect(text).not.toContain("Paragraph 0 —");
+    });
+
+    it("returns one part on request, paged so no line is lost", () => {
+      const first = renderHtmlAnalysis(big, loaded, { budget, part: "text" });
+      expect(first.length).toBeLessThanOrEqual(budget);
+      expect(first).toContain("Paragraph 0 —");
+      const pages = Number(/page 1 of (\d+)/.exec(first)![1]);
+      expect(pages).toBeGreaterThan(1);
+      expect(first).toContain('part: "text", page: 2');
+
+      let joined = "";
+      for (let page = 1; page <= pages; page++) joined += renderHtmlAnalysis(big, loaded, { budget, part: "text", page });
+      for (let i = 0; i < 300; i++) expect(joined).toContain(`Paragraph ${i} —`);
+      expect(joined).toContain(`page ${pages} of ${pages}, the last`);
+    });
+
+    it("puts the token list in the styles part", () => {
+      const text = renderHtmlAnalysis(big, loaded, { budget, part: "styles" });
+      expect(text).toContain("TYPOGRAPHY — largest first");
+      expect(text).toContain("Call match_design_tokens with exactly these values");
+      expect(text).not.toContain("TEXT CONTENT");
+    });
+  });
 });
 
 describe("layout recommendation", () => {

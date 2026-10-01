@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Icon fixture</title>
+<style>
+  body { margin: 0; padding: 24px; font: 16px/1.5 Arial, sans-serif; }
+  .row { display: flex; gap: 24px; align-items: center; margin-bottom: 24px; }
+  .box { display: inline-flex; align-items: center; justify-content: center; width: 48px; height: 48px; border-radius: 12px; background: #009ad7; color: #fff; }
+  .box svg { width: 24px; height: 24px; }
+  .pill { display: inline; background: #ef464b; color: #fff; border-radius: 999px; padding: 4px; }
+  .pill svg { width: 14px; height: 14px; vertical-align: middle; }
+  .css-ico path { stroke: #fff; stroke-width: 2; fill: none; stroke-linecap: round; }
+  .mask { display: inline-block; width: 32px; height: 32px; background-color: #63bd57;
+    -webkit-mask: url(mask-icon.svg) center / contain no-repeat; mask: url(mask-icon.svg) center / contain no-repeat; }
+</style>
+</head>
+<body>
+  <svg style="display:none" xmlns="http://www.w3.org/2000/svg">
+    <symbol id="i-tooth" viewBox="0 0 24 24"><path d="M7 3c-2 0-4 2-4 5 0 4 2 6 3 13h2l1-5h6l1 5h2c1-7 3-9 3-13 0-3-2-5-4-5-2 0-3 1-5 1S9 3 7 3z" fill="currentColor"/></symbol>
+  </svg>
+  <div class="row" id="a">
+    <span class="box"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12h16M12 4v16"/></svg></span>
+  </div>
+  <p id="b">Call us <span class="pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12l5 5L20 7"/></svg></span> today.</p>
+  <div class="row" id="c"><span class="box"><svg><use href="#i-tooth"></use></svg></span></div>
+  <div class="row" id="d"><span class="box"><svg viewBox="0 0 24 24"><use href="sprite.svg#i-check"></use></svg></span></div>
+  <div class="row" id="e"><span class="box css-ico"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></span></div>
+  <div class="row" id="f"><span class="mask"></span></div>
+  <script src="../../../browser_extension/extractor.js"></script>
+</body>
+</html>

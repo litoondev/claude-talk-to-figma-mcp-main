@@ -17,6 +17,11 @@ const MAX_RESPONSE_CHARS = (() => {
   return raw !== "" && Number.isFinite(parsed) && parsed > 1000 ? Math.floor(parsed) : 24_000;
 })();
 
+/** The response ceiling, for tools that split their own output to stay under it. */
+export function maxResponseChars(): number {
+  return MAX_RESPONSE_CHARS;
+}
+
 export interface ToolResponse {
   content: Array<{ type: "text"; text: string }>;
   /** The MCP SDK's result type allows extra fields; mirror that so these responses are assignable to it. */

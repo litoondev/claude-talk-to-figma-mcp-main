@@ -19,7 +19,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { sendCommandToFigma } from "../utils/websocket";
 import { coerceJson } from "../utils/schema-helpers";
-import { textResponse, errorResponse } from "../utils/respond";
+import { textResponse, errorResponse, maxResponseChars } from "../utils/respond";
 import { absolutizeCssUrls, analyzeHtml, AssetEntry, findStylesheetHrefs, HtmlAnalysis, LayoutHint } from "../utils/html-analysis";
 import {
   DesignSystemSnapshot,
@@ -244,49 +244,68 @@ function describeAssetSource(asset: AssetEntry): string {
   return asset.source;
 }
 
-export function renderHtmlAnalysis(
+export const ANALYSIS_PARTS = ["outline", "styles", "text", "assets"] as const;
+export type AnalysisPart = (typeof ANALYSIS_PARTS)[number];
+
+export interface RenderAnalysisOptions {
+  svgMarkupFor?: string[];
+  /** One part of the report, or every part (default). */
+  part?: AnalysisPart | "all";
+  /** 1-based page of a single part that is too long for one response. */
+  page?: number;
+  /** Character budget per response. Defaults to the server-wide response cap. */
+  budget?: number;
+}
+
+/** Room left for the header, notices and the cap's own truncation notice. */
+const BUDGET_MARGIN = 600;
+
+function renderAnalysisParts(
   analysis: HtmlAnalysis,
   loaded: Pick<LoadedHtml, "location" | "stylesheets" | "warnings">,
-  options: { svgMarkupFor?: string[] } = {}
-): string {
-  const lines: string[] = [];
-  lines.push(`HTML analysis — "${analysis.title ?? "untitled page"}"`);
-  lines.push(
+  options: RenderAnalysisOptions,
+  assetLimit: number
+): { header: string; parts: Record<AnalysisPart, string>; nextStep: string } {
+  const head: string[] = [];
+  head.push(`HTML analysis — "${analysis.title ?? "untitled page"}"`);
+  head.push(
     `Source: ${loaded.location} · ${loaded.stylesheets.length} linked stylesheet(s) · ${analysis.ruleCount} CSS rules ` +
       `(${analysis.mediaRuleCount} inside @media) · root font size ${analysis.rootFontSize}px` +
       (analysis.baseFontFamily ? ` · base font ${analysis.baseFontFamily}` : "")
   );
-  lines.push("Values are what the markup and CSS declare — there is no browser layout here.");
-  for (const warning of loaded.warnings) lines.push(`⚠ ${warning}`);
+  head.push("Values are what the markup and CSS declare — there is no browser layout here.");
+  for (const warning of loaded.warnings) head.push(`⚠ ${warning}`);
 
-  lines.push(section("PAGE OUTLINE — build top to bottom, one frame per section"));
+  const outline: string[] = [];
+  outline.push(section("PAGE OUTLINE — build top to bottom, one frame per section"));
   for (const s of analysis.sections) {
-    lines.push(`${s.index}. ${s.element}${s.label ? ` — "${s.label}"` : ""}`);
+    outline.push(`${s.index}. ${s.element}${s.label ? ` — "${s.label}"` : ""}`);
     const counts = Object.entries(s.counts).filter(([, n]) => n > 0).map(([k, n]) => `${n} ${k}`).join(" · ");
-    if (counts) lines.push(`   contains: ${counts}`);
-    lines.push(`   section: ${s.recommendation}`);
+    if (counts) outline.push(`   contains: ${counts}`);
+    outline.push(`   section: ${s.recommendation}`);
     for (const g of s.groups) {
       const alike = g.repeats > 1 ? ` (${g.repeats} alike)` : "";
-      lines.push(`   • ${g.count} × ${g.itemSignature} in ${g.container}${alike} → ${g.recommendation}`);
-      for (const r of g.responsive) lines.push(`       at ${r.media}: ${describeLayout(r.layout)}`);
+      outline.push(`   • ${g.count} × ${g.itemSignature} in ${g.container}${alike} → ${g.recommendation}`);
+      for (const r of g.responsive) outline.push(`       at ${r.media}: ${describeLayout(r.layout)}`);
     }
   }
-  if (analysis.sections.length === 0) lines.push("  No sections found.");
+  if (analysis.sections.length === 0) outline.push("  No sections found.");
   if (analysis.skipped.length) {
-    lines.push("\n  Not built (not visible in the page flow):");
-    for (const item of analysis.skipped.slice(0, 10)) lines.push(`   – ${item.element}: ${item.reason}`);
-    if (analysis.skipped.length > 10) lines.push(`   – … ${analysis.skipped.length - 10} more`);
+    outline.push("\n  Not built (not visible in the page flow):");
+    for (const item of analysis.skipped.slice(0, 10)) outline.push(`   – ${item.element}: ${item.reason}`);
+    if (analysis.skipped.length > 10) outline.push(`   – … ${analysis.skipped.length - 10} more`);
   }
 
-  lines.push(section("COLOURS — most used first"));
+  const styles: string[] = [];
+  styles.push(section("COLOURS — most used first"));
   for (const c of analysis.tokens.colors.slice(0, 24)) {
     const uses = Object.entries(c.uses).filter(([, n]) => n > 0).map(([k, n]) => `${k} ${n}`).join(", ");
-    lines.push(`  ${c.hex}${c.alpha < 1 ? ` @${Math.round(c.alpha * 100)}%` : ""}  ×${c.count}  (${uses})`);
+    styles.push(`  ${c.hex}${c.alpha < 1 ? ` @${Math.round(c.alpha * 100)}%` : ""}  ×${c.count}  (${uses})`);
   }
 
-  lines.push(section("TYPOGRAPHY — largest first"));
+  styles.push(section("TYPOGRAPHY — largest first"));
   for (const t of analysis.tokens.typography.slice(0, 20)) {
-    lines.push(
+    styles.push(
       `  ${t.fontFamily ?? "?"}${t.familyInherited ? " (inherited)" : ""} ${t.fontSize}px ${t.fontWeight ?? 400}` +
         `  lh ${t.lineHeight ?? "normal"}  ls ${t.letterSpacing ?? 0}px  — ${t.selectors.slice(0, 3).join(", ")}`
     );
@@ -294,37 +313,119 @@ export function renderHtmlAnalysis(
 
   const tally = (entries: Array<{ value: number; count: number }>) =>
     entries.length ? entries.slice(0, 12).map((e) => `${e.value} (×${e.count})`).join(", ") : "none";
-  lines.push(section("SPACING & RADII"));
-  lines.push(`  Gaps:    ${tally(analysis.tokens.gaps)}`);
-  lines.push(`  Padding: ${tally(analysis.tokens.padding)}`);
-  lines.push(`  Margin:  ${tally(analysis.tokens.margin)}`);
-  lines.push(`  Radii:   ${tally(analysis.tokens.radii)}`);
+  styles.push(section("SPACING & RADII"));
+  styles.push(`  Gaps:    ${tally(analysis.tokens.gaps)}`);
+  styles.push(`  Padding: ${tally(analysis.tokens.padding)}`);
+  styles.push(`  Margin:  ${tally(analysis.tokens.margin)}`);
+  styles.push(`  Radii:   ${tally(analysis.tokens.radii)}`);
 
-  lines.push(section("TEXT CONTENT — use this copy exactly"));
-  for (const t of analysis.texts) lines.push(`  (${t.tag}) ${t.text}`);
-  if (analysis.textsTruncated) lines.push("  … more text not listed — raise maxTexts to see it");
+  const text: string[] = [];
+  text.push(section("TEXT CONTENT — use this copy exactly"));
+  for (const t of analysis.texts) text.push(`  (${t.tag}) ${t.text}`);
+  if (analysis.textsTruncated) text.push("  … more text not listed — raise maxTexts to see it");
 
-  lines.push(section("IMAGES & ICONS — place every one"));
-  for (const asset of analysis.assets.slice(0, 80)) {
+  const assets: string[] = [];
+  assets.push(section("IMAGES & ICONS — place every one"));
+  for (const asset of analysis.assets.slice(0, assetLimit)) {
     const size = asset.width !== null || asset.height !== null ? `${asset.width ?? "?"}×${asset.height ?? "?"}` : "size not declared";
-    lines.push(`  [${asset.id}] §${asset.section ?? "–"} ${asset.kind} ${asset.element} — ${describeAssetSource(asset)} — alt "${asset.alt}" — ${size}`);
+    assets.push(`  [${asset.id}] §${asset.section ?? "–"} ${asset.kind} ${asset.element} — ${describeAssetSource(asset)} — alt "${asset.alt}" — ${size}`);
   }
-  if (analysis.assets.length > 80) lines.push(`  … ${analysis.assets.length - 80} more`);
-  if (analysis.assets.length === 0) lines.push("  None found.");
+  if (analysis.assets.length > assetLimit) {
+    assets.push(`  … ${analysis.assets.length - assetLimit} more — call analyze_html again with part: "assets" to list them all`);
+  }
+  if (analysis.assets.length === 0) assets.push("  None found.");
 
   const wanted = options.svgMarkupFor ?? [];
   if (wanted.length) {
-    lines.push(section("SVG MARKUP"));
+    assets.push(section("SVG MARKUP"));
     for (const id of wanted) {
       const asset = analysis.assets.find((a) => a.id === id);
-      lines.push(asset?.svgMarkup ? `  [${id}] ${asset.svgMarkup}` : `  [${id}] not an inline SVG in this report`);
+      assets.push(asset?.svgMarkup ? `  [${id}] ${asset.svgMarkup}` : `  [${id}] not an inline SVG in this report`);
     }
   }
 
-  lines.push(section("NEXT STEP"));
-  lines.push("  Call match_design_tokens with exactly these values before building:");
-  lines.push(`  ${JSON.stringify(tokensForMatching(analysis))}`);
-  return lines.join("\n");
+  const nextStep = [
+    section("NEXT STEP"),
+    "  Call match_design_tokens with exactly these values before building:",
+    `  ${JSON.stringify(tokensForMatching(analysis))}`,
+  ].join("\n");
+
+  return {
+    header: head.join("\n"),
+    parts: { outline: outline.join("\n"), styles: styles.join("\n"), text: text.join("\n"), assets: assets.join("\n") },
+    nextStep,
+  };
+}
+
+/** Split text into pages of at most `budget` characters, breaking between lines. */
+function paginate(text: string, budget: number): string[] {
+  const pages: string[] = [];
+  let current = "";
+  for (const line of text.split("\n")) {
+    const piece = line.length > budget ? line.slice(0, budget - 1) + "…" : line;
+    if (current && current.length + 1 + piece.length > budget) {
+      pages.push(current);
+      current = piece;
+    } else {
+      current = current ? `${current}\n${piece}` : piece;
+    }
+  }
+  if (current) pages.push(current);
+  return pages.length ? pages : [""];
+}
+
+/**
+ * The analyze_html report. A page that fits the response cap comes back whole.
+ * One that does not keeps the parts that fit (styles and the token list first,
+ * as they are small and gate the build) and names the rest, which the caller
+ * reads with `part` — paged with `page` when a single part is itself too long.
+ * Nothing is ever cut silently by the server-wide cap.
+ */
+export function renderHtmlAnalysis(
+  analysis: HtmlAnalysis,
+  loaded: Pick<LoadedHtml, "location" | "stylesheets" | "warnings">,
+  options: RenderAnalysisOptions = {}
+): string {
+  const budget = Math.max(2000, (options.budget ?? maxResponseChars()) - BUDGET_MARGIN);
+  const part = options.part ?? "all";
+
+  if (part !== "all") {
+    const { header, parts, nextStep } = renderAnalysisParts(analysis, loaded, options, Infinity);
+    const body = part === "styles" ? `${parts.styles}\n${nextStep}` : parts[part];
+    const pages = paginate(body, budget - header.length);
+    const page = Math.min(Math.max(1, options.page ?? 1), pages.length);
+    const footer =
+      pages.length > 1
+        ? page < pages.length
+          ? `\n\n[part "${part}" — page ${page} of ${pages.length}. Call analyze_html again with part: "${part}", page: ${page + 1}.]`
+          : `\n\n[part "${part}" — page ${page} of ${pages.length}, the last.]`
+        : "";
+    return `${header}\n${pages[page - 1]}${footer}`;
+  }
+
+  const { header, parts, nextStep } = renderAnalysisParts(analysis, loaded, options, 80);
+  const order: AnalysisPart[] = ["outline", "styles", "text", "assets"];
+  const full = [header, ...order.map((p) => parts[p]), nextStep].join("\n");
+  if (full.length <= budget) return full;
+
+  // Over budget: styles and the token list always go in; then whichever other
+  // parts still fit, smallest gap to the build first (copy, assets, outline).
+  const included = new Set<AnalysisPart>(["styles"]);
+  let used = header.length + parts.styles.length + nextStep.length + 400;
+  for (const p of ["text", "assets", "outline"] as AnalysisPart[]) {
+    if (used + parts[p].length + 1 <= budget) {
+      included.add(p);
+      used += parts[p].length + 1;
+    }
+  }
+  const left = order.filter((p) => !included.has(p));
+  const notice = [
+    section("NOT IN THIS RESPONSE — read these before building"),
+    `  The full report is ${full.length} chars, over the ${budget}-char response budget.`,
+    ...left.map((p) => `  • ${p} (${parts[p].length} chars) → analyze_html with the same source and part: "${p}"`),
+    "  A part longer than one response is paged — the reply says which page: to ask for next.",
+  ].join("\n");
+  return [header, ...order.filter((p) => included.has(p)).map((p) => parts[p]), notice, nextStep].join("\n");
 }
 
 export function renderTokenMatch(result: TokenMatchResult): string {
@@ -368,7 +469,8 @@ export function registerHtmlImportTools(server: McpServer): void {
       "plus a layout recommendation per container: CSS grid or equal wrapping items → Figma Grid, flex → Auto Layout, " +
       "and every visible image and icon with its absolute source, alt text and declared size (inline SVGs by id; " +
       "pass svgMarkupFor to get their self-contained markup). " +
-      "Ends with the token lists to pass to match_design_tokens. Read-only; nothing in Figma changes. " +
+      "Ends with the token lists to pass to match_design_tokens. A report too long for one response keeps the styles " +
+      "and token lists and names the parts left out; read those with part (and page). Read-only; nothing in Figma changes. " +
       "For an HTML→Figma request, load the Html_Import skill with figma_skill first.",
     {
       source: z.string().describe("http(s) URL, or an absolute path to a .html/.htm file (~ allowed)."),
@@ -378,15 +480,24 @@ export function registerHtmlImportTools(server: McpServer): void {
         .array(z.string())
         .optional()
         .describe("Asset ids from IMAGES & ICONS (e.g. [\"asset-3\"]) whose full inline SVG markup to print, ready for set_svg."),
+      part: z
+        .enum(["all", ...ANALYSIS_PARTS])
+        .optional()
+        .describe(
+          "Which part of the report to return. Default \"all\". When a page's full report is too long for one response, " +
+            "the reply lists the parts it left out — read each with this: outline, styles (colours, typography, spacing, " +
+            "radii and the match_design_tokens values), text (exact copy), assets (every image and icon)."
+        ),
+      page: z.number().int().positive().optional().describe("1-based page of a single part that is too long for one response. Default 1."),
     },
-    async ({ source, maxTexts, includeStylesheets, svgMarkupFor }) => {
+    async ({ source, maxTexts, includeStylesheets, svgMarkupFor, part, page }) => {
       try {
         const loaded = await loadHtmlSource(source, includeStylesheets ?? true);
         const analysis = analyzeHtml(loaded.html, loaded.stylesheets.map((s) => s.css), {
           maxTexts,
           baseUrl: loaded.location,
         });
-        return textResponse(renderHtmlAnalysis(analysis, loaded, { svgMarkupFor }));
+        return textResponse(renderHtmlAnalysis(analysis, loaded, { svgMarkupFor, part, page }));
       } catch (error) {
         return errorResponse("analyzing HTML", error);
       }

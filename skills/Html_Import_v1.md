@@ -87,7 +87,11 @@ already existed.
 
 1. Confirm the plugin is connected (`check_figma_connection`, `join_channel`).
 2. Call `analyze_html` with the URL or the absolute path of the `.html` file.
-3. Read the whole report:
+3. Read the whole report. A large page does not fit one response: the reply
+   then ends with **NOT IN THIS RESPONSE**, naming each part it left out.
+   Call `analyze_html` again with the same source and `part: "outline"`,
+   `"text"` or `"assets"` for each one, following `page:` while the reply says
+   there is a next page. Do not start building until every part is read.
    - **PAGE OUTLINE**: the sections to build, top to bottom, and for every
      container a layout recommendation (`Figma Grid — N columns` or
      `Auto Layout — horizontal/vertical`). Fixed overlays are part of the
