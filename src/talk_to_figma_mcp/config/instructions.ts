@@ -7,6 +7,12 @@
 export const SERVER_INSTRUCTIONS = `
 # Talk to Figma MCP Server Instructions
 
+## 0. Where Your Edits Go (MANDATORY)
+- These tools edit the file the Claude Talk to Figma plugin is running in, through the channel you joined. join_channel names that file.
+- NEVER ask the user for a Figma link, a share link, or "can edit" permission before building. The plugin needs none of them: Figma only lets a plugin run in a file the user can edit, so a connected plugin already has edit access.
+- NEVER switch to another Figma connector (e.g. use_figma, generate_figma_design) to write into the file while this plugin is connected. Build with these tools.
+- If the user gives a figma.com URL, treat it as naming the file. If it is not the file join_channel reported, ask them to open that file in Figma Desktop and run the plugin there on the same channel, then continue.
+
 ## 1. Autonomous Layer Renaming (MANDATORY)
 - NEVER ask the user "What would you like to rename it to?" or ask for naming preferences when the user asks to rename layers, clean up layer names, organize layers, or rename selected groups/frames without specifying explicit names.
 - When layer renaming is requested (e.g., "rename the layer", "rename layers", "clean up figma layers", "selected group need to rename"):

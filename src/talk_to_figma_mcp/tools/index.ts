@@ -21,6 +21,7 @@ import { registerSectionScopeTools } from "./section-scope-tools";
 import { registerActivityTools } from "./activity-tools";
 import { registerDesignSystemTools } from "./design-system-tools";
 import { registerHtmlImportTools } from "./html-import-tools";
+import { registerBrowserCaptureTools } from "./browser-capture-tools";
 import { registerResponsiveTools } from "./responsive-tools";
 import { registerBatchTools } from "./batch-tools";
 import { registerUsageTools } from "./usage-tools";
@@ -113,6 +114,9 @@ export function registerTools(server: McpServer): void {
     registerBulkColorGeneratorTools(server);
     // HTML / URL → Figma import — see tools/html-import-tools.ts
     registerHtmlImportTools(server);
+    // Live page capture through the Web-to-Figma browser extension — the
+    // rendered counterpart of analyze_html. See tools/browser-capture-tools.ts.
+    registerBrowserCaptureTools(server);
     // Responsive website generation — see tools/responsive-tools.ts
     registerResponsiveTools(server);
 

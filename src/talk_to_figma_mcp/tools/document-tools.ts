@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { sendCommandToFigma, joinChannel } from "../utils/websocket";
+import { serverUrl, defaultPort } from "../config/config";
 import { filterFigmaNode } from "../utils/figma-helpers";
 import { coerceJson } from "../utils/schema-helpers";
 import { catalogueSummary } from "../skills/integration";
@@ -9,6 +10,90 @@ import { catalogueSummary } from "../skills/integration";
  * Register document-related tools to the MCP server
  * @param server - The MCP server instance
  */
+/**
+ * Say which file the joined plugin is editing.
+ *
+ * Without this, a model that also has Figma's own connector loaded treats the
+ * session like that connector's: it asks for a figma.com link and "can edit"
+ * sharing before it will write anything. The plugin needs neither — it edits
+ * the file it is running in, and Figma only lets a plugin run where the user
+ * can edit. Saying so at the moment of joining stops that detour.
+ *
+ * A plugin that does not answer in time leaves the join successful; the check
+ * is informational and must not turn a working connection into an error.
+ */
+/**
+ * Find the channel holding the Figma plugin from the relay's /status.
+ * One clear candidate is joined; several are listed for the user to pick.
+ */
+export async function discoverChannel(): Promise<{ channel: string | null; message: string }> {
+  const scheme = serverUrl === "localhost" ? "http" : "https";
+  const base = serverUrl === "localhost" ? `${scheme}://localhost:${defaultPort}` : `${scheme}://${serverUrl}`;
+  let status: any;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4000);
+    const res = await fetch(`${base}/status`, { signal: controller.signal });
+    clearTimeout(timer);
+    status = await res.json();
+  } catch (error) {
+    return {
+      channel: null,
+      message: `Could not reach the relay at ${base} (${error instanceof Error ? error.message : String(error)}). ` +
+        `Ask the user to run "npm run socket" in the project folder, then try again.`,
+    };
+  }
+  const rows: Array<{ channel: string; figma: number; browser: number; other: number; agents: number }> = status?.channelClients;
+  if (!Array.isArray(rows)) {
+    return {
+      channel: null,
+      message: "The relay is an older build that does not report its channels. Ask the user for the channel ID shown in the Figma plugin, or to restart the relay with the current build.",
+    };
+  }
+  const withFigma = rows.filter((r) => r.figma > 0);
+  // An older plugin does not declare its role; any non-agent client may be it.
+  const candidates = withFigma.length ? withFigma : rows.filter((r) => r.other > 0);
+  if (!candidates.length) {
+    return {
+      channel: null,
+      message: "No Figma plugin is connected to the relay. Ask the user to open the Claude Talk to Figma plugin in Figma and press Connect, then try again.",
+    };
+  }
+  const withBrowser = candidates.filter((r) => r.browser > 0);
+  const best = withBrowser.length === 1 ? withBrowser : candidates.length === 1 ? candidates : [];
+  if (best.length === 1) return { channel: best[0].channel, message: "" };
+  return {
+    channel: null,
+    message:
+      `Several channels have a Figma plugin: ${candidates.map((r) => `${r.channel}${r.browser ? " (with browser extension)" : ""}`).join(", ")}. ` +
+      "Ask the user which one (the ID is shown in the plugin), then call join_channel with it.",
+  };
+}
+
+export async function describeConnectedFile(channel: string): Promise<string> {
+  const rule =
+    "Edits go straight into this file through the plugin. Do NOT ask the user for a Figma link, " +
+    "a share link or \"can edit\" permission, and do not use another Figma connector to write — " +
+    "use these tools. If the user names a different file, ask them to open that file in Figma " +
+    "and run the plugin there on this channel.";
+  try {
+    const info = (await sendCommandToFigma("get_document_info", {}, 8000)) as {
+      fileName?: string;
+      name?: string;
+      editorType?: string;
+    };
+    const file = info?.fileName ? `"${info.fileName}"` : "the file open in Figma";
+    const page = info?.name ? `, page "${info.name}"` : "";
+    const editor = info?.editorType && info.editorType !== "figma" ? ` (${info.editorType})` : "";
+    return `Connected to ${file}${page}${editor}. ${rule}`;
+  } catch {
+    return (
+      `The plugin on channel ${channel} did not report its file yet. ${rule} ` +
+      `If a command fails, ask the user to open the Claude Talk to Figma plugin in the file to edit.`
+    );
+  }
+}
+
 export function registerDocumentTools(server: McpServer): void {
   // Document Info Tool
   server.tool(
@@ -336,26 +421,21 @@ export function registerDocumentTools(server: McpServer): void {
   // Join Channel Tool
   server.tool(
     "join_channel",
-    "Join a specific channel to communicate with Figma",
+    "Join the channel the Figma plugin is on. Pass the channel ID the plugin shows — or leave it out (or pass the " +
+      "relay address, e.g. ws://localhost:3055) and the channel holding the Figma plugin is found automatically, " +
+      "preferring one where the Web-to-Figma browser extension is also connected.",
     {
-      channel: z.string().describe("The name of the channel to join"),
+      channel: z.string().optional().describe("The channel ID from the plugin. Omit, or pass ws://localhost:3055, to find it automatically"),
     },
-    async ({ channel }) => {
+    async ({ channel: requested }) => {
+      let channel = (requested || "").trim();
       try {
-        if (!channel) {
-          // If no channel provided, ask the user for input
-          return {
-            content: [
-              {
-                type: "text",
-                text: "Please provide a channel name to join:",
-              },
-            ],
-            followUp: {
-              tool: "join_channel",
-              description: "Join the specified channel",
-            },
-          };
+        if (!channel || /^wss?:\/\//i.test(channel) || /^localhost(:\d+)?$/i.test(channel)) {
+          const found = await discoverChannel();
+          if (!found.channel) {
+            return { content: [{ type: "text", text: found.message }] };
+          }
+          channel = found.channel;
         }
 
         // Use joinChannel instead of sendCommandToFigma to ensure currentChannel is updated
@@ -366,11 +446,12 @@ export function registerDocumentTools(server: McpServer): void {
         // begins. Without it a skill is only found by a model that thought to
         // go looking — and for a task that looks simple, it never does.
         const catalogue = catalogueSummary();
+        const where = await describeConnectedFile(channel);
         const text = catalogue
-          ? `Successfully joined channel: ${channel}\n\n` +
+          ? `Successfully joined channel: ${channel}\n\n${where}\n\n` +
             `Skills available for this session — load one with figma_skill({name}) BEFORE ` +
             `starting any task it covers, and follow it rather than improvising:\n${catalogue}`
-          : `Successfully joined channel: ${channel}`;
+          : `Successfully joined channel: ${channel}\n\n${where}`;
 
         return {
           content: [

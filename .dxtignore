@@ -72,6 +72,10 @@ images/cursor-config-2.png
 # Claude Desktop. Shipping it inside the .mcpb would only add weight.
 webflow_extension/
 
+# Likewise the Web-to-Figma Chrome extension: Chrome loads it unpacked from the
+# repo folder, and Claude Desktop never reads it.
+browser_extension/
+
 # Bundled sources. socket.ts imports these and tsup inlines them into
 # dist/socket.js, so the .ts files themselves are never read at runtime.
 src/activity.ts
@@ -83,3 +87,10 @@ src/activity-dashboard.ts
 # Built packages — never pack a previous package into the next one
 *.dxt
 *.mcpb
+
+# Local backups of plugin experiments, never shipped.
+.plugin-backup-*/
+
+# The web import runtime's source. It is compiled into the server bundle
+# (runtime.generated.ts), which is what the extension actually sends.
+src/web_import/

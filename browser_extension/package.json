@@ -1,0 +1,7 @@
+{
+  "name": "web-to-figma-browser-extension",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Chrome extension that captures a live page's computed design for the Claude Talk to Figma relay.",
+  "type": "commonjs"
+}

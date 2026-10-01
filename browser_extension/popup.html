@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Web-to-Figma</title>
+    <style>
+      :root {
+        --bg: #1e1e1e;
+        --panel: #2b2b2b;
+        --border: #3d3d3d;
+        --text: #e8e8e8;
+        --muted: #9a9a9a;
+        --accent: #f97316;
+        --ok: #2fb344;
+        --err: #e5484d;
+        --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+      }
+      @media (prefers-color-scheme: light) {
+        :root {
+          --bg: #ffffff;
+          --panel: #f6f6f6;
+          --border: #e0e0e0;
+          --text: #1a1a1a;
+          --muted: #6b6b6b;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        width: 340px;
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        display: flex;
+        flex-direction: column;
+        padding: 12px;
+        gap: 10px;
+      }
+      h1 { font-size: 13px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+      .row { display: flex; gap: 6px; align-items: center; }
+      label {
+        display: block;
+        color: var(--muted);
+        font-size: 11px;
+        margin-bottom: 3px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      input {
+        width: 100%;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 5px;
+        color: var(--text);
+        padding: 7px 8px;
+        font-family: var(--mono);
+        font-size: 12px;
+      }
+      input:focus { outline: none; border-color: var(--accent); }
+      button {
+        background: var(--accent);
+        color: #fff;
+        border: 0;
+        border-radius: 5px;
+        padding: 8px 14px;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      button.secondary { background: var(--panel); color: var(--text); border: 1px solid var(--border); }
+      button:hover { filter: brightness(1.1); }
+      button:disabled { opacity: 0.5; cursor: default; filter: none; }
+      .status { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+      .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+      .dot-on { background: var(--ok); }
+      .dot-off { background: var(--err); }
+      .dot-wait { background: #f59e0b; }
+      .grow { flex: 1; }
+      #log {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 5px;
+        padding: 6px 8px;
+        font-family: var(--mono);
+        font-size: 11px;
+        max-height: 150px;
+        overflow-y: auto;
+        margin: 0;
+        list-style: none;
+      }
+      #log li { padding: 1px 0; word-break: break-word; }
+      #log li.ok { color: var(--ok); }
+      #log li.error { color: var(--err); }
+      .hint { font-size: 11px; color: var(--muted); margin: 0; }
+    </style>
+  </head>
+  <body>
+    <div class="row">
+      <h1 class="grow">Web-to-Figma</h1>
+      <span class="hint" id="version"></span>
+    </div>
+
+    <div class="status"><span class="dot dot-off" id="dot"></span><span id="status">Disconnected</span></div>
+
+    <div>
+      <label for="channel">Channel</label>
+      <input id="channel" placeholder="The channel ID shown in Claude / the Figma plugin" autocomplete="off" />
+    </div>
+    <div>
+      <label for="relay">Relay</label>
+      <input id="relay" placeholder="ws://localhost:3055" autocomplete="off" />
+    </div>
+    <button id="connect">Connect</button>
+
+    <div class="row">
+      <button id="send" class="grow" title="Capture this page (or the picked element) and build it in the Figma plugin on this channel">Send to Figma</button>
+      <input id="width" type="number" min="320" max="3840" step="1" value="1440" title="Viewport width the page is laid out at before capture" style="width:84px" />
+      <span class="hint">px</span>
+    </div>
+    <div class="row">
+      <button id="pick" class="secondary grow" title="Click an element on the page; Send to Figma and Claude then use just that section">Pick element</button>
+      <button id="save" class="secondary grow" title="Save the capture with its images — upload it in the Figma plugin">Save capture</button>
+    </div>
+    <p class="hint">Or ask Claude: "build this page in Figma". It uses the same channel.</p>
+
+    <ul id="log"></ul>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "Web-to-Figma Capture",
+  "short_name": "Web-to-Figma",
+  "version": "0.2.0",
+  "description": "Capture a live page's computed design \u2014 structure, styles, tokens and animation metadata \u2014 for Claude Talk to Figma.",
+  "minimum_chrome_version": "116",
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Web-to-Figma",
+    "default_popup": "popup.html"
+  },
+  "permissions": [
+    "scripting",
+    "storage",
+    "tabs",
+    "alarms",
+    "debugger"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ]
+}

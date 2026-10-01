@@ -43,3 +43,4 @@ dxt-*/
 .claude/
 !.claude/
 !.claude/settings.json
+.plugin-backup-*/

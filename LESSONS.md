@@ -202,3 +202,84 @@ Read at the start of every change. Sweep at QA.
 - **QA test:** every new cross-process check gets a test where the *other side
   does not implement it*, asserting the check stays passive. Verifying only the
   upgraded pairing tests the happy path of a compatibility feature.
+
+## L13 — Browser-side limits and heuristics tuned on a fixture page
+
+- **Looked like:** caught at QA, before shipping. The Web-to-Figma extractor passed
+  every assertion against `tests/fixtures/browser-capture/page.html`, then its first
+  run on linear.app showed four defects that page could not show. The
+  cross-origin stylesheet cap (10) left 39 of 49 sheets unread. A "font not loaded"
+  warning fired for a family that had loaded, because unused unicode-range subsets
+  stay `unloaded` by design. The outline listed `main` and `footer` instead of 13
+  sections. The scroll hints were 263 entries, mostly one inline style rewritten
+  every frame.
+- **Root cause:** L3 again, in a new place. Each limit and heuristic was chosen by
+  reasoning about what a page "usually" has, and the only page it was checked
+  against was one written to match that reasoning. A second entry of the same
+  class means the L3 guard ("verify against the designer's file") did not reach
+  code that reads arbitrary websites. There is no designer's file there; the web
+  is the input.
+- **Guard:** `tests/fixtures/browser-capture/chrome-harness.mjs <url>` runs the real
+  extractor in real Chrome against any site, with stylesheet fetching the same as
+  the extension. Any change to an extractor limit, filter or summary heuristic is
+  checked against at least two production sites, one of them a JS-built app,
+  before it is called done. Font state is judged per family, not per face.
+  Per-frame changes are merged per element.
+- **QA test:** the fixture suite stays, but it can't answer "is this cap right?".
+  Run the harness on two live sites and read the summary. Check for unread-sheet
+  warnings, a font warning for a family the page visibly renders, an outline with
+  fewer than three blocks on a long page, or repeated hints for the same node.
+
+## L14 — An output format chosen from the file type, not the content
+
+- **Looked like:** caught at QA, before shipping. The extension converts images
+  Figma cannot take. WebP and AVIF were re-encoded as JPEG on the reasoning that
+  they are "photo formats". A test in real Chrome fed it a semi-transparent WebP,
+  and the transparency was gone: a logo on a coloured section would have come
+  out as a solid box.
+- **Root cause:** a lossy decision (dropping alpha) keyed on the container format.
+  WebP and AVIF both carry alpha as often as not.
+- **Guard:** the converter samples the decoded pixels (64×64) and uses JPEG only
+  when every sampled pixel is opaque. Otherwise it uses PNG.
+- **QA test:** every conversion or re-encode gets one input for each property it
+  could lose (transparency, animation, size) and asserts the property survived,
+  in the real runtime. `tests/fixtures/browser-capture/image-convert.js` runs in
+  headless Chrome with a transparent and an opaque WebP.
+
+## L15 — An import judged by its plan, never by looking at it next to the page
+
+- **Looked like:** the importer passed every unit test and planned real sites
+  into tidy Auto Layout trees. The first time its Figma output was exported and
+  put next to a screenshot of the same page, the hero and header were hidden
+  under a grey box, SVGs were black, hidden accordion text was showing, and
+  photos were clipped. Each defect was invisible to tests that only asked
+  "what did the planner decide?".
+- **Root cause:** the success criterion was structural (layer counts, layout
+  modes), when the user's criterion is visual. Tests can only check rules
+  someone already thought of. The comparison is what finds the ones nobody did.
+- **Guard:** a visual loop. Capture at a fixed width in headless Chrome
+  (`chrome-harness.mjs` with `W2F_WIDTH`), build in the live Figma file through
+  the relay, export the frame, screenshot the site at the same width, and
+  compare section by section. Each rule found that way gets a unit test in
+  `tests/unit/web-import-fidelity.test.ts`.
+- **QA test:** an import change is not done until its side-by-side comparison
+  has been looked at, on at least one real page, with the remaining differences
+  listed in the report.
+
+## L16 — A converter that returns a default instead of refusing
+
+- **Looked like:** the hero's dot field imported as an empty rectangle. The SVG
+  paint inliner had written `fill="rgba(0,0,0,0)"` over `fill="url(#dp3022)"`.
+- **Root cause:** colours were converted by painting them on a canvas and
+  reading the pixel back. Canvas silently ignores a value it cannot parse and
+  keeps the previous fill, which the code had set to transparent. So every
+  non-colour (`url(#pattern)`, a keyword) came back as a valid, transparent
+  colour, and the caller had no way to tell.
+- **Guard:** paint servers and keywords are refused before conversion, and an
+  invalid value is detected by setting two different sentinels and checking
+  that the result does not depend on them. The function returns null for
+  anything it cannot convert, and callers keep the original value.
+- **QA test:** every converter gets one input it must refuse, and a test that
+  the original survives (`patterns.html`: the `url()` fill is expanded, never
+  replaced by a colour).
+
