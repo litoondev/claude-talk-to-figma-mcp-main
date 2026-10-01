@@ -12,8 +12,8 @@ import {
   hexToRgb,
   rgbToHsl,
   rgbToHex,
-} from "../utils/color-generator.js";
-import { sendCommandToFigma } from "../utils/websocket.js";
+} from "../utils/color-generator";
+import { sendCommandToFigma } from "../utils/websocket";
 
 interface ColorDefinition {
   name: string;

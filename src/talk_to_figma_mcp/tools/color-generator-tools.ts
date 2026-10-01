@@ -12,7 +12,7 @@ import {
   exportAsVariableDefinitions,
   hexToRgb,
   rgbToHsl,
-} from "../utils/color-generator.js";
+} from "../utils/color-generator";
 
 export function registerColorGeneratorTools(server: McpServer): void {
   /**
