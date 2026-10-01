@@ -1031,16 +1031,6 @@
                     ],
                     "icon": "🎬",
                     "prompt": "ScrollSmoother Motion - apply a Figma-native prototype approximation of the GSAP ScrollSmoother reference to the selected design.\n\nSetup: join_channel -> check_figma_connection -> get_selection. Nothing selected: ask which frame, then stop. Work only inside that selection; report problems elsewhere instead of fixing them.\n\nReference: https://codepen.io/GreenSock/pen/KKXZOyZ - smooth vertical scroll, decorative layers at different speeds, a temporarily pinned focal layer, and a control that scrolls to it.\nInspect with get_nodes_info and get_reactions. Map the viewport, scroll content, decorative parallax layers, focal layer and jump control; if a role is unclear, show the mapping and wait.\nFigma cannot reproduce GSAP's continuous scrub, speed clamping or timed pinning exactly. Keep the source untouched; build the closest native demo from clones with clone_node. Use vertical scrolling, staged states with SMART_ANIMATE for the pinned beat, and set_reactions with SCROLL_TO for the jump control. Preserve existing reactions; report conflicts.\nKeep text, navigation, controls and essential content at normal speed. Use smooth easing without bounce; add no copy, colours, imagery, scale or opacity effects. Re-read changed frames and reactions. Leave unsupported behavior unchanged and provide its GSAP handoff note instead of claiming exact parity.\n\nNever: move or resize an absolute-positioned layer - change size or layout without checking clipsContent - detach instances - break masks, variants, component properties or prototype links - alter copy, colour, type or imagery unasked - invent a token, style or component name.\n\nVerify: export_node_as_image before and after - it must look identical unless this task asked otherwise; re-read changed nodes with get_nodes_info and undo anything that moved, clipped or overlapped by accident.\nReport: per change, node ID and before -> after; what you skipped and why; what you need from me. Never report a step no tool result confirmed."
-                  },
-                  {
-                    "id": "color_generator",
-                    "category": "Design System",
-                    "title": "Color Generator",
-                    "description": "Generate Tailwind-like color scales and create Figma variables",
-                    "triggers": ["color generator", "generate colors", "color palette"],
-                    "icon": "🎨",
-                    "prompt": "Color Generator - create Tailwind-style color palettes",
-                    "action": "openColorGenerator"
                   }
                 ];
                 /* OPERATION_PROMPTS:END */
