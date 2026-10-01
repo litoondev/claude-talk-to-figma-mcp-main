@@ -1031,6 +1031,21 @@
                     ],
                     "icon": "🎬",
                     "prompt": "ScrollSmoother Motion - apply a Figma-native prototype approximation of the GSAP ScrollSmoother reference to the selected design.\n\nSetup: join_channel -> check_figma_connection -> get_selection. Nothing selected: ask which frame, then stop. Work only inside that selection; report problems elsewhere instead of fixing them.\n\nReference: https://codepen.io/GreenSock/pen/KKXZOyZ - smooth vertical scroll, decorative layers at different speeds, a temporarily pinned focal layer, and a control that scrolls to it.\nInspect with get_nodes_info and get_reactions. Map the viewport, scroll content, decorative parallax layers, focal layer and jump control; if a role is unclear, show the mapping and wait.\nFigma cannot reproduce GSAP's continuous scrub, speed clamping or timed pinning exactly. Keep the source untouched; build the closest native demo from clones with clone_node. Use vertical scrolling, staged states with SMART_ANIMATE for the pinned beat, and set_reactions with SCROLL_TO for the jump control. Preserve existing reactions; report conflicts.\nKeep text, navigation, controls and essential content at normal speed. Use smooth easing without bounce; add no copy, colours, imagery, scale or opacity effects. Re-read changed frames and reactions. Leave unsupported behavior unchanged and provide its GSAP handoff note instead of claiming exact parity.\n\nNever: move or resize an absolute-positioned layer - change size or layout without checking clipsContent - detach instances - break masks, variants, component properties or prototype links - alter copy, colour, type or imagery unasked - invent a token, style or component name.\n\nVerify: export_node_as_image before and after - it must look identical unless this task asked otherwise; re-read changed nodes with get_nodes_info and undo anything that moved, clipped or overlapped by accident.\nReport: per change, node ID and before -> after; what you skipped and why; what you need from me. Never report a step no tool result confirmed."
+                  },
+                  {
+                    "id": "color_generator",
+                    "category": "Design System",
+                    "title": "Color Generator",
+                    "description": "Generate Tailwind-like color scales for your design system",
+                    "triggers": [
+                      "color generator",
+                      "generate colors",
+                      "create color palette",
+                      "color scale"
+                    ],
+                    "icon": "🎨",
+                    "prompt": "Open the Color Generator to create Tailwind-style color palettes for your design system. Enter a base hex color, adjust HSL sliders, and generate 11-stop color scales instantly. Create as Figma variables in your Colors collection.",
+                    "action": "openColorGenerator"
                   }
                 ];
                 /* OPERATION_PROMPTS:END */
@@ -1211,26 +1226,36 @@
                     ? this.operations
                     : this.operations.filter(op => op.category.toLowerCase().startsWith(this.state.currentCategory));
 
-                grid.innerHTML = filtered.map(op => `
-                    <div class="operation-card">
-                        <div class="operation-header">
-                            <div class="operation-icon">${op.icon}</div>
-                            <div class="operation-title">${op.title}</div>
+                grid.innerHTML = filtered.map(op => {
+                    const isColorGen = op.action === 'openColorGenerator';
+                    const buttonText = isColorGen ? '🎨 Open Generator' : '📋 Copy prompt';
+                    return `
+                        <div class="operation-card">
+                            <div class="operation-header">
+                                <div class="operation-icon">${op.icon}</div>
+                                <div class="operation-title">${op.title}</div>
+                            </div>
+                            <div class="operation-description">${op.description}</div>
+                            <button class="operation-button" data-operation-id="${op.id}" data-action="${op.action || 'copy'}">
+                                ${buttonText}
+                            </button>
                         </div>
-                        <div class="operation-description">${op.description}</div>
-                        <button class="operation-button" data-operation-id="${op.id}">
-                            📋 Copy prompt
-                        </button>
-                    </div>
-                `).join('');
+                    `;
+                }).join('');
 
-                // Add event listeners to copy buttons
+                // Add event listeners to buttons
                 grid.querySelectorAll('.operation-button').forEach(btn => {
                     btn.addEventListener('click', (e) => {
                         const opId = btn.getAttribute('data-operation-id');
+                        const action = btn.getAttribute('data-action');
                         const operation = this.operations.find(op => op.id === opId);
+
                         if (operation) {
-                            this.copyOperationPrompt(operation);
+                            if (action === 'openColorGenerator') {
+                                this.showColorGenerator();
+                            } else {
+                                this.copyOperationPrompt(operation);
+                            }
                         }
                     });
                 });
