@@ -1099,6 +1099,17 @@
           </div>
         </div>
 
+        <div class="card" style="margin-top:12px">
+          <div class="section-title">Import a web page</div>
+          <div class="note" style="margin:4px 0 10px">
+            Upload a capture saved with the Web-to-Figma Chrome extension. It is built here with Auto Layout,
+            Grid, proper layer names and your own variables and text styles.
+          </div>
+          <input type="file" id="web-import-file" accept=".json,application/json" class="hidden" />
+          <button id="btn-web-import" class="btn btn--primary" type="button">Upload capture (.json)</button>
+          <div id="web-import-status" class="note" style="margin-top:8px"></div>
+        </div>
+
         <div class="note" style="margin-top:12px">
           Start the socket bridge, then paste the channel ID into Claude. The agent joins the same channel and every
           edit it makes is mirrored back into the activity feed.
@@ -1778,6 +1789,9 @@
               JSON.stringify({
                 type: "join",
                 channel: channelName.trim(),
+                // Lets the relay report which channel holds the Figma plugin,
+                // so Claude can find it without being given the channel ID.
+                role: "figma",
               })
             );
           };
@@ -2719,6 +2733,96 @@
 
     // Initialize the plugin
     const plugin = new ClaudeMCPPlugin();
+
+    // ── Upload a Web-to-Figma capture ───────────────────────────────────────
+    // The importer is not part of this plugin. It is fetched from the relay and
+    // run through the plugin's existing execute_code command, so uploading
+    // needs no plugin code beyond this panel.
+    (function () {
+      var btn = document.getElementById("btn-web-import");
+      var input = document.getElementById("web-import-file");
+      var status = document.getElementById("web-import-status");
+      if (!btn || !input || !status) return;
+      var pendingId = null;
+
+      function relayPort() {
+        // `plugin` is the panel's ClaudeMCPPlugin instance, declared above.
+        var app = typeof plugin !== "undefined" ? plugin : null;
+        var port = app && app.state && app.state.serverPort;
+        return port || 3055;
+      }
+
+      btn.addEventListener("click", function () {
+        input.value = "";
+        input.click();
+      });
+
+      input.addEventListener("change", function () {
+        var file = input.files && input.files[0];
+        if (!file) return;
+        status.textContent = "Reading " + file.name + "…";
+        var capture;
+        file.text().then(function (text) {
+          try {
+            capture = JSON.parse(text);
+          } catch (e) {
+            throw new Error("That file is not JSON: " + (e && e.message ? e.message : String(e)));
+          }
+          if (!capture || capture.schema !== "web-to-figma/capture" || !Array.isArray(capture.nodes)) {
+            throw new Error("That is not a Web-to-Figma capture. Save one with the extension's Save capture button.");
+          }
+          return fetch("http://localhost:" + relayPort() + "/web-import-runtime.js").then(function (res) {
+            if (!res.ok) throw new Error("The relay did not serve the importer (HTTP " + res.status + "). Restart it with npm run socket.");
+            return res.text();
+          }, function () {
+            throw new Error("Could not reach the relay on port " + relayPort() + ". Start it with npm run socket, then try again.");
+          });
+        }).then(function (runtime) {
+          if (!runtime) return;
+          btn.disabled = true;
+          pendingId = "upload-" + Date.now();
+          status.textContent = "Building " + (capture.title || "the page") + " (" + capture.nodes.length + " elements)…";
+          parent.postMessage({ pluginMessage: {
+            type: "execute-command",
+            id: pendingId,
+            command: "execute_code",
+            params: {
+              code: runtime + "\nreturn JSON.stringify(await __w2fEntry(params));",
+              params: { op: "import", capture: capture, remap: true },
+            },
+          } }, "*");
+        }).catch(function (e) {
+          status.textContent = (e && e.message) ? e.message : String(e);
+        });
+      });
+
+      window.addEventListener("message", function (event) {
+        var msg = event.data && event.data.pluginMessage;
+        if (!msg || !pendingId || msg.id !== pendingId) return;
+        btn.disabled = false;
+        pendingId = null;
+        if (msg.type === "command-error") {
+          status.textContent = "Import failed: " + msg.error;
+          return;
+        }
+        if (msg.type !== "command-result") return;
+        var r;
+        try { r = JSON.parse(msg.result && msg.result.result); } catch (e) { status.textContent = "Import finished but its report could not be read."; return; }
+        var c = r.created || {};
+        var lines = ["Built " + r.rootName + ": " + (c.frames || 0) + " frames, " + (c.texts || 0) + " texts, " +
+          (c.autoLayouts || 0) + " Auto Layout, " + (c.grids || 0) + " Grid."];
+        if (r.remap) {
+          lines.push("Bound to your system: " + r.remap.colors.bound + " colours, " + r.remap.textStyles.applied +
+            " text styles, " + r.remap.spacing.bound + " spacing, " + r.remap.radius.bound + " radii.");
+        }
+        if (r.imagesPlaced) lines.push(r.imagesPlaced + " images placed.");
+        if (r.images && r.images.length) lines.push(r.images.length + " images were not in the file — use Send to Figma in the extension, or ask Claude.");
+        if (r.fonts && r.fonts.substituted && r.fonts.substituted.length) {
+          lines.push("Fonts not installed: " + r.fonts.substituted.map(function (f) { return f.from; }).join(", "));
+        }
+        status.textContent = lines.join(" ");
+      });
+    })();
   </script>
 </body>
 

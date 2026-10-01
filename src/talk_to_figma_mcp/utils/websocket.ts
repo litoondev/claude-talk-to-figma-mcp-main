@@ -388,6 +388,9 @@ export async function joinChannel(channelName: string): Promise<void> {
     // The relay acknowledges "join" instantly; use a short timeout so we
     // don't hang for minutes if the relay itself is unreachable.
     await sendCommandToFigma("join", { channel: channelName }, 5000);
+    // A different channel is a different plugin, usually in a different file.
+    // Cached reads from the old one would answer for the new one.
+    if (currentChannel !== channelName) invalidateCache("joined a different channel");
     currentChannel = channelName;
     // The relay accepted the join, so this is the session's channel from here
     // on. Recorded before the plugin check below, because a plugin that is not
@@ -479,7 +482,7 @@ async function sendCommandRaw(
   command: FigmaCommand,
   params: unknown = {},
   timeoutMs: number = 300000,
-  target: "figma" | "webflow" = "figma"
+  target: "figma" | "webflow" | "browser" = "figma"
 ): Promise<unknown> {
   // Wait for the relay leg to come up rather than rejecting the first command
   // of a session outright — see waitForConnection for why that mattered.
@@ -523,7 +526,7 @@ async function sendCommandRaw(
         command,
         // Which editor the relay should deliver this to. Omitted for Figma so
         // older relays, which know nothing about targets, are unaffected.
-        ...(target === "webflow" ? { target } : {}),
+        ...(target !== "figma" ? { target } : {}),
         params: {
           ...effectiveParams,
           commandId: id, // Include the command ID in params
@@ -605,4 +608,19 @@ export function sendCommandToWebflow(
   timeoutMs: number = 300000
 ): Promise<unknown> {
   return sendCommandRaw(command as FigmaCommand, params, timeoutMs, "webflow");
+}
+
+/**
+ * Send a command to the Web-to-Figma browser extension over the same relay.
+ *
+ * Same route as the Webflow path: shared channel, queue and reconnection, only
+ * the delivery target differs. The browser reads live pages and owns no Figma
+ * document, so the Figma read cache is never consulted or invalidated.
+ */
+export function sendCommandToBrowser(
+  command: string,
+  params: unknown = {},
+  timeoutMs: number = 300000
+): Promise<unknown> {
+  return sendCommandRaw(command as FigmaCommand, params, timeoutMs, "browser");
 }

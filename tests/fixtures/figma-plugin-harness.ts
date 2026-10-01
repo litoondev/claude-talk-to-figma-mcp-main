@@ -956,7 +956,10 @@ export function createMockFigma(options: MockFigmaOptions = {}) {
         ? placeOnPage(makeNode({ name: "Frame", fills: [{ type: "SOLID", color: { r: 1, g: 1, b: 1 } }], clipsContent: true }))
         : makeNode({ name: "Frame" }),
     currentPage: options.layoutEngine ? makePage() : { selection: [], children: [] },
-    root: { children: [] },
+    // The real API has both; get_document_info reports them (L9: a mock missing
+    // part of the API makes a working path look broken).
+    root: { name: "Untitled", children: [] as any[] },
+    editorType: "figma" as string,
     loadAllPagesAsync: async () => undefined,
     clientStorage: {
       // Typed loosely on purpose: real clientStorage returns whatever was

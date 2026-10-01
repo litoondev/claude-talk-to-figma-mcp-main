@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Capture fixture</title>
+<style>
+  :root { --brand: #f97316; --ink: oklch(0.2 0.02 260); --space-m: 24px; }
+  @keyframes rise { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: none; } }
+  body { margin: 0; font-family: "Helvetica Neue", Arial, sans-serif; color: var(--ink); }
+  .nav { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 12px var(--space-m); position: sticky; top: 0; background: #fff; }
+  .btn { background: var(--brand); color: #fff; border-radius: 8px; padding: 10px 20px; transition: background-color .2s ease; }
+  .btn:hover { background: #ea580c; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; padding: 40px 24px; }
+  .card { box-shadow: 0 4px 12px rgba(3,7,18,.12); border-radius: 12px; padding: 24px; background: linear-gradient(180deg, #ffffff, #f3f4f6); }
+  .card::before { content: "★"; color: var(--brand); }
+  h1 { font-size: 48px; line-height: 56px; letter-spacing: -0.02em; font-weight: 700; animation: rise 1s ease both; }
+  .reveal { opacity: 0; transition: opacity .3s; }
+  .reveal.is-inview { opacity: 1; }
+  .spacer { height: 1600px; }
+  @media (max-width: 768px) { .grid { grid-template-columns: 1fr; } }
+  @media (min-width: 1440px) { .nav { padding: 12px 100px; } }
+</style>
+</head>
+<body>
+  <nav class="nav"><span>Logo</span><a class="btn" href="/start">Get started</a></nav>
+  <h1>Hello <strong>world</strong> today</h1>
+  <section class="grid" id="features">
+    <div class="card"><h3>One</h3><p>First card</p></div>
+    <div class="card"><h3>Two</h3><p>Second card</p></div>
+    <div class="card"><h3>Three</h3><p>Third card</p></div>
+  </section>
+  <form><input type="password" value="hunter2"><input type="text" placeholder="Email" value="a@b.co"><input type="hidden" name="csrf" value="secret"></form>
+  <svg width="24" height="24" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="#f97316"/></svg>
+  <div class="spacer"></div>
+  <p class="reveal" data-aos="fade-up">Revealed on scroll</p>
+  <script>
+    new IntersectionObserver(function (es) { es.forEach(function (e) { if (e.isIntersecting) e.target.classList.add("is-inview"); }); })
+      .observe(document.querySelector(".reveal"));
+  </script>
+  <script src="../../../browser_extension/extractor.js"></script>
+</body>
+</html>

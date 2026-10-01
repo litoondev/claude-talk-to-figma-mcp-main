@@ -11,6 +11,7 @@ import {
   type ActivityEvent,
 } from "./activity";
 import { DASHBOARD_HTML } from "./activity-dashboard";
+import { WEB_IMPORT_RUNTIME } from "./talk_to_figma_mcp/web-import/runtime.generated";
 
 // Enhanced logging system
 const logger = {
@@ -120,18 +121,36 @@ const agentClients = new Set<ServerWebSocket<any>>();
  */
 const webflowClients = new Set<ServerWebSocket<any>>();
 
-/** Which editor a queued command is addressed to. */
-type CommandTarget = "figma" | "webflow";
+/**
+ * Web-to-Figma browser extension clients.
+ *
+ * A third client of the same shape as the Webflow extension: it answers
+ * commands and never sends them, so it too must declare itself — with
+ * `role: "browser"` — and receives only commands carrying `target: "browser"`.
+ * It reads live web pages; it never edits anything, but it shares the channel
+ * queue so a capture and the Figma build that follows it cannot interleave.
+ */
+const browserClients = new Set<ServerWebSocket<any>>();
+
+/** Which client a queued command is addressed to. */
+type CommandTarget = "figma" | "webflow" | "browser";
 
 /** Read the target off a relay message, defaulting to Figma for older clients. */
 function commandTarget(data: any): CommandTarget {
-  return data?.message?.target === "webflow" ? "webflow" : "figma";
+  const target = data?.message?.target;
+  return target === "webflow" || target === "browser" ? target : "figma";
 }
 
 const TARGET_LABEL: Record<CommandTarget, string> = {
   figma: "Figma plugin",
   webflow: "Webflow Designer extension",
+  browser: "Web-to-Figma browser extension",
 };
+
+/** Clients that declared a non-Figma role — never sent Figma's bootstrap broadcast. */
+function isDeclaredNonFigmaClient(ws: ServerWebSocket<any>): boolean {
+  return webflowClients.has(ws) || browserClients.has(ws);
+}
 
 // Session deduplication: MCP agents send a stable sessionId in join messages.
 // When the same session reconnects (e.g., after context compaction), the old
@@ -193,14 +212,24 @@ function getWebflowClient(channelName: string): ServerWebSocket<any> | null {
   return null;
 }
 
+/** The browser extension in a channel, if one has joined. */
+function getBrowserClient(channelName: string): ServerWebSocket<any> | null {
+  const clients = channels.get(channelName);
+  if (!clients) return null;
+  for (const client of clients) {
+    if (browserClients.has(client)) return client;
+  }
+  return null;
+}
+
 /** The client a command should be delivered to, by target. */
 function getTargetClient(
   channelName: string,
   target: CommandTarget
 ): ServerWebSocket<any> | null {
-  return target === "webflow"
-    ? getWebflowClient(channelName)
-    : getPluginClient(channelName);
+  if (target === "webflow") return getWebflowClient(channelName);
+  if (target === "browser") return getBrowserClient(channelName);
+  return getPluginClient(channelName);
 }
 
 function validateCommand(data: any, channelName: string): string | null {
@@ -236,10 +265,17 @@ function classifyClientByRole(ws: ServerWebSocket<any>, role: unknown): void {
   if (role === "webflow") {
     webflowClients.add(ws);
     pluginClients.delete(ws);
+    browserClients.delete(ws);
     logger.info(`Client ${ws.data?.clientId} declared role: Webflow Designer extension`);
+  } else if (role === "browser") {
+    browserClients.add(ws);
+    pluginClients.delete(ws);
+    webflowClients.delete(ws);
+    logger.info(`Client ${ws.data?.clientId} declared role: Web-to-Figma browser extension`);
   } else if (role === "figma" || role === "plugin") {
     pluginClients.add(ws);
     webflowClients.delete(ws);
+    browserClients.delete(ws);
     logger.info(`Client ${ws.data?.clientId} declared role: Figma plugin`);
   } else if (role === "agent") {
     agentClients.add(ws);
@@ -249,7 +285,7 @@ function classifyClientByRole(ws: ServerWebSocket<any>, role: unknown): void {
 
 function classifyClient(ws: ServerWebSocket<any>, data: any): void {
   // Already classified
-  if (pluginClients.has(ws) || agentClients.has(ws) || webflowClients.has(ws)) return;
+  if (pluginClients.has(ws) || agentClients.has(ws) || isDeclaredNonFigmaClient(ws)) return;
 
   // Plugin sends responses (result/error fields) — it never sends commands
   if (data.message?.result !== undefined || data.message?.error !== undefined) {
@@ -374,11 +410,12 @@ function processQueue(channelName: string): void {
     // Only ever for Figma: the plugin is classified by its first response, so it
     // needs a command before it can be recognised. The Webflow extension declares
     // its role on join and needs no bootstrap, and broadcasting to it blindly is
-    // exactly the misrouting Webflow's own bridge suffers from.
+    // exactly the misrouting Webflow's own bridge suffers from. The browser
+    // extension declares its role the same way and is excluded for the same reason.
     const clients = channels.get(channelName);
     if (clients) {
       for (const client of clients) {
-        if (!agentClients.has(client) && !webflowClients.has(client) && client.readyState === WebSocket.OPEN) {
+        if (!agentClients.has(client) && !isDeclaredNonFigmaClient(client) && client.readyState === WebSocket.OPEN) {
           try {
             client.send(payload);
             stats.messagesSent++;
@@ -439,6 +476,7 @@ function processQueue(channelName: string): void {
   });
 
   // Start per-command timeout (safety net if plugin hangs)
+  const targetLabel = TARGET_LABEL[target];
   queueState.currentCommandTimeout = setTimeout(() => {
     // Guard: verify this timeout is still for the current in-flight command.
     // If handleResponseFromPlugin already processed this request, currentRequestId
@@ -452,7 +490,7 @@ function processQueue(channelName: string): void {
       try {
         entry.ws.send(JSON.stringify({
           type: "broadcast",
-          message: { id: item.requestId, error: "Command timed out waiting for Figma plugin response" },
+          message: { id: item.requestId, error: `Command timed out waiting for the ${targetLabel} to respond` },
           sender: "User",
           channel: channelName,
         }));
@@ -471,7 +509,7 @@ function processQueue(channelName: string): void {
       command: meta?.command ?? item.data.message?.command,
       requestId: item.requestId,
       durationMs: meta ? Date.now() - meta.startedAt : undefined,
-      message: "Timed out waiting for the Figma plugin to respond",
+      message: `Timed out waiting for the ${targetLabel} to respond`,
     });
 
     // Unblock queue
@@ -595,8 +633,13 @@ function handleResponseFromPlugin(data: any, channelName: string): void {
 // ─── Cleanup ───────────────────────────────────────────────────────────────
 
 function cleanupClient(ws: ServerWebSocket<any>, clientChannels: string[] = []): void {
-  // Either editor leaving strands whatever it was working on, so both flush.
-  const isPlugin = pluginClients.has(ws) || webflowClients.has(ws);
+  // Any command-answering client leaving strands whatever it was working on, so all flush.
+  const isPlugin = pluginClients.has(ws) || isDeclaredNonFigmaClient(ws);
+  const leavingLabel = webflowClients.has(ws)
+    ? TARGET_LABEL.webflow
+    : browserClients.has(ws)
+      ? TARGET_LABEL.browser
+      : TARGET_LABEL.figma;
 
   // If the disconnecting client is an editor, flush the in-flight command
   // Scoped to channels it was actually in (prevents aborting other channels)
@@ -625,7 +668,7 @@ function cleanupClient(ws: ServerWebSocket<any>, clientChannels: string[] = []):
           try {
             entry.ws.send(JSON.stringify({
               type: "broadcast",
-              message: { id: requestId, error: "Figma plugin disconnected while processing command" },
+              message: { id: requestId, error: `${leavingLabel} disconnected while processing command` },
               sender: "User",
               channel: channelName,
             }));
@@ -675,6 +718,7 @@ function cleanupClient(ws: ServerWebSocket<any>, clientChannels: string[] = []):
   agentClients.delete(ws);
   pluginClients.delete(ws);
   webflowClients.delete(ws);
+  browserClients.delete(ws);
 }
 
 // Periodic stale request cleanup (every 5 minutes)
@@ -771,12 +815,40 @@ const server = Bun.serve({
           agentCount: agentClients.size,
           pluginCount: pluginClients.size,
           webflowCount: webflowClients.size,
+          browserCount: browserClients.size,
         },
+        // Who is on each channel, so an agent can find the Figma plugin (and
+        // the browser extension) without being told the channel ID. "other"
+        // counts clients that have not declared a role yet — an older plugin.
+        channelClients: Array.from(channels.entries()).map(([name, clients]) => {
+          const counts = { channel: name, clients: clients.size, figma: 0, browser: 0, webflow: 0, agents: 0, other: 0 };
+          for (const c of clients) {
+            if (pluginClients.has(c)) counts.figma++;
+            else if (browserClients.has(c)) counts.browser++;
+            else if (webflowClients.has(c)) counts.webflow++;
+            else if (agentClients.has(c)) counts.agents++;
+            else counts.other++;
+          }
+          return counts;
+        }),
       }), {
         headers: {
           "Content-Type": "application/json",
           "Access-Control-Allow-Origin": "*"
         }
+      });
+    }
+
+    // ── Web-to-Figma import runtime ─────────────────────────────────────
+    // The plugin panel's Upload button fetches this and runs it through the
+    // plugin's execute_code, so the import never needs code inside the plugin.
+    if (url.pathname === "/web-import-runtime.js") {
+      return new Response(WEB_IMPORT_RUNTIME, {
+        headers: {
+          "Content-Type": "text/javascript; charset=utf-8",
+          "Cache-Control": "no-store",
+          "Access-Control-Allow-Origin": "*",
+        },
       });
     }
 
@@ -1210,6 +1282,7 @@ const server = Bun.serve({
       // Remove client from their channel
       const closingClientWasPlugin = pluginClients.has(ws);
       const closingClientWasWebflow = webflowClients.has(ws);
+      const closingClientWasBrowser = browserClients.has(ws);
 
       channels.forEach((clients, channelName) => {
         if (clients.delete(ws)) {
@@ -1222,7 +1295,9 @@ const server = Bun.serve({
               ? "The Figma plugin disconnected — changes cannot be applied until it reconnects"
               : closingClientWasWebflow
                 ? "The Webflow Designer extension disconnected — changes cannot be applied until it reconnects"
-                : `A client left the channel (${clients.size} still connected)`,
+                : closingClientWasBrowser
+                  ? "The Web-to-Figma browser extension disconnected — pages cannot be captured until it reconnects"
+                  : `A client left the channel (${clients.size} still connected)`,
           });
 
           // Notify other clients in same channel

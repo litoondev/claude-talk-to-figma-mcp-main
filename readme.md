@@ -480,9 +480,29 @@ Turn a web page into a Figma design that **looks exactly like the page**: every 
 ### Good to know
 
 - **Images** are downloaded by the plugin's server (`place_html_image`) and placed at their exact size, from websites or from files next to a local `.html` page. **Icons** (inline SVG) are placed as vectors, including icons that come from an icon sprite. An image that can't be fetched keeps its exact-size frame, named `Image-Missing-…`, so the layout doesn't shift.
-- **It reads the page's HTML and CSS, not a live browser.** Pages that build their content with JavaScript after loading may come in incomplete. For those, open the page in Chrome → **File → Save Page As… → Webpage, Complete**, and convert the saved `.html` file.
-- **Pages behind a login** can't be read. Save them as above.
+- **It reads the page's HTML and CSS, not a live browser.** Pages that build their content with JavaScript after loading may come in incomplete. For those, use the Chrome extension below, or open the page in Chrome → **File → Save Page As… → Webpage, Complete** and convert the saved `.html` file.
+- **Pages behind a login** can't be read from a URL. Open them in Chrome and use the extension, or save them as above.
 - **Fonts** must be installed on your computer for Figma to use them.
+
+### Capture a live page with the Chrome extension
+
+The **Web-to-Figma** Chrome extension reads the page as your browser actually
+shows it. That includes content built by JavaScript, pages behind your login, the
+real computed colours and type, hover rules, animations, and what appears as you
+scroll.
+
+1. `chrome://extensions` → **Developer mode** → **Load unpacked** → pick the
+   `browser_extension` folder of this project.
+2. Click the extension button, paste the same **channel ID** the Figma plugin
+   shows, and press **Connect**.
+3. Open the page in Chrome and ask Claude, for example:
+   *"Capture this page and rebuild it in Figma using my variables."*
+   To import just one part, press **Pick element** and click it first.
+
+Claude captures the page with `browser_capture`, matches its colours and type to
+your design system with `match_design_tokens`, and asks before creating anything
+your system doesn't have. The details are in
+[`browser_extension/README.md`](browser_extension/README.md).
 
 ---
 
@@ -1036,9 +1056,28 @@ cd ~/Documents/claude-talk-to-figma-mcp-main && npm run socket
 ### জেনে রাখুন
 
 - **ছবি** প্লাগইনের সার্ভার নিজেই ডাউনলোড করে (`place_html_image`) আর হুবহু মাপে বসায়, ওয়েবসাইট থেকে হোক বা লোকাল `.html` পেজের পাশের ফাইল থেকে। **আইকন** (inline SVG) ভেক্টর হিসেবে বসে, আইকন স্প্রাইট থেকে আসা আইকনও। কোনো ছবি আনা না গেলে তার হুবহু মাপের ফ্রেম `Image-Missing-…` নামে থেকে যায়, তাই লেআউট সরে যায় না।
-- **এটা পেজের HTML ও CSS পড়ে, ব্রাউজারে চালিয়ে দেখে না।** যে পেজ লোড হওয়ার পর JavaScript দিয়ে কনটেন্ট বানায়, সেটা অসম্পূর্ণ আসতে পারে। তখন Chrome-এ পেজ খুলে **File → Save Page As… → Webpage, Complete** দিয়ে সেভ করুন, তারপর সেই `.html` ফাইল দিন।
-- **লগইন লাগে এমন পেজ** পড়া যায় না। উপরের মতো সেভ করে দিন।
+- **এটা পেজের HTML ও CSS পড়ে, ব্রাউজারে চালিয়ে দেখে না।** যে পেজ লোড হওয়ার পর JavaScript দিয়ে কনটেন্ট বানায়, সেটা অসম্পূর্ণ আসতে পারে। তখন নিচের Chrome এক্সটেনশন ব্যবহার করুন, অথবা Chrome-এ পেজ খুলে **File → Save Page As… → Webpage, Complete** দিয়ে সেভ করে সেই `.html` ফাইল দিন।
+- **লগইন লাগে এমন পেজ** URL থেকে পড়া যায় না। Chrome-এ খুলে এক্সটেনশন দিয়ে নিন, অথবা উপরের মতো সেভ করে দিন।
 - **ফন্ট** আপনার কম্পিউটারে ইনস্টল থাকতে হবে, তবেই Figma ব্যবহার করতে পারবে।
+
+### Chrome এক্সটেনশন দিয়ে লাইভ পেজ ক্যাপচার
+
+**Web-to-Figma** Chrome এক্সটেনশন পেজটা ঠিক যেভাবে আপনার ব্রাউজারে দেখা যায়
+সেভাবেই পড়ে। JavaScript দিয়ে বানানো কনটেন্ট, আপনার লগইন করা পেজ, আসল রং ও
+টাইপোগ্রাফি, hover নিয়ম, অ্যানিমেশন আর স্ক্রল করলে যা দেখা দেয়, সবই।
+
+1. `chrome://extensions` → **Developer mode** → **Load unpacked** → এই প্রজেক্টের
+   `browser_extension` ফোল্ডার বেছে নিন।
+2. এক্সটেনশনের বাটনে ক্লিক করে Figma প্লাগইনে দেখানো একই **channel ID** বসান,
+   তারপর **Connect** চাপুন।
+3. Chrome-এ পেজটা খুলে Claude-কে বলুন, যেমন:
+   *"এই পেজটা ক্যাপচার করে আমার variables দিয়ে Figma-তে বানাও।"*
+   শুধু একটা অংশ চাইলে আগে **Pick element** চেপে সেটায় ক্লিক করুন।
+
+Claude `browser_capture` দিয়ে পেজ ক্যাপচার করে, `match_design_tokens` দিয়ে রং ও
+টাইপ আপনার ডিজাইন সিস্টেমের সাথে মেলায়, আর সিস্টেমে নেই এমন কিছু বানানোর আগে
+জিজ্ঞেস করে নেয়। বিস্তারিত আছে
+[`browser_extension/README.md`](browser_extension/README.md)-এ।
 
 ---
 

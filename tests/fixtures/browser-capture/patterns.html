@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Pattern fixture</title>
+<style>
+  :root { --blue: #009ad7; }
+  body { margin: 0; }
+  /* Issue 1: dot grids drawn by ::before and ::after */
+  .welc { position: relative; width: 400px; height: 300px; }
+  .welc::before { content: ""; position: absolute; top: 10px; left: 20px; width: 132px; height: 132px;
+    background-image: radial-gradient(circle, rgb(239, 70, 75) 3.4px, rgba(0, 0, 0, 0) 4px); background-size: 26px 26px; }
+  .welc::after { content: ""; position: absolute; right: 0; bottom: 0; width: 60px; height: 60px;
+    background: radial-gradient(#4dc8ed 15%, transparent 16%) 0 0 / 20px 20px; }
+  /* Issue 2: an SVG dot field drawn with <pattern> and a CSS variable fill */
+  .hero { position: relative; width: 662px; height: 847px; }
+  .hero svg { width: 100%; height: 100%; display: block; }
+</style>
+</head>
+<body>
+  <section class="welc"></section>
+  <div class="hero">
+    <svg class="dotfield hero-dots" viewBox="0 0 1440 900" preserveAspectRatio="xMidYMid slice" style="opacity:0.22">
+      <defs><pattern id="dp3022" width="30" height="30" patternUnits="userSpaceOnUse"><circle cx="15" cy="15" r="2.2" fill="var(--blue)"></circle></pattern></defs>
+      <rect width="100%" height="100%" fill="url(#dp3022)"></rect>
+    </svg>
+  </div>
+  <script src="../../../browser_extension/extractor.js"></script>
+</body>
+</html>
